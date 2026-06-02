@@ -1,0 +1,28 @@
+; Module definition file for version.dll proxy.
+; Exports all 17 VERSION.dll functions so OutfitStudio.exe can bind its
+; static imports to our proxy. Each name maps to the wrapper in
+; version_proxy.cpp, which forwards to the real System32\version.dll.
+;
+; Without these exports the DLL is useless: the loader cannot resolve
+; GetFileVersionInfoSizeW / GetFileVersionInfoW / VerQueryValueW and our
+; DllMain never runs.
+
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA
+    GetFileVersionInfoW
+    GetFileVersionInfoExA
+    GetFileVersionInfoExW
+    GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW
+    GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW
+    GetFileVersionInfoByHandle
+    VerFindFileA
+    VerFindFileW
+    VerInstallFileA
+    VerInstallFileW
+    VerLanguageNameA
+    VerLanguageNameW
+    VerQueryValueA
+    VerQueryValueW

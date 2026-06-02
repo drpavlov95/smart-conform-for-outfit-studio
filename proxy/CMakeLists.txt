@@ -11,6 +11,7 @@ add_library(drape_proxy SHARED
     dllmain.cpp
     version_proxy.cpp
     dialog.cpp
+    version.def
 )
 
 set_target_properties(drape_proxy PROPERTIES
