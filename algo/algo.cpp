@@ -92,6 +92,16 @@ static std::string baseName(std::string s) {
     return s;
 }
 
+// <Data> text is "File.osd" or "File.osd\EntryName" (the entry equals the
+// dataName). Extract just the .osd filename (cut at ".osd", strip any path).
+static std::string osdFileFromText(std::string text) {
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    auto pos = lower.find(".osd");
+    if (pos != std::string::npos) text = text.substr(0, pos + 4);
+    return baseName(text);
+}
+
 static std::vector<SetInfo> parseOspSets(const char* ospPath) {
     std::vector<SetInfo> sets;
     std::ifstream f(ospPath);
@@ -121,6 +131,11 @@ static std::vector<SetInfo> parseOspSets(const char* ospPath) {
 
         if (line.find("<Data ") != std::string::npos ||
             line.find("<Data\t") != std::string::npos) {
+            // Only LOCAL data is the outfit's own conform output that we filter.
+            // Non-local entries are shared reference-body source data — never touch.
+            if (line.find("local=\"true\"") == std::string::npos)
+                continue;
+
             DataRef ref;
             ref.shape    = xmlAttr(line, "target");
             ref.dataName = xmlAttr(line, "name");
@@ -130,7 +145,7 @@ static std::vector<SetInfo> parseOspSets(const char* ospPath) {
             if (gt != std::string::npos) {
                 auto lt = line.find('<', gt + 1);
                 if (lt != std::string::npos)
-                    ref.osdFile = baseName(line.substr(gt + 1, lt - gt - 1));
+                    ref.osdFile = osdFileFromText(line.substr(gt + 1, lt - gt - 1));
             }
             if (!ref.shape.empty() && !ref.dataName.empty() && !ref.osdFile.empty())
                 cur.data.push_back(std::move(ref));
