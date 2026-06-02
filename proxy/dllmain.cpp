@@ -1,0 +1,106 @@
+#include <windows.h>
+#include <string>
+
+// Unique ID for our injected menu item (arbitrary, avoids wx ID space)
+static constexpr UINT DRAPE_CMD_ID = 0xD4A9u;
+
+static WNDPROC g_oldProc = nullptr;
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+// Returns the directory containing the calling exe (with trailing backslash)
+static std::string ExeDir() {
+    char buf[MAX_PATH];
+    GetModuleFileNameA(NULL, buf, MAX_PATH);
+    std::string s(buf);
+    auto p = s.rfind('\\');
+    return (p != std::string::npos) ? s.substr(0, p + 1) : s;
+}
+
+// Find the OutfitStudio main window (title ends with "Outfit Studio")
+static HWND FindOsWindow() {
+    struct Ctx { HWND hw; };
+    Ctx ctx{};
+    EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
+        char t[256]; GetWindowTextA(hw, t, sizeof(t));
+        std::string title(t);
+        if (title == "Outfit Studio" ||
+            (title.size() > 16 && title.substr(title.size() - 16) == "- Outfit Studio")) {
+            reinterpret_cast<Ctx*>(lp)->hw = hw;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.hw;
+}
+
+// ── WndProc subclass: intercept our menu command ──────────────────────
+
+static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
+        std::string drapeExe = ExeDir() + "Drape.exe";
+        ShellExecuteA(hw, "open", drapeExe.c_str(), nullptr,
+                      ExeDir().c_str(), SW_SHOW);
+        return 0;
+    }
+    return CallWindowProc(g_oldProc, hw, msg, wp, lp);
+}
+
+// ── Injection thread ─────────────────────────────────────────────────
+
+static DWORD WINAPI InjectThread(LPVOID) {
+    // Poll until OutfitStudio window appears (up to 30 s)
+    HWND hw = nullptr;
+    for (int i = 0; i < 300 && !hw; ++i) {
+        Sleep(100);
+        hw = FindOsWindow();
+    }
+    if (!hw) return 1;
+
+    HMENU bar = GetMenu(hw);
+    if (!bar) return 1;
+
+    // Find "Slider" menu by label
+    HMENU sliderMenu = nullptr;
+    int nTop = GetMenuItemCount(bar);
+    for (int i = 0; i < nTop; ++i) {
+        char lbl[64]; GetMenuStringA(bar, i, lbl, sizeof(lbl), MF_BYPOSITION);
+        if (std::string(lbl) == "Slider") {
+            sliderMenu = GetSubMenu(bar, i);
+            break;
+        }
+    }
+    if (!sliderMenu) return 1;
+
+    // Find "Conform All" position
+    int nItems = GetMenuItemCount(sliderMenu);
+    int insertPos = 1; // fallback
+    for (int i = 0; i < nItems; ++i) {
+        char lbl[128]; GetMenuStringA(sliderMenu, i, lbl, sizeof(lbl), MF_BYPOSITION);
+        if (std::string(lbl).find("Conform All") != std::string::npos) {
+            insertPos = i + 1;
+            break;
+        }
+    }
+
+    // Insert separator + "Drape Conform..." right after Conform All
+    InsertMenuA(sliderMenu, insertPos,     MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    InsertMenuA(sliderMenu, insertPos + 1, MF_BYPOSITION | MF_STRING,
+                DRAPE_CMD_ID, "Drape Conform...");
+    DrawMenuBar(hw);
+
+    // Subclass the window to catch WM_COMMAND for our item
+    g_oldProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrA(hw, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DrapeWndProc)));
+    return 0;
+}
+
+// ── DllMain ──────────────────────────────────────────────────────────
+
+BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hMod);
+        CreateThread(nullptr, 0, InjectThread, nullptr, 0, nullptr);
+    }
+    return TRUE;
+}

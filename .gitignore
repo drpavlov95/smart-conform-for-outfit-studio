@@ -1,0 +1,5 @@
+build/
+dist/*.dll
+dist/*.exe
+*.user
+.vs/
