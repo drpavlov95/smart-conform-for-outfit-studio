@@ -134,7 +134,7 @@ static bool TryInjectMenu(HWND hw) {
 
     BOOL r1 = InsertMenuA(sliderMenu, insertPos, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
     BOOL r2 = InsertMenuA(sliderMenu, insertPos + 1, MF_BYPOSITION | MF_STRING,
-                          DRAPE_CMD_ID, "Drape Conform...");
+                          DRAPE_CMD_ID, "Smart Conform...");
     DbgLog("  TryInject: InsertMenu sep=%d item=%d", (int)r1, (int)r2);
     if (!r2) return false;
 

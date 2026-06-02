@@ -4,6 +4,7 @@
 #include <array>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cstdarg>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -145,11 +146,41 @@ static std::vector<SetInfo> ParseOspSets(const std::string& ospPath) {
     return sets;
 }
 
+// ── Debug log (shared file with the proxy injector) ───────────────────
+
+static void DbgLog(const char* fmt, ...) {
+    char msg[1024];
+    va_list ap; va_start(ap, fmt);
+    _vsnprintf_s(msg, sizeof(msg), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    SYSTEMTIME st; GetLocalTime(&st);
+    char line[1200];
+    int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
+        "[%02d:%02d:%02d.%03d] %s\r\n",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    char path[MAX_PATH];
+    DWORD len = GetTempPathA(MAX_PATH, path);
+    if (!len || len > MAX_PATH - 20) return;
+    strcat_s(path, MAX_PATH, "drape_debug.log");
+    HANDLE h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, nullptr, FILE_END);
+    DWORD w; WriteFile(h, line, (DWORD)n, &w, nullptr);
+    CloseHandle(h);
+}
+
 // ── Window helpers ────────────────────────────────────────────────────
 
+static std::string toLower(std::string s) {
+    for (auto& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
 static std::string ProjectFromTitle(HWND osHwnd) {
-    char buf[512]; GetWindowTextA(osHwnd, buf, sizeof(buf));
+    char buf[512] = {}; GetWindowTextA(osHwnd, buf, sizeof(buf));
     std::string t(buf);
+    DbgLog("dialog: OS window title = '%s'", t.c_str());
     const std::string suffix = " - Outfit Studio";
     auto p = t.rfind(suffix);
     if (p == std::string::npos) return "";
@@ -158,17 +189,38 @@ static std::string ProjectFromTitle(HWND osHwnd) {
     return name;
 }
 
+// Resolve the open project's .osp by: (1) SliderSet name attribute (exact),
+// (2) .osp filename stem (exact), (3) partial contains — all case-insensitive.
 static std::string FindOsp(const std::string& bsDir, const std::string& proj) {
     fs::path ssDir = fs::path(bsDir) / "SliderSets";
-    if (!fs::is_directory(ssDir)) return "";
-    for (auto& e : fs::directory_iterator(ssDir)) {
-        if (e.path().extension() != ".osp") continue;
-        std::ifstream f(e.path()); std::string line;
-        while (std::getline(f, line))
-            if (line.find("name=\"" + proj + "\"") != std::string::npos)
-                return e.path().string();
+    if (!fs::is_directory(ssDir)) {
+        DbgLog("dialog: SliderSets dir not found at '%s'", ssDir.string().c_str());
+        return "";
     }
-    return "";
+    std::string projL = toLower(proj);
+    std::string fallback;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(ssDir, ec)) {
+        if (e.path().extension() != ".osp") continue;
+        if (toLower(e.path().stem().string()) == projL)
+            return e.path().string();
+        std::ifstream f(e.path()); std::string line;
+        while (std::getline(f, line)) {
+            auto p = line.find("<SliderSet name=\"");
+            if (p == std::string::npos) continue;
+            p += 17;
+            auto q = line.find('"', p);
+            if (q == std::string::npos) continue;
+            std::string setL = toLower(line.substr(p, q - p));
+            if (setL == projL) return e.path().string();
+            if (fallback.empty() && !projL.empty() &&
+                (setL.find(projL) != std::string::npos ||
+                 projL.find(setL) != std::string::npos))
+                fallback = e.path().string();
+        }
+    }
+    if (!fallback.empty()) DbgLog("dialog: osp partial-match fallback used");
+    return fallback;
 }
 
 static void PopulateSets(HWND lv, const std::vector<SetInfo>& sets) {
@@ -308,7 +360,7 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INITDIALOG: {
         d = reinterpret_cast<DlgData*>(lp);
         SetWindowLongPtrA(dlg, GWLP_USERDATA, lp);
-        SetWindowTextA(dlg, "Drape Conform");
+        SetWindowTextA(dlg, "Smart Conform");
 
         HWND lv = GetDlgItem(dlg, IDC_SHAPES_LIST);
         d->lvShapes  = lv;
@@ -334,17 +386,29 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         SetDlgItemTextA(dlg, IDC_D_RIGID_EDT, "20.0");
         SendMessageA(d->progress, PBM_SETRANGE32, 0, 100);
 
-        // Auto-load project from OutfitStudio window title
-        HWND osWnd = GetParent(dlg);
+        // Auto-load the project currently open in OutfitStudio (read from its
+        // window title). g_osHwnd is the frame we injected into — more reliable
+        // than GetParent(dlg).
+        HWND osWnd = g_osHwnd ? g_osHwnd : GetParent(dlg);
         std::string proj = ProjectFromTitle(osWnd);
+        DbgLog("dialog: parsed project name = '%s'  bsDir='%s'",
+               proj.c_str(), d->bsDir.c_str());
         if (!proj.empty()) {
             SetDlgItemTextA(dlg, IDC_OSP_EDIT, proj.c_str());
             std::string osp = FindOsp(d->bsDir, proj);
+            DbgLog("dialog: resolved .osp = '%s'", osp.c_str());
             if (!osp.empty()) {
                 d->ospPath = osp;
                 d->ospSets = ParseOspSets(osp);
+                DbgLog("dialog: parsed %d slider set(s)", (int)d->ospSets.size());
                 PopulateSets(lv, d->ospSets);
+            } else {
+                PostLog(dlg, "Could not auto-find the .osp for \"" + proj +
+                             "\". Use Browse to select it, then run.");
             }
+        } else {
+            PostLog(dlg, "No open project detected from the window title. "
+                         "Save your project in OutfitStudio first, then Browse.");
         }
         return TRUE;
     }
@@ -519,7 +583,7 @@ void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
          WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_POPUP);
     b.dw(0); b.w(nControls);
     b.w(0); b.w(0); b.w(420); b.w(328);
-    b.w(0); b.w(0); b.str(L"Drape Conform");
+    b.w(0); b.w(0); b.str(L"Smart Conform");
     b.w(9); b.str(L"Segoe UI");
 
     b.control(SS_LEFT, 4, 4, 40, 10, 0, L"STATIC", L"Project:");
