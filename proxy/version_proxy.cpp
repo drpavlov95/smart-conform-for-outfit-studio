@@ -1,3 +1,4 @@
+#define VER_H       // prevent winver.h from declaring VerFindFile* / VerInstallFile*
 #include <windows.h>
 
 // Load the real system version.dll once.

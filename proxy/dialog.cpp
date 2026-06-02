@@ -3,7 +3,9 @@
 #include "DiffData.h"
 #include "NifFile.hpp"
 
+#include <array>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -198,8 +200,8 @@ static std::vector<Vec3> shapeVerts(NifFile& nif, NiShape* s) {
     return out;
 }
 
-static std::vector<std::array<uint16_t,3>> shapeTris(NifFile& nif, NiShape* s) {
-    std::vector<Triangle> t; nif.GetTrianglesForShape(s, t);
+static std::vector<std::array<uint16_t,3>> shapeTris(NiShape* s) {
+    std::vector<Triangle> t; s->GetTriangles(t);
     std::vector<std::array<uint16_t,3>> out; out.reserve(t.size());
     for (auto& x : t) out.push_back({x.p1, x.p2, x.p3});
     return out;
@@ -250,7 +252,7 @@ static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
         for (auto* s : nif.GetShapes()) {
             if (!s || s->name.get() == refName) continue;
             auto sr = dc.detectShape(shapeVerts(nif, s), refVerts,
-                                     shapeTris(nif, s), s->name.get());
+                                     shapeTris(s), s->name.get());
             tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
         }
 
@@ -344,7 +346,7 @@ static void RunConform(HWND dlg, DlgData* d, float dTight, float dRigid) {
                 if (shapeName == refName) continue;  // skip the body copy itself
 
                 auto outVerts = shapeVerts(nif, shape);
-                auto outTris  = shapeTris(nif, shape);
+                auto outTris  = shapeTris(shape);
 
                 for (auto& [key, tdiffs] : osd.GetDataDiffs()) {
                     if (!tdiffs) continue;

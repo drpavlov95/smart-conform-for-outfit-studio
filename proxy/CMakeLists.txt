@@ -25,6 +25,7 @@ set(NIFLY_SRCS
 )
 
 set(BS_SRCS
+    "${BS_ROOT}/lib/TinyXML-2/tinyxml2.cpp"
     "${BS_ROOT}/src/components/DiffData.cpp"
     "${BS_ROOT}/src/components/SliderData.cpp"
     "${BS_ROOT}/src/utils/PlatformUtil.cpp"
@@ -58,6 +59,7 @@ target_include_directories(drape_proxy PRIVATE
     "${BS_ROOT}/src/components"
     "${BS_ROOT}/src/utils"
     "${BS_ROOT}/lib"
+    "${BS_ROOT}/lib/TinyXML-2"
     "${BS_ROOT}/lib/gli"
     "${BS_ROOT}/lib/gli/glm"
     "${CMAKE_CURRENT_SOURCE_DIR}/../cli"

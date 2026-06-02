@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <array>
 
 using namespace nifly;
 
@@ -161,7 +162,7 @@ std::vector<ShapeResult> DrapeConformer::detect(
         auto dists    = computeDistances(outVerts, refVerts);
 
         std::vector<Triangle> tris;
-        outfit.GetTrianglesForShape(shape, tris);
+        shape->GetTriangles(tris);
         auto adj     = buildAdjacency((int)outVerts.size(), tris);
         auto islands = rigidIslands(dists, adj);
 
@@ -214,7 +215,7 @@ std::vector<ShapeResult> DrapeConformer::conform(
         auto dists    = computeDistances(outVerts, refVerts);
 
         std::vector<Triangle> tris;
-        outfit.GetTrianglesForShape(shape, tris);
+        shape->GetTriangles(tris);
         auto adj     = buildAdjacency((int)outVerts.size(), tris);
         auto islands = rigidIslands(dists, adj);
 
