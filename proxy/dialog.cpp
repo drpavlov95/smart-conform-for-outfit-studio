@@ -218,45 +218,40 @@ static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
 
         std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
         if (!fs::exists(nifPath)) {
-            PostLog(dlg, "SKIP " + si.name + " (NIF not found)");
-            continue;
+            PostLog(dlg, "SKIP " + si.name + " (NIF not found)"); continue;
         }
 
         NifFile nif;
         if (nif.Load(nifPath) != 0) {
-            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)");
-            continue;
+            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)"); continue;
         }
 
-        // Find the embedded reference body shape
+        // Find embedded reference body shape by known name; fall back to largest shape
         NiShape* refShape = nullptr;
-        for (auto* s : nif.GetShapes()) {
+        for (auto* s : nif.GetShapes())
             if (s && s->name.get() == si.refBodyShape) { refShape = s; break; }
+        if (!refShape) {
+            int maxV = 0;
+            for (auto* s : nif.GetShapes()) {
+                if (!s) continue;
+                std::vector<Vector3> v; nif.GetVertsForShape(s, v);
+                if ((int)v.size() > maxV) { maxV = (int)v.size(); refShape = s; }
+            }
         }
         if (!refShape) {
-            PostLog(dlg, "SKIP " + si.name + " (ref body shape '" + si.refBodyShape + "' not found)");
-            continue;
+            PostLog(dlg, "SKIP " + si.name + " (no shapes in NIF)"); continue;
         }
 
+        std::string refName = refShape->name.get();
         auto refVerts = shapeVerts(nif, refShape);
-        PostLog(dlg, "Detecting: " + si.name + "  (ref: " + si.refBodyShape + ")");
+        PostLog(dlg, "Detecting: " + si.name + "  (ref: " + refName + ")");
 
         int tight = 0, loose = 0, rigid = 0;
-
         for (auto* s : nif.GetShapes()) {
-            if (!s || s->name.get() == si.refBodyShape) continue;
-            auto results = dc.detect(nifPath, nifPath);  // use same NIF, filter by shape later
-            // Re-do detect per-shape using pre-loaded ref verts
-            // (dc.detect loads the NIF internally; we use a lighter manual path here)
-            auto outVerts = shapeVerts(nif, s);
-            // Compute zones manually for efficiency
-            DrapeConformer dcLocal(opts);
-            (void)dcLocal;  // used only for filterDiffs via detect workaround below
-            // Use detect() result on whole NIF and accumulate
-            for (auto& sr : results) {
-                if (sr.name != s->name.get()) continue;
-                tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
-            }
+            if (!s || s->name.get() == refName) continue;
+            auto sr = dc.detectShape(shapeVerts(nif, s), refVerts,
+                                     shapeTris(nif, s), s->name.get());
+            tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
         }
 
         int total = tight + loose + rigid;
@@ -580,7 +575,7 @@ void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
     //  y=306:[Detect Zones] [Conform with Drape] [Close]
 
     DlgBuilder b;
-    const WORD nControls = 11;
+    const WORD nControls = 13;
 
     b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT |
          WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_POPUP);

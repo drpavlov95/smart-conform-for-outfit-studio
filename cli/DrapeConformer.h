@@ -58,6 +58,13 @@ public:
                                      const std::string& refBodyNif,
                                      const VertexDiffs& refBodyDiffs) const;
 
+    // Detect cloth zones for a single pre-loaded shape (avoids re-loading the NIF).
+    // outTris: triangle list as {p1, p2, p3} for rigid island flood-fill.
+    ShapeResult detectShape(const std::vector<Vec3>& outVerts,
+                            const std::vector<Vec3>& refVerts,
+                            const std::vector<std::array<uint16_t,3>>& outTris,
+                            const std::string& shapeName = "") const;
+
     // Filter already-computed outfit diffs (e.g. from vanilla Automorph) by cloth zone.
     // outVerts  : outfit mesh vertex positions (pre-loaded from NIF)
     // refVerts  : reference body vertex positions (pre-loaded from NIF)

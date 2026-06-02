@@ -330,3 +330,47 @@ VertexDiffs DrapeConformer::filterDiffs(
     }
     return out;
 }
+
+// ── detectShape ────────────────────────────────────────────────────────
+// Detect zones for pre-loaded vertex data — no NIF re-load per call.
+
+ShapeResult DrapeConformer::detectShape(
+    const std::vector<Vec3>& outVerts,
+    const std::vector<Vec3>& refVerts,
+    const std::vector<std::array<uint16_t,3>>& outTris,
+    const std::string& shapeName) const
+{
+    ShapeResult sr;
+    sr.name        = shapeName;
+    sr.vertexCount = (int)outVerts.size();
+    if (outVerts.empty() || refVerts.empty()) return sr;
+
+    auto dists = computeDistances(outVerts, refVerts);
+
+    std::vector<std::vector<int>> adj(outVerts.size());
+    for (const auto& t : outTris) {
+        adj[t[0]].push_back(t[1]); adj[t[0]].push_back(t[2]);
+        adj[t[1]].push_back(t[0]); adj[t[1]].push_back(t[2]);
+        adj[t[2]].push_back(t[0]); adj[t[2]].push_back(t[1]);
+    }
+
+    auto islands = rigidIslands(dists, adj);
+    std::vector<bool> isRigid(outVerts.size(), false);
+    for (auto& isl : islands)
+        for (uint16_t v : isl) isRigid[v] = true;
+
+    for (size_t i = 0; i < outVerts.size(); ++i) {
+        if (isRigid[i])                     ++sr.rigidVerts;
+        else if (dists[i] < m_opts.d_tight) ++sr.tightVerts;
+        else                                ++sr.looseVerts;
+    }
+
+    if (sr.rigidVerts > sr.tightVerts && sr.rigidVerts > sr.looseVerts)
+        sr.dominantZone = ShapeResult::Zone::Rigid;
+    else if (sr.looseVerts > sr.tightVerts)
+        sr.dominantZone = ShapeResult::Zone::Loose;
+    else
+        sr.dominantZone = ShapeResult::Zone::SkinTight;
+
+    return sr;
+}
