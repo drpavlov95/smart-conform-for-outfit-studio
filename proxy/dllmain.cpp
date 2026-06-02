@@ -1,3 +1,4 @@
+#include "dialog.h"
 #include <windows.h>
 #include <string>
 
@@ -38,9 +39,7 @@ static HWND FindOsWindow() {
 
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
-        std::string drapeExe = ExeDir() + "Drape.exe";
-        ShellExecuteA(hw, "open", drapeExe.c_str(), nullptr,
-                      ExeDir().c_str(), SW_SHOW);
+        ShowDrapeDialog(hw, ExeDir());
         return 0;
     }
     return CallWindowProc(g_oldProc, hw, msg, wp, lp);
