@@ -27,11 +27,13 @@ set(NIFLY_SRCS
 
 # ── BodySlide components needed for OSD I/O ───────────────────────────
 set(BS_SRCS
+    "${BS_ROOT}/lib/TinyXML-2/tinyxml2.cpp"
     "${BS_ROOT}/src/components/DiffData.cpp"
     "${BS_ROOT}/src/components/SliderData.cpp"
     "${BS_ROOT}/src/utils/PlatformUtil.cpp"
     "${BS_ROOT}/src/utils/StringStuff.cpp"
     "${BS_ROOT}/src/utils/AABBTree.cpp"
+    "${BS_ROOT}/src/utils/ConfigurationManager.cpp"
     # Stubs: replace wx-coupled Log + Config with no-ops
     "${MPP_DIR}/stubs/Log_stub.cpp"
     "${MPP_DIR}/stubs/Config_stub.cpp"
@@ -56,6 +58,7 @@ target_include_directories(drape_cli PRIVATE
     "${BS_ROOT}/src/components"
     "${BS_ROOT}/src/utils"
     "${BS_ROOT}/lib"
+    "${BS_ROOT}/lib/TinyXML-2"
     "${BS_ROOT}/lib/gli"
     "${BS_ROOT}/lib/gli/glm"
     "${CMAKE_CURRENT_SOURCE_DIR}"
