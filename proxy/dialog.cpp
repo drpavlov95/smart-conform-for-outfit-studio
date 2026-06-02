@@ -346,7 +346,7 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
         int btnY = cr.bottom - 46;
         SetWindowPos(d->btnDetect,  nullptr, 8,        btnY, 130, 30, SWP_NOZORDER);
         SetWindowPos(d->btnConform, nullptr, 148,      btnY, 150, 30, SWP_NOZORDER);
-        SetWindowPos(d->btnCancel,  nullptr, w - 90,   btnY,  90, 30, SWP_NOZORDER);
+        SetWindowPos(GetDlgItem(dlg, IDC_CANCEL_BTN), nullptr, w - 90, btnY, 90, 30, SWP_NOZORDER);
         break;
     }
 
