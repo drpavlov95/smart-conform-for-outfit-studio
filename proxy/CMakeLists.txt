@@ -32,6 +32,7 @@ set(BS_SRCS
     "${BS_ROOT}/src/utils/StringStuff.cpp"
     "${BS_ROOT}/src/utils/AABBTree.cpp"
     "${BS_ROOT}/src/utils/ConfigurationManager.cpp"
+    "${MPP_DIR}/stubs/Config_stub.cpp"
     "${MPP_DIR}/stubs/Log_stub.cpp"
 )
 

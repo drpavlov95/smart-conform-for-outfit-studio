@@ -1,6 +1,7 @@
 #include "dialog.h"
 #include <windows.h>
 #include <string>
+#include <algorithm>
 
 static constexpr UINT DRAPE_CMD_ID = 0xD4A9u;
 
@@ -100,6 +101,14 @@ static DWORD WINAPI InjectThread(LPVOID) {
 
 BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // Only activate inside OutfitStudio — not BodySlide or other tools
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string exe(exePath);
+        std::transform(exe.begin(), exe.end(), exe.begin(), ::tolower);
+        if (exe.find("outfitstudio") == std::string::npos)
+            return TRUE;  // safe no-op in BodySlide.exe / BodySlide x64.exe
+
         DisableThreadLibraryCalls(hMod);
         CreateThread(nullptr, 0, InjectThread, nullptr, 0, nullptr);
     }
