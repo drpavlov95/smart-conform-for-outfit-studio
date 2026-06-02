@@ -26,8 +26,7 @@ static HWND FindOsWindow() {
     EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
         char t[256]; GetWindowTextA(hw, t, sizeof(t));
         std::string title(t);
-        if (title == "Outfit Studio" ||
-            (title.size() > 16 && title.substr(title.size() - 16) == "- Outfit Studio")) {
+        if (title.find("Outfit Studio") != std::string::npos) {
             reinterpret_cast<Ctx*>(lp)->hw = hw;
             return FALSE;
         }
