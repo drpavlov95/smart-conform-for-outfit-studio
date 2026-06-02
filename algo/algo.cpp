@@ -6,6 +6,12 @@
  * Never present at BodySlide/OutfitStudio startup — avoids static-init crashes.
  *
  * Exports exactly one symbol: DrapeGetApi().
+ *
+ * Workflow (race-free): the user runs Conform All + Save in OutfitStudio FIRST.
+ * Drape then filters the freshly-saved on-disk OSD by cloth zone and the user
+ * reloads the project to view. We never trigger conform ourselves (the conform
+ * result lives in OS memory until save, so editing disk before save would touch
+ * stale data and be overwritten).
  */
 
 #include "../proxy/drape_iface.h"
@@ -14,38 +20,56 @@
 #include "NifFile.hpp"
 
 #include <windows.h>
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
-#include <set>
+#include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace nifly;
 
-// ── OSP parsing ───────────────────────────────────────────────────────
+// ── .osp model (authoritative dataName → shape → osd file) ─────────────
+
+struct DataRef {
+    std::string shape;      // <Data target="...">
+    std::string dataName;   // <Data name="..."> (OSD map key); defaults to slider name
+    std::string osdFile;    // text content: the .osd file basename
+};
 
 struct SetInfo {
     std::string name;
     std::string dataFolder;
     std::string sourceFile;
-    std::string refBodyShape;
-    std::set<std::string> osdFiles;
+    std::vector<DataRef> data;
 };
 
-static bool isBodyShape(const std::string& t) {
+// ── Reference-body name matching (robust; never "largest shape") ───────
+
+static bool isBodyShapeName(const std::string& t) {
     static const char* K[] = {
-        "CBBE", "HIMBO - Body HP", "BHUNP Body", "UNP Body",
-        "UUNP Body", "3BA", "TBD Body", "SAM Body", "CBBE Body", nullptr
+        "CBBE", "3BBB Body", "3BA", "HIMBO - Body HP", "HIMBO",
+        "BHUNP Body", "BHUNP", "UNP Body", "UUNP Body", "UNP",
+        "TBD Body", "TBD", "SAM Body", "SAM", "BaseShape", "Body", nullptr
     };
     for (int i = 0; K[i]; ++i)
-        if (t == K[i]) return true;
+        if (t.find(K[i]) != std::string::npos) return true;
     return false;
 }
 
-static std::string xmlText(const std::string& line,
-                            const char* open, const char* close) {
+// ── XML line helpers (BodySlide writes compact one-line <Data> elements) ─
+
+static std::string xmlText(const std::string& line, char open, char close) {
+    auto p = line.find(open);
+    if (p == std::string::npos) return {};
+    auto q = line.find(close, p + 1);
+    return q != std::string::npos ? line.substr(p + 1, q - p - 1) : std::string{};
+}
+
+static std::string xmlTag(const std::string& line, const char* open, const char* close) {
     auto p = line.find(open);
     if (p == std::string::npos) return {};
     p += strlen(open);
@@ -53,56 +77,68 @@ static std::string xmlText(const std::string& line,
     return q != std::string::npos ? line.substr(p, q - p) : std::string{};
 }
 
+static std::string xmlAttr(const std::string& line, const char* attr) {
+    std::string pat = std::string(attr) + "=\"";
+    auto p = line.find(pat);
+    if (p == std::string::npos) return {};
+    p += pat.size();
+    auto q = line.find('"', p);
+    return q != std::string::npos ? line.substr(p, q - p) : std::string{};
+}
+
+static std::string baseName(std::string s) {
+    auto bsl = s.find_last_of("\\/");
+    if (bsl != std::string::npos) s = s.substr(bsl + 1);
+    return s;
+}
+
 static std::vector<SetInfo> parseOspSets(const char* ospPath) {
     std::vector<SetInfo> sets;
     std::ifstream f(ospPath);
     std::string line;
     SetInfo cur;
+    std::string curSlider;
     bool inSet = false;
 
     while (std::getline(f, line)) {
         if (!inSet) {
-            auto p = line.find("<SliderSet name=\"");
-            if (p != std::string::npos) {
-                p += 17;
-                auto q = line.find('"', p);
-                if (q != std::string::npos) { cur.name = line.substr(p, q-p); inSet = true; }
+            if (line.find("<SliderSet") != std::string::npos) {
+                cur = {};
+                cur.name = xmlAttr(line, "name");
+                curSlider.clear();
+                inSet = true;
             }
-        } else {
-            if (cur.dataFolder.empty()) cur.dataFolder = xmlText(line, "<DataFolder>", "</DataFolder>");
-            if (cur.sourceFile.empty()) cur.sourceFile = xmlText(line, "<SourceFile>",  "</SourceFile>");
+            continue;
+        }
 
-            // Detect embedded reference body shape
-            if (cur.refBodyShape.empty()) {
-                auto p = line.find("<Shape target=\"");
-                if (p != std::string::npos) {
-                    p += 15;
-                    auto q = line.find('"', p);
-                    if (q != std::string::npos) {
-                        std::string tgt = line.substr(p, q-p);
-                        if (isBodyShape(tgt)) cur.refBodyShape = tgt;
-                    }
-                }
-            }
+        if (cur.dataFolder.empty())
+            cur.dataFolder = xmlTag(line, "<DataFolder>", "</DataFolder>");
+        if (cur.sourceFile.empty())
+            cur.sourceFile = xmlTag(line, "<SourceFile>", "</SourceFile>");
 
-            // Collect OSD basenames: <Data ... local="true">file.osd\entry</Data>
-            if (line.find("local=\"true\"") != std::string::npos) {
-                auto p = line.find('>');
-                if (p != std::string::npos) {
-                    auto q = line.find('<', ++p);
-                    if (q != std::string::npos) {
-                        std::string val = line.substr(p, q-p);
-                        auto bsl = val.find('\\');
-                        if (bsl != std::string::npos)
-                            cur.osdFiles.insert(val.substr(0, bsl));
-                    }
-                }
-            }
+        if (line.find("<Slider ") != std::string::npos)
+            curSlider = xmlAttr(line, "name");
 
-            if (line.find("</SliderSet>") != std::string::npos) {
-                sets.push_back(std::move(cur));
-                cur = {}; inSet = false;
+        if (line.find("<Data ") != std::string::npos ||
+            line.find("<Data\t") != std::string::npos) {
+            DataRef ref;
+            ref.shape    = xmlAttr(line, "target");
+            ref.dataName = xmlAttr(line, "name");
+            if (ref.dataName.empty()) ref.dataName = curSlider;
+            // text between the opening tag's '>' and the closing '<'
+            auto gt = line.find('>');
+            if (gt != std::string::npos) {
+                auto lt = line.find('<', gt + 1);
+                if (lt != std::string::npos)
+                    ref.osdFile = baseName(line.substr(gt + 1, lt - gt - 1));
             }
+            if (!ref.shape.empty() && !ref.dataName.empty() && !ref.osdFile.empty())
+                cur.data.push_back(std::move(ref));
+        }
+
+        if (line.find("</SliderSet>") != std::string::npos) {
+            sets.push_back(std::move(cur));
+            cur = {}; curSlider.clear(); inSet = false;
         }
     }
     return sets;
@@ -117,25 +153,64 @@ static std::vector<Vec3> shapeVerts(NifFile& nif, NiShape* s) {
     return out;
 }
 
-static std::vector<std::array<uint16_t,3>> shapeTris(NiShape* s) {
+static TriList shapeTris(NiShape* s) {
     std::vector<Triangle> t; s->GetTriangles(t);
-    std::vector<std::array<uint16_t,3>> out; out.reserve(t.size());
+    TriList out; out.reserve(t.size());
     for (auto& x : t) out.push_back({x.p1, x.p2, x.p3});
     return out;
 }
 
-// Returns the body-copy shape, or the largest shape as fallback.
-static NiShape* findRefShape(NifFile& nif, const std::string& refName) {
+// Find an embedded reference body shape by known names. No "largest" fallback:
+// without a real body we cannot measure distances, so we skip instead of guessing.
+static NiShape* findRefBodyShape(NifFile& nif) {
     for (auto* s : nif.GetShapes())
-        if (s && s->name.get() == refName) return s;
-    // Fallback: largest shape
-    NiShape* best = nullptr; int maxV = 0;
-    for (auto* s : nif.GetShapes()) {
-        if (!s) continue;
-        std::vector<Vector3> v; nif.GetVertsForShape(s, v);
-        if ((int)v.size() > maxV) { maxV = (int)v.size(); best = s; }
+        if (s && isBodyShapeName(s->name.get())) return s;
+    return nullptr;
+}
+
+static std::string osdCandidate(const std::string& bsDir, const std::string& ospPath,
+                                const SetInfo& set, const std::string& osdFile) {
+    // Prefer ShapeData/<DataFolder>/<file>; fall back to the slider-set dir.
+    std::string a = bsDir + "ShapeData\\" + set.dataFolder + "\\" + osdFile;
+    if (fs::exists(a)) return a;
+    std::string b = fs::path(ospPath).parent_path().string() + "\\" + osdFile;
+    if (fs::exists(b)) return b;
+    return a;  // report the primary path in errors
+}
+
+// ── Shared per-set context ─────────────────────────────────────────────
+
+struct SetGeometry {
+    NifFile nif;
+    std::vector<Vec3> bodyVerts;
+    TriList bodyTris;
+    std::unordered_map<std::string, NiShape*> shapeByName;
+    bool ok = false;
+    std::string refName;
+};
+
+static SetGeometry loadSetGeometry(const std::string& bsDir, const SetInfo& set,
+                                   const std::function<void(const std::string&)>& log) {
+    SetGeometry g;
+    std::string nifPath = bsDir + "ShapeData\\" + set.dataFolder + "\\" + set.sourceFile;
+    if (!fs::exists(nifPath) || g.nif.Load(nifPath) != 0) {
+        log("  SKIP " + set.name + " — NIF not found: " + nifPath);
+        return g;
     }
-    return best;
+    NiShape* refShape = findRefBodyShape(g.nif);
+    if (!refShape) {
+        log("  SKIP " + set.name + " — no embedded reference body shape "
+            "(known body name). Drape needs the body in the project to measure "
+            "distances.");
+        return g;
+    }
+    g.refName   = refShape->name.get();
+    g.bodyVerts = shapeVerts(g.nif, refShape);
+    g.bodyTris  = shapeTris(refShape);
+    for (auto* s : g.nif.GetShapes())
+        if (s) g.shapeByName[s->name.get()] = s;
+    g.ok = true;
+    return g;
 }
 
 // ── Detect ────────────────────────────────────────────────────────────
@@ -153,13 +228,9 @@ static int drapeDetect(
     void*        zoneCtx)
 {
     auto sets = parseOspSets(ospPath);
-
-    DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
+    DrapeOptions opts; opts.tightDistance = dTight; opts.looseDistance = dRigid;
     DrapeConformer dc(opts);
-
-    auto log = [&](const std::string& msg) {
-        if (logCb) logCb(logCtx, msg.c_str());
-    };
+    auto log = [&](const std::string& m){ if (logCb) logCb(logCtx, m.c_str()); };
 
     int processed = 0;
     for (int si = 0; si < nSets; ++si) {
@@ -167,53 +238,47 @@ static int drapeDetect(
         if (idx < 0 || idx >= (int)sets.size()) continue;
         const SetInfo& set = sets[idx];
 
-        std::string nifPath = std::string(bsDir) + "ShapeData\\" +
-                              set.dataFolder + "\\" + set.sourceFile;
-
         log("Detecting: " + set.name);
+        SetGeometry g = loadSetGeometry(bsDir, set, log);
+        if (!g.ok) continue;
+        log("  reference body: " + g.refName);
 
-        NifFile nif;
-        if (!fs::exists(nifPath) || nif.Load(nifPath) != 0) {
-            log("  SKIP — NIF not found: " + nifPath);
-            continue;
-        }
+        // Unique conformed shapes = distinct DataRef targets (excludes the body).
+        std::vector<std::string> shapes;
+        for (const auto& d : set.data)
+            if (d.shape != g.refName &&
+                std::find(shapes.begin(), shapes.end(), d.shape) == shapes.end())
+                shapes.push_back(d.shape);
 
-        NiShape* refShape = findRefShape(nif, set.refBodyShape);
-        if (!refShape) { log("  SKIP — no shapes in NIF"); continue; }
-
-        std::string refName = refShape->name.get();
-        auto refVerts = shapeVerts(nif, refShape);
-
-        int tight = 0, loose = 0, rigid = 0;
-        for (auto* s : nif.GetShapes()) {
-            if (!s || s->name.get() == refName) continue;
-            auto sr = dc.detectShape(shapeVerts(nif, s), refVerts,
-                                     shapeTris(s), s->name.get());
+        int tight = 0, loose = 0, farV = 0;   // 'far' is a legacy Windows macro
+        for (const auto& sName : shapes) {
+            auto it = g.shapeByName.find(sName);
+            if (it == g.shapeByName.end() || !it->second) continue;
+            auto sr = dc.detectShape(shapeVerts(g.nif, it->second),
+                                     g.bodyVerts, g.bodyTris, sName);
             tight += sr.tightVerts;
             loose += sr.looseVerts;
-            rigid += sr.rigidVerts;
+            farV  += sr.farVerts;
         }
 
-        int total = tight + loose + rigid;
-        const char* zone = (rigid > tight && rigid > loose) ? "Rigid" :
-                           (loose > tight)                  ? "Loose" : "SkinTight";
-
+        int total = tight + loose + farV;
+        const char* zone = (farV > tight && farV > loose) ? "Far" :
+                           (loose > tight)                ? "Loose" : "SkinTight";
         log(std::string("  ") + zone +
             "  tight=" + std::to_string(tight) +
             "  loose=" + std::to_string(loose) +
-            "  rigid=" + std::to_string(rigid));
-
-        if (zoneCb) zoneCb(zoneCtx, si, zone, tight, loose, rigid, total);
+            "  far="   + std::to_string(farV));
+        if (zoneCb) zoneCb(zoneCtx, si, zone, tight, loose, farV, total);
         ++processed;
     }
     return processed;
 }
 
-// ── Conform ───────────────────────────────────────────────────────────
+// ── Conform (filter the saved OSD) ─────────────────────────────────────
 
 static int drapeConform(
-    void*        osHwnd,
-    unsigned int conformAllId,
+    void*        /*osHwnd*/,
+    unsigned int /*conformAllId*/,
     const char*  bsDir,
     const char*  ospPath,
     const int*   selectedSets,
@@ -224,22 +289,12 @@ static int drapeConform(
     void*        logCtx)
 {
     auto sets = parseOspSets(ospPath);
-
-    auto log = [&](const std::string& msg) {
-        if (logCb) logCb(logCtx, msg.c_str());
-    };
-
-    // ── Step 1: trigger vanilla Conform All (synchronous) ──────────────
-    // SendMessage from worker thread → blocked until main thread processes it.
-    // The modal Drape dialog pumps all messages, so Conform All will execute.
-    log("Running Conform All...");
-    SendMessage(static_cast<HWND>(osHwnd),
-                WM_COMMAND, MAKEWPARAM(conformAllId, 0), 0);
-    log("Conform All done. Applying Drape zone filter...");
-
-    // ── Step 2: filter OSD files by cloth zone ─────────────────────────
-    DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
+    DrapeOptions opts; opts.tightDistance = dTight; opts.looseDistance = dRigid;
     DrapeConformer dc(opts);
+    auto log = [&](const std::string& m){ if (logCb) logCb(logCtx, m.c_str()); };
+
+    log("Drape filters the SAVED conform result. Make sure you ran "
+        "Conform All + Save first; reload the project afterwards.");
 
     int done = 0;
     for (int si = 0; si < nSets; ++si) {
@@ -247,74 +302,74 @@ static int drapeConform(
         if (idx < 0 || idx >= (int)sets.size()) continue;
         const SetInfo& set = sets[idx];
 
-        std::string nifPath = std::string(bsDir) + "ShapeData\\" +
-                              set.dataFolder + "\\" + set.sourceFile;
+        log("Filtering: " + set.name);
+        SetGeometry g = loadSetGeometry(bsDir, set, log);
+        if (!g.ok) continue;
+        log("  reference body: " + g.refName);
 
-        NifFile nif;
-        if (!fs::exists(nifPath) || nif.Load(nifPath) != 0) {
-            log("SKIP " + set.name + " — NIF not found");
-            continue;
+        // Group DataRefs by their on-disk OSD path → {dataName → shape}.
+        std::unordered_map<std::string, std::unordered_map<std::string, std::string>> byFile;
+        for (const auto& d : set.data) {
+            if (d.shape == g.refName) continue;  // body has no cloth diffs
+            std::string path = osdCandidate(bsDir, ospPath, set, d.osdFile);
+            byFile[path][d.dataName] = d.shape;
         }
 
-        NiShape* refShape = findRefShape(nif, set.refBodyShape);
-        if (!refShape) { log("SKIP " + set.name + " — no shapes"); continue; }
+        // Cache per-shape weights (geometry only — identical across that shape's sliders).
+        std::unordered_map<std::string, std::vector<float>> weightCache;
+        auto weightsFor = [&](const std::string& shapeName) -> const std::vector<float>* {
+            auto wIt = weightCache.find(shapeName);
+            if (wIt != weightCache.end()) return &wIt->second;
+            auto sIt = g.shapeByName.find(shapeName);
+            if (sIt == g.shapeByName.end() || !sIt->second) return nullptr;
+            auto w = dc.buildWeights(shapeVerts(g.nif, sIt->second), g.bodyVerts, g.bodyTris);
+            return &(weightCache[shapeName] = std::move(w));
+        };
 
-        std::string refName = refShape->name.get();
-        auto refVerts = shapeVerts(nif, refShape);
-        log("Filtering: " + set.name + "  (ref: " + refName + ")");
-
-        for (const std::string& osdFile : set.osdFiles) {
-            std::string osdPath = std::string(bsDir) + "ShapeData\\" +
-                                  set.dataFolder + "\\" + osdFile;
-            if (!fs::exists(osdPath)) continue;
-
-            OSDataFile osd;
-            if (!osd.Read(osdPath)) {
-                log("  SKIP " + osdFile + " — read failed");
+        int setEntries = 0;
+        for (auto& [osdPath, keyToShape] : byFile) {
+            if (!fs::exists(osdPath)) {
+                log("  SKIP missing OSD: " + osdPath);
                 continue;
             }
+            OSDataFile osd;
+            if (!osd.Read(osdPath)) { log("  SKIP unreadable OSD: " + osdPath); continue; }
 
             bool modified = false;
-            for (auto* shape : nif.GetShapes()) {
-                if (!shape || shape->name.get() == refName) continue;
-                std::string shapeName = shape->name.get();
-                auto outVerts = shapeVerts(nif, shape);
-                auto outTris  = shapeTris(shape);
+            for (auto& [key, tdiffs] : osd.GetDataDiffs()) {
+                if (!tdiffs) continue;
+                auto kit = keyToShape.find(key);
+                if (kit == keyToShape.end()) continue;   // exact match only — no prefixes
+                const std::string& shapeName = kit->second;
 
-                for (auto& [key, tdiffs] : osd.GetDataDiffs()) {
-                    if (!tdiffs) continue;
-                    // Match entries keyed as <shapeName><sliderName>
-                    if (key.size() < shapeName.size()) continue;
-                    if (key.substr(0, shapeName.size()) != shapeName) continue;
+                const std::vector<float>* w = weightsFor(shapeName);
+                if (!w) continue;
 
-                    VertexDiffs vd;
-                    for (auto& [vidx, v] : *tdiffs)
-                        vd[vidx] = {v.x, v.y, v.z};
-
-                    auto filtered = dc.filterDiffs(outVerts, refVerts, outTris, vd);
-
-                    TargetDataDiffs tdd;
-                    for (auto& [vidx, v] : filtered)
-                        tdd[vidx] = {v.x, v.y, v.z};
-
-                    osd.SetDataDiff(key, tdd);
-                    modified = true;
+                bool changed = false;
+                for (auto it = tdiffs->begin(); it != tdiffs->end(); ) {
+                    uint16_t vi = it->first;
+                    float wt = (vi < w->size()) ? (*w)[vi] : 1.0f;
+                    it->second *= wt;
+                    if (it->second.IsZero(true)) { it = tdiffs->erase(it); }
+                    else { ++it; }
+                    changed = true;
                 }
+                if (changed) { modified = true; ++setEntries; }
             }
 
             if (modified) {
-                if (osd.Write(osdPath)) log("  Written: " + osdFile);
-                else                    log("  ERROR writing: " + osdFile);
+                if (osd.Write(osdPath)) log("  Written: " + baseName(osdPath));
+                else                    log("  ERROR writing: " + osdPath);
             }
         }
+        log("  " + std::to_string(setEntries) + " slider/shape entries filtered.");
         ++done;
     }
 
     log(done > 0
-        ? "Done — " + std::to_string(done) + " set(s) filtered.\n"
+        ? "Done — " + std::to_string(done) + " set(s) filtered. "
           "Reload the project in OutfitStudio to see the result."
         : "Nothing was filtered.");
-
     return done;
 }
 

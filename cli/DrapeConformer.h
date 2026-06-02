@@ -1,12 +1,15 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <array>
+#include <cstdint>
 #include <unordered_map>
 
-// ── Types reused from mppatcher (duplicated to keep Drape standalone) ─
+// ── Lightweight vector (keeps the public API nifly-free) ───────────────
 
 struct Vec3 { float x, y, z;
     Vec3 operator+(const Vec3& o) const { return {x+o.x, y+o.y, z+o.z}; }
+    Vec3 operator-(const Vec3& o) const { return {x-o.x, y-o.y, z-o.z}; }
     Vec3 operator*(float f)       const { return {x*f,   y*f,   z*f};   }
     Vec3& operator+=(const Vec3& o)     { x+=o.x; y+=o.y; z+=o.z; return *this; }
     float dot(const Vec3& o)      const { return x*o.x + y*o.y + z*o.z; }
@@ -15,79 +18,84 @@ struct Vec3 { float x, y, z;
 
 // Per-vertex displacement: vertex index → delta
 using VertexDiffs = std::unordered_map<uint16_t, Vec3>;
+using TriList     = std::vector<std::array<uint16_t,3>>;
 
-// ── DrapeConformer options ────────────────────────────────────────────
+// ── Options ────────────────────────────────────────────────────────────
+//
+// Cloth-aware falloff is a pure function of distance to the *reference body
+// surface*:
+//     w(d) = 1                              for d <= tightDistance
+//     w(d) = 1 - smoothstep(t), t=(d-tD)/(lD-tD)   for tight < d < loose
+//     w(d) = 0                              for d >= looseDistance
+//
+// Rigidity is NOT inferred from distance (a long skirt hem is far but loose).
+// It is an explicit per-shape choice handled by the caller (see filterDiffs
+// `rigid` flag), never a measurement.
 
 struct DrapeOptions {
-    // Distance thresholds (game units, approx mm in Skyrim scale)
-    float d_tight = 2.0f;    // below → skin-tight (vanilla Automorph)
-    float d_rigid = 20.0f;   // above → rigid island (translate-only)
-    // KD-tree neighbours for rigid-body average displacement
-    int   rigid_k = 8;
+    float tightDistance = 2.0f;   // game units; full movement at/below this
+    float looseDistance = 20.0f;  // zero movement at/above this
 };
 
-// ── Result per shape ─────────────────────────────────────────────────
+// ── Result per shape (preview / reporting) ─────────────────────────────
 
 struct ShapeResult {
     std::string name;
-    enum class Zone { SkinTight, Loose, Rigid } dominantZone;
-    int vertexCount   = 0;
-    int tightVerts    = 0;
-    int looseVerts    = 0;
-    int rigidVerts    = 0;
-    VertexDiffs diffs;           // final post-processed diffs
+    enum class Zone { SkinTight, Loose, Far } dominantZone = Zone::SkinTight;
+    int vertexCount = 0;
+    int tightVerts  = 0;   // w == 1   (d <= tight)
+    int looseVerts  = 0;   // 0 < w < 1
+    int farVerts    = 0;   // w == 0   (d >= loose)
+    VertexDiffs diffs;     // post-processed diffs (conform path only)
 };
 
-// ── DrapeConformer ───────────────────────────────────────────────────
+// ── DrapeConformer ─────────────────────────────────────────────────────
 
 class DrapeConformer {
 public:
     explicit DrapeConformer(const DrapeOptions& opts = {});
 
-    // Analyse distances between outfit and reference body NIF.
-    // Returns per-shape zone distribution (for UI preview / detect-only mode).
+    // Core: per-outfit-vertex weight in [0,1] measured against the reference
+    // body *surface* using a BVH (point-to-triangle distance, capped at
+    // looseDistance). Returns one weight per outfit vertex.
+    std::vector<float> buildWeights(const std::vector<Vec3>& outVerts,
+                                    const std::vector<Vec3>& bodyVerts,
+                                    const TriList&           bodyTris) const;
+
+    // Preview: bucket the weights into tight / loose / far counts.
+    ShapeResult classify(const std::vector<float>& weights,
+                         const std::string& shapeName) const;
+
+    // Loose mode: scale each diff by its vertex weight; drop ~zero entries.
+    VertexDiffs applyLoose(const VertexDiffs& diffs,
+                           const std::vector<float>& weights) const;
+
+    // Rigid mode: replace per-vertex deform with one uniform translation
+    // (mean of the existing deltas) applied to EVERY vertex of the shape so
+    // the accessory moves as a single rigid body without deforming.
+    VertexDiffs applyRigid(const VertexDiffs& diffs, int shapeVertCount) const;
+
+    // Disk-filter convenience (algo.cpp): loose by default, rigid if flagged.
+    VertexDiffs filterDiffs(const std::vector<Vec3>& outVerts,
+                            const std::vector<Vec3>& bodyVerts,
+                            const TriList&           bodyTris,
+                            const VertexDiffs&       existing,
+                            bool                     rigid = false) const;
+
+    // Detect zones for one pre-loaded shape (no NIF I/O).
+    ShapeResult detectShape(const std::vector<Vec3>& outVerts,
+                            const std::vector<Vec3>& bodyVerts,
+                            const TriList&           bodyTris,
+                            const std::string&       shapeName = "") const;
+
+    // ── File-based convenience (CLI harness) ───────────────────────────
     std::vector<ShapeResult> detect(const std::string& outfitNif,
                                     const std::string& refBodyNif) const;
-
-    // Full conform: apply Automorph-style displacement filtered by cloth zone.
-    // outfitNif    : path to the outfit .nif
-    // refBodyNif   : path to the reference body .nif (neutral pose)
-    // refBodyDiffs : per-vertex displacements of the reference body for one slider
-    // Returns post-processed diffs for every shape in the outfit.
     std::vector<ShapeResult> conform(const std::string& outfitNif,
                                      const std::string& refBodyNif,
                                      const VertexDiffs& refBodyDiffs) const;
 
-    // Detect cloth zones for a single pre-loaded shape (avoids re-loading the NIF).
-    // outTris: triangle list as {p1, p2, p3} for rigid island flood-fill.
-    ShapeResult detectShape(const std::vector<Vec3>& outVerts,
-                            const std::vector<Vec3>& refVerts,
-                            const std::vector<std::array<uint16_t,3>>& outTris,
-                            const std::string& shapeName = "") const;
-
-    // Filter already-computed outfit diffs (e.g. from vanilla Automorph) by cloth zone.
-    // outVerts  : outfit mesh vertex positions (pre-loaded from NIF)
-    // refVerts  : reference body vertex positions (pre-loaded from NIF)
-    // outTris   : outfit mesh triangles (for rigid island flood-fill)
-    // existing  : vanilla diffs keyed by outfit vertex index
-    // Returns   : zone-scaled version of existing diffs
-    VertexDiffs filterDiffs(const std::vector<Vec3>& outVerts,
-                            const std::vector<Vec3>& refVerts,
-                            const std::vector<std::array<uint16_t,3>>& outTris,
-                            const VertexDiffs& existing) const;
-
 private:
     DrapeOptions m_opts;
-
-    // Compute per-vertex min-distance to the reference body mesh
-    std::vector<float> computeDistances(const std::vector<Vec3>& outVerts,
-                                        const std::vector<Vec3>& refVerts) const;
-
-    // Flood-fill connected vertex components all with dist > d_rigid
-    std::vector<std::vector<uint16_t>> rigidIslands(
-        const std::vector<float>& dists,
-        const std::vector<std::vector<int>>& adjacency) const;
-
-    // Smooth blend factor:  0 = skin-tight, 1 = rigid
-    float clothFactor(float dist) const;
+    float weightForDistance(float d) const;   // smoothstep falloff
 };

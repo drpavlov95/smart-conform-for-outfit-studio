@@ -54,37 +54,59 @@ Output:
 
 ## How It Works
 
-### Detect Phase
-1. Parse `.osp` project file (SliderSets, data folders, reference body shape)
-2. For each selected outfit NIF:
-   - Load NIF, find reference body shape
-   - For each non-body shape, measure distance from outfit verts to body surface
-   - Classify zones: **SkinTight** (tight), **Loose** (distance in range), **Rigid** (far/disconnected)
-3. Display zone breakdown in real-time ListView
+The cloth weight is a pure function of each outfit vertex's distance to the
+**reference body surface** (true point-to-triangle distance via a BVH):
 
-### Conform Phase
-1. User clicks "Conform with Drape"
-2. Trigger vanilla OutfitStudio `Conform All` → generates diffs in memory
-3. Load each outfit NIF + corresponding `.osd` slider files
-4. For each OSD entry:
-   - Calculate zone weights (smoothstep falloff between d_tight and d_rigid)
-   - Scale diffs: tight=100%, loose=scaled by distance, rigid=island-average
-   - Rewrite `.osd` with filtered diffs
-5. User reloads project in OutfitStudio to see result
+```text
+w(d) = 1                                   d <= tightDistance   (full follow)
+w(d) = 1 - smoothstep((d-tD)/(lD-tD))      tight < d < loose    (smooth falloff)
+w(d) = 0                                   d >= looseDistance   (cloth detaches)
+```
+
+Each conform delta is scaled by `w`. Skin-tight areas track the body fully;
+loose cloth attenuates smoothly; very far cloth stops following large body
+sliders (no ballooning). Rigidity is **explicit per shape**, never inferred
+from distance (a long skirt hem is far but still *loose*, not rigid).
+
+### Workflow (race-free)
+
+1. In OutfitStudio: load reference body + outfit, **Conform All**, **Save Project**.
+2. `Slider → Drape Conform…` → dialog (auto-detects the saved `.osp`).
+3. Pick shapes, set `tight`/`loose`, run.
+4. Drape reads the **saved** OSD, applies cloth weights, writes filtered OSD back.
+5. **Reload** the project in OutfitStudio to view; save normally to keep.
+
+> Drape never triggers conform itself. OutfitStudio holds fresh conform diffs in
+> memory until you save, so editing the disk OSD before saving would touch stale
+> data and be overwritten. Filtering the *saved* result avoids that race.
+
+### Key algorithm properties
+
+- **Surface-accurate distance**: BVH (`AABBTree` + `Triangle::DistanceToPoint`),
+  capped at `looseDistance`; weight does not vary with body mesh density.
+- **Authoritative OSD mapping**: the `.osp` `<Data target="…" name="…">file.osd</Data>`
+  gives the exact `dataName → shape → file` map — no ambiguous prefix matching.
+- **Robust reference body**: detected by known body names (CBBE / 3BA / HIMBO /
+  BHUNP / UNP / TBD / SAM / BaseShape …). Never the "largest shape". If the
+  project has no embedded body, the set is skipped with a clear message.
+- **Explicit rigid mode** (per shape): replaces per-vertex deform with one uniform
+  translation applied to every vertex, so accessories move as a single piece.
 
 ## Config
 
-Dialog exposes two thresholds (game units, ≈ mm):
-- **d_tight** (default 2.0): full deformation within this distance
-- **d_rigid** (default 20.0): zero deformation beyond this distance
-- Between them: smooth transition via smoothstep
+Dialog thresholds (game units, ≈ mm):
+- **d_tight** (default 2.0): full movement within this distance.
+- **d_rigid** (default 20.0): zero movement beyond this distance (this is the
+  *loose* cutoff — rigidity is a separate explicit choice, not this value).
+- Between them: smooth `smoothstep` transition.
 
 ## Limitations
 
-- **OSP-Only**: Works with `.osp` projects (BodySlide, Cbbe Bodyslide, etc.)
-- **Disk I/O**: Modifies `.osd` files on disk after conform (editor-level I/O, not real-time)
-- **Reference Shape Detection**: Auto-detects by known name (CBBE, HIMBO, etc.) or picks largest shape
-- **No Explicit Rigidity**: Rigidity inferred from distance; no per-shape "solid mode" like native implementations
+- **Saved-project post-processor**: operates on on-disk OSD; requires Conform +
+  Save first and a reload to view (editor-level I/O, not real-time).
+- **Needs an embedded reference body** in the project NIF to measure distances.
+- **Rigid mode** writes a diff entry for every vertex of the flagged shape
+  (intended for small accessories).
 
 ## Files
 

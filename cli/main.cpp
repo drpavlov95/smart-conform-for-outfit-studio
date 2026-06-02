@@ -56,7 +56,7 @@ static const char* zoneName(ShapeResult::Zone z) {
     switch (z) {
         case ShapeResult::Zone::SkinTight: return "SkinTight";
         case ShapeResult::Zone::Loose:     return "Loose";
-        case ShapeResult::Zone::Rigid:     return "Rigid";
+        case ShapeResult::Zone::Far:       return "Far";
     }
     return "Unknown";
 }
@@ -75,8 +75,8 @@ static int runDetect(const std::vector<std::string>& args) {
     }
 
     DrapeOptions opts;
-    opts.d_tight = dTight;
-    opts.d_rigid = dRigid;
+    opts.tightDistance = dTight;
+    opts.looseDistance = dRigid;
     DrapeConformer dc(opts);
 
     auto results = dc.detect(nifPath, refNifPath);
@@ -91,7 +91,7 @@ static int runDetect(const std::vector<std::string>& args) {
                   << " zone="  << zoneName(sr.dominantZone)
                   << " tight=" << sr.tightVerts
                   << " loose=" << sr.looseVerts
-                  << " rigid=" << sr.rigidVerts
+                  << " far="   << sr.farVerts
                   << " total=" << sr.vertexCount
                   << "\n";
     }
@@ -162,8 +162,8 @@ static int runConform(const std::vector<std::string>& args) {
 
     // ── Run Drape conform per slider ─────────────────────────────────
     DrapeOptions opts;
-    opts.d_tight = dTight;
-    opts.d_rigid = dRigid;
+    opts.tightDistance = dTight;
+    opts.looseDistance = dRigid;
     DrapeConformer dc(opts);
 
     OSDataFile outOsd;
@@ -195,7 +195,7 @@ static int runConform(const std::vector<std::string>& args) {
                       << " zone=" << zoneName(sr.dominantZone)
                       << " tight=" << sr.tightVerts
                       << " loose=" << sr.looseVerts
-                      << " rigid=" << sr.rigidVerts
+                      << " far=" << sr.farVerts
                       << " diffs=" << sr.diffs.size()
                       << "\n";
         }
