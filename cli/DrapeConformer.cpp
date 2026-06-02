@@ -271,3 +271,62 @@ std::vector<ShapeResult> DrapeConformer::conform(
     }
     return results;
 }
+
+// ── filterDiffs ────────────────────────────────────────────────────────
+// Post-processes vanilla Automorph diffs by cloth zone.
+// Takes pre-loaded vertex/triangle data so NIF loading happens once per shape,
+// not once per OSD entry.
+
+VertexDiffs DrapeConformer::filterDiffs(
+    const std::vector<Vec3>& outVerts,
+    const std::vector<Vec3>& refVerts,
+    const std::vector<std::array<uint16_t,3>>& outTris,
+    const VertexDiffs& existing) const
+{
+    if (outVerts.empty() || refVerts.empty() || existing.empty())
+        return existing;
+
+    auto dists = computeDistances(outVerts, refVerts);
+
+    std::vector<std::vector<int>> adj(outVerts.size());
+    for (const auto& t : outTris) {
+        adj[t[0]].push_back(t[1]); adj[t[0]].push_back(t[2]);
+        adj[t[1]].push_back(t[0]); adj[t[1]].push_back(t[2]);
+        adj[t[2]].push_back(t[0]); adj[t[2]].push_back(t[1]);
+    }
+
+    auto islands = rigidIslands(dists, adj);
+
+    std::vector<int> islandId(outVerts.size(), -1);
+    for (int ii = 0; ii < (int)islands.size(); ++ii)
+        for (uint16_t v : islands[ii]) islandId[v] = ii;
+
+    // Average existing diff across each rigid island -> pure translation
+    std::vector<Vec3> islandAvg(islands.size(), {0,0,0});
+    std::vector<int>  islandCnt(islands.size(), 0);
+    for (int ii = 0; ii < (int)islands.size(); ++ii) {
+        for (uint16_t vi : islands[ii]) {
+            auto it = existing.find(vi);
+            if (it != existing.end()) {
+                islandAvg[ii] += it->second;
+                ++islandCnt[ii];
+            }
+        }
+        if (islandCnt[ii] > 0)
+            islandAvg[ii] = islandAvg[ii] * (1.0f / islandCnt[ii]);
+    }
+
+    VertexDiffs out;
+    for (auto& [vi, diff] : existing) {
+        if (vi >= (uint16_t)outVerts.size()) { out[vi] = diff; continue; }
+
+        if (islandId[vi] >= 0) {
+            // Rigid island: replace per-vertex deform with uniform translation
+            out[vi] = islandAvg[islandId[vi]];
+        } else {
+            // Smooth blend: skin-tight keeps full diff, loose scales it down
+            out[vi] = diff * (1.0f - clothFactor(dists[vi]));
+        }
+    }
+    return out;
+}

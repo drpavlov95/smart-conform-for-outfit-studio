@@ -1,4 +1,8 @@
 #include "dialog.h"
+#include "DrapeConformer.h"
+#include "DiffData.h"
+#include "NifFile.hpp"
+
 #include <commctrl.h>
 #include <filesystem>
 #include <fstream>
@@ -6,46 +10,130 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <set>
 
 #pragma comment(lib, "comctl32.lib")
 
 namespace fs = std::filesystem;
+using namespace nifly;
+
+// Defined in dllmain.cpp
+extern HWND g_osHwnd;
+extern UINT g_conformAllId;
 
 // ── Control IDs ──────────────────────────────────────────────────────
 enum : UINT {
-    IDC_PROJECT_LBL = 101,
-    IDC_OSP_EDIT    = 102,
-    IDC_OSP_BROWSE  = 103,
-    IDC_SHAPES_LIST = 104,
-    IDC_DETECT_BTN  = 105,
-    IDC_CONFORM_BTN = 106,
-    IDC_CANCEL_BTN  = 107,
-    IDC_PROGRESS    = 108,
-    IDC_STATUS      = 109,
-    IDC_D_TIGHT_EDT = 110,
-    IDC_D_RIGID_EDT = 111,
-    // ListView columns
-    COL_CHECK = 0, COL_SHAPE = 0, COL_ZONE = 1, COL_DIST = 2,
+    IDC_PROJECT_LBL   = 101,
+    IDC_OSP_EDIT      = 102,
+    IDC_OSP_BROWSE    = 103,
+    IDC_SHAPES_LIST   = 104,
+    IDC_DETECT_BTN    = 105,
+    IDC_CONFORM_BTN   = 106,
+    IDC_CANCEL_BTN    = 107,
+    IDC_PROGRESS      = 108,
+    IDC_STATUS        = 109,
+    IDC_D_TIGHT_EDT   = 110,
+    IDC_D_RIGID_EDT   = 111,
+    IDC_REF_NIF_EDT   = 112,
+    IDC_REF_NIF_BTN   = 113,
+    COL_SHAPE = 0, COL_ZONE = 1, COL_DIST = 2,
 };
-// Custom message posted from worker thread
-#define WM_DRAPE_DONE  (WM_USER + 1)
-#define WM_DRAPE_LINE  (WM_USER + 2)   // lParam = new LPSTR (caller frees)
 
-// ── Data for the dialog proc ─────────────────────────────────────────
+#define WM_DRAPE_DONE  (WM_USER + 1)
+#define WM_DRAPE_LINE  (WM_USER + 2)   // lParam = LPSTR heap string (caller frees)
+#define WM_DRAPE_ZONE  (WM_USER + 3)   // wParam = item idx, lParam = LPSTR "zone|verts" (caller frees)
+
+// ── SliderSet info from .osp ──────────────────────────────────────────
+
+struct SetInfo {
+    std::string name;
+    std::string dataFolder;
+    std::string sourceFile;
+    std::set<std::string> osdFiles;  // OSD basenames referenced by this set
+};
+
+// ── DlgData ──────────────────────────────────────────────────────────
+
 struct DlgData {
     std::string bsDir;
     std::string ospPath;
-    HWND        lvShapes  = nullptr;
-    HWND        edStatus  = nullptr;
-    HWND        progress  = nullptr;
-    HWND        btnDetect = nullptr;
-    HWND        btnConform= nullptr;
+    std::string refNifPath;
+    std::vector<SetInfo> ospSets;
+    HWND lvShapes  = nullptr;
+    HWND edStatus  = nullptr;
+    HWND progress  = nullptr;
+    HWND btnDetect = nullptr;
+    HWND btnConform= nullptr;
     std::atomic<bool> running{false};
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────
+// ── OSP parsing ───────────────────────────────────────────────────────
 
-// Read OutfitStudio window title → extract project name
+static std::string xmlText(const std::string& line,
+                            const char* open, const char* close) {
+    auto p = line.find(open);
+    if (p == std::string::npos) return "";
+    p += strlen(open);
+    auto q = line.find(close, p);
+    return (q != std::string::npos) ? line.substr(p, q - p) : "";
+}
+
+static std::vector<SetInfo> ParseOspSets(const std::string& ospPath) {
+    std::vector<SetInfo> sets;
+    std::ifstream f(ospPath);
+    std::string line;
+    SetInfo cur;
+    bool inSet = false;
+
+    while (std::getline(f, line)) {
+        if (!inSet) {
+            auto p = line.find("<SliderSet name=\"");
+            if (p != std::string::npos) {
+                p += 17;
+                auto q = line.find('"', p);
+                if (q != std::string::npos) {
+                    cur.name = line.substr(p, q - p);
+                    inSet = true;
+                }
+            }
+        } else {
+            if (cur.dataFolder.empty()) {
+                auto v = xmlText(line, "<DataFolder>", "</DataFolder>");
+                if (!v.empty()) cur.dataFolder = v;
+            }
+            if (cur.sourceFile.empty()) {
+                auto v = xmlText(line, "<SourceFile>", "</SourceFile>");
+                if (!v.empty()) cur.sourceFile = v;
+            }
+            // Collect OSD file basenames from <Data> elements
+            // Format: <Data ... local="true">filename.osd\entryName</Data>
+            if (line.find("local=\"true\"") != std::string::npos) {
+                auto p = line.find('>');
+                if (p != std::string::npos) {
+                    ++p;
+                    auto q = line.find('<', p);
+                    if (q != std::string::npos) {
+                        std::string val = line.substr(p, q - p);
+                        auto bsl = val.find('\\');
+                        if (bsl != std::string::npos) {
+                            std::string osdName = val.substr(0, bsl);
+                            if (!osdName.empty())
+                                cur.osdFiles.insert(osdName);
+                        }
+                    }
+                }
+            }
+            if (line.find("</SliderSet>") != std::string::npos) {
+                sets.push_back(cur);
+                cur = {}; inSet = false;
+            }
+        }
+    }
+    return sets;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
 static std::string ProjectFromTitle(HWND osHwnd) {
     char buf[512]; GetWindowTextA(osHwnd, buf, sizeof(buf));
     std::string t(buf);
@@ -57,13 +145,11 @@ static std::string ProjectFromTitle(HWND osHwnd) {
     return name;
 }
 
-// Find the .osp file for a project name in bsDir/SliderSets/
 static std::string FindOsp(const std::string& bsDir, const std::string& projName) {
     fs::path ssDir = fs::path(bsDir) / "SliderSets";
     if (!fs::is_directory(ssDir)) return "";
     for (auto& e : fs::directory_iterator(ssDir)) {
         if (e.path().extension() != ".osp") continue;
-        // Check if any SliderSet in the file matches projName
         std::ifstream f(e.path());
         std::string line;
         while (std::getline(f, line))
@@ -73,87 +159,220 @@ static std::string FindOsp(const std::string& bsDir, const std::string& projName
     return "";
 }
 
-// Parse SliderSet names from an .osp file
-static std::vector<std::string> ParseShapes(const std::string& ospPath) {
-    std::vector<std::string> out;
-    std::ifstream f(ospPath);
-    std::string line;
-    while (std::getline(f, line)) {
-        auto p = line.find("<SliderSet name=\"");
-        if (p == std::string::npos) continue;
-        p += 17;
-        auto q = line.find('"', p);
-        if (q != std::string::npos)
-            out.push_back(line.substr(p, q - p));
-    }
-    return out;
-}
-
-// Run drape-cli and return stdout; post WM_DRAPE_LINE lines while running
-static std::string RunCli(HWND dlg, const std::string& exe,
-                           const std::vector<std::string>& args) {
-    // Build command line
-    std::string cmd = "\"" + exe + "\"";
-    for (auto& a : args) cmd += " " + a;
-
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE rPipe, wPipe;
-    CreatePipe(&rPipe, &wPipe, &sa, 0);
-    SetHandleInformation(rPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOA si{sizeof(si)};
-    si.dwFlags     = STARTF_USESTDHANDLES;
-    si.hStdOutput  = wPipe;
-    si.hStdError   = wPipe;
-    si.hStdInput   = GetStdHandle(STD_INPUT_HANDLE);
-
-    PROCESS_INFORMATION pi{};
-    CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                   CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    CloseHandle(wPipe);
-
-    std::string full;
-    char buf[2048]; DWORD got;
-    std::string lineBuf;
-    while (ReadFile(rPipe, buf, sizeof(buf) - 1, &got, nullptr) && got) {
-        buf[got] = 0;
-        full += buf;
-        lineBuf += buf;
-        // Post each complete line to the dialog
-        size_t nl;
-        while ((nl = lineBuf.find('\n')) != std::string::npos) {
-            std::string ln = lineBuf.substr(0, nl);
-            if (!ln.empty() && ln.back() == '\r') ln.pop_back();
-            char* copy = _strdup(ln.c_str());
-            PostMessageA(dlg, WM_DRAPE_LINE, 0, (LPARAM)copy);
-            lineBuf = lineBuf.substr(nl + 1);
-        }
-    }
-    DWORD exit_code = 0;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(rPipe);
-    PostMessageA(dlg, WM_DRAPE_DONE, exit_code, 0);
-    return full;
-}
-
-// Populate the shapes ListView
-static void PopulateShapes(HWND lv, const std::vector<std::string>& shapes) {
+static void PopulateSets(HWND lv, const std::vector<SetInfo>& sets) {
     ListView_DeleteAllItems(lv);
-    for (int i = 0; i < (int)shapes.size(); ++i) {
+    for (int i = 0; i < (int)sets.size(); ++i) {
         LVITEMA item{};
-        item.mask    = LVIF_TEXT | LVIF_STATE;
-        item.iItem   = i;
+        item.mask      = LVIF_TEXT | LVIF_STATE;
+        item.iItem     = i;
         item.stateMask = LVIS_STATEIMAGEMASK;
-        item.state   = INDEXTOSTATEIMAGEMASK(2); // checked
-        item.pszText = const_cast<char*>(shapes[i].c_str());
+        item.state     = INDEXTOSTATEIMAGEMASK(2);  // checked
+        item.pszText   = const_cast<char*>(sets[i].name.c_str());
         ListView_InsertItem(lv, &item);
         ListView_SetItemText(lv, i, COL_ZONE, const_cast<char*>("—"));
         ListView_SetItemText(lv, i, COL_DIST, const_cast<char*>("—"));
     }
 }
 
-// ── Dialog procedure ─────────────────────────────────────────────────
+static void PostLog(HWND dlg, const std::string& msg) {
+    PostMessageA(dlg, WM_DRAPE_LINE, 0, (LPARAM)_strdup(msg.c_str()));
+}
+
+// ── Load NIF helpers ──────────────────────────────────────────────────
+
+static std::vector<Vec3> nifVerts(NifFile& nif, NiShape* s) {
+    std::vector<Vector3> v; nif.GetVertsForShape(s, v);
+    std::vector<Vec3> out; out.reserve(v.size());
+    for (auto& x : v) out.push_back({x.x, x.y, x.z});
+    return out;
+}
+
+static std::vector<std::array<uint16_t,3>> nifTris(NifFile& nif, NiShape* s) {
+    std::vector<Triangle> t; nif.GetTrianglesForShape(s, t);
+    std::vector<std::array<uint16_t,3>> out; out.reserve(t.size());
+    for (auto& x : t) out.push_back({x.p1, x.p2, x.p3});
+    return out;
+}
+
+static NiShape* largestShape(NifFile& nif) {
+    NiShape* best = nullptr; int maxV = 0;
+    for (auto* s : nif.GetShapes()) {
+        if (!s) continue;
+        std::vector<Vector3> v; nif.GetVertsForShape(s, v);
+        if ((int)v.size() > maxV) { maxV = (int)v.size(); best = s; }
+    }
+    return best;
+}
+
+// ── Detect zones ──────────────────────────────────────────────────────
+
+static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
+    if (d->refNifPath.empty() || !fs::exists(d->refNifPath)) {
+        PostLog(dlg, "ERROR: select a reference body NIF first.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+
+    NifFile refNif;
+    if (refNif.Load(d->refNifPath) != 0) {
+        PostLog(dlg, "ERROR: failed to load reference NIF.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+    NiShape* refShape = largestShape(refNif);
+    if (!refShape) {
+        PostLog(dlg, "ERROR: no shapes in reference NIF.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+    auto refVerts = nifVerts(refNif, refShape);
+
+    DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
+    DrapeConformer dc(opts);
+
+    int n = ListView_GetItemCount(d->lvShapes);
+    for (int i = 0; i < n; ++i) {
+        if (!ListView_GetCheckState(d->lvShapes, i)) continue;
+        const SetInfo& si = d->ospSets[i];
+        std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
+
+        if (!fs::exists(nifPath)) {
+            PostLog(dlg, "SKIP " + si.name + " (NIF not found)");
+            continue;
+        }
+        PostLog(dlg, "Detecting: " + si.name);
+
+        auto results = dc.detect(nifPath, d->refNifPath);
+        int tight = 0, loose = 0, rigid = 0;
+        for (auto& sr : results) {
+            tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
+        }
+        int total = tight + loose + rigid;
+        const char* zone =
+            (rigid > tight && rigid > loose) ? "Rigid" :
+            (loose > tight)                  ? "Loose" : "SkinTight";
+
+        PostLog(dlg, "  " + std::string(zone) +
+                "  tight=" + std::to_string(tight) +
+                "  loose=" + std::to_string(loose) +
+                "  rigid=" + std::to_string(rigid));
+
+        std::string payload = std::string(zone) + "|" + std::to_string(total);
+        PostMessageA(dlg, WM_DRAPE_ZONE, (WPARAM)i, (LPARAM)_strdup(payload.c_str()));
+    }
+    PostMessageA(dlg, WM_DRAPE_DONE, 0, 0);
+}
+
+// ── Filter OSD after Conform All ──────────────────────────────────────
+
+static void RunConform(HWND dlg, DlgData* d, float dTight, float dRigid) {
+    if (d->refNifPath.empty() || !fs::exists(d->refNifPath)) {
+        PostLog(dlg, "ERROR: select a reference body NIF first.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+    if (g_conformAllId == 0) {
+        PostLog(dlg, "ERROR: Conform All not found in OutfitStudio menu.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+
+    // ── Step 1: trigger OutfitStudio's Conform All ────────────────────
+    PostLog(dlg, "Running Conform All...");
+    // SendMessage is synchronous across threads — blocks until conform finishes
+    SendMessage(g_osHwnd, WM_COMMAND, MAKEWPARAM(g_conformAllId, 0), 0);
+    PostLog(dlg, "Conform All done. Applying Drape zone filter...");
+
+    // ── Step 2: load reference NIF ────────────────────────────────────
+    NifFile refNif;
+    if (refNif.Load(d->refNifPath) != 0) {
+        PostLog(dlg, "ERROR: failed to load reference NIF.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+    NiShape* refShape = largestShape(refNif);
+    if (!refShape) {
+        PostLog(dlg, "ERROR: no shapes in reference NIF.");
+        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
+    }
+    auto refVerts = nifVerts(refNif, refShape);
+
+    DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
+    DrapeConformer dc(opts);
+
+    int n = ListView_GetItemCount(d->lvShapes);
+    int totalSets = 0;
+
+    for (int i = 0; i < n; ++i) {
+        if (!ListView_GetCheckState(d->lvShapes, i)) continue;
+        const SetInfo& si = d->ospSets[i];
+
+        // ── Step 3: load outfit NIF ───────────────────────────────────
+        std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
+        if (!fs::exists(nifPath)) {
+            PostLog(dlg, "SKIP " + si.name + " (NIF not found)");
+            continue;
+        }
+        NifFile outfitNif;
+        if (outfitNif.Load(nifPath) != 0) {
+            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)");
+            continue;
+        }
+
+        PostLog(dlg, "Filtering: " + si.name);
+
+        // ── Step 4: for each OSD file, filter diffs and rewrite ───────
+        for (const std::string& osdName : si.osdFiles) {
+            std::string osdPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + osdName;
+            if (!fs::exists(osdPath)) continue;
+
+            OSDataFile osd;
+            if (!osd.Read(osdPath)) {
+                PostLog(dlg, "  SKIP " + osdName + " (read failed)");
+                continue;
+            }
+
+            bool modified = false;
+            for (auto* shape : outfitNif.GetShapes()) {
+                if (!shape) continue;
+                std::string shapeName = shape->name.get();
+                auto outVerts = nifVerts(outfitNif, shape);
+                auto outTris  = nifTris(outfitNif, shape);
+
+                // Filter each OSD entry whose key starts with this shape name
+                for (auto& [key, tdiffs] : osd.GetDataDiffs()) {
+                    if (!tdiffs || key.substr(0, shapeName.size()) != shapeName)
+                        continue;
+
+                    // Convert TargetDataDiffs to VertexDiffs (Vec3)
+                    VertexDiffs vd;
+                    for (auto& [idx, v] : *tdiffs)
+                        vd[idx] = {v.x, v.y, v.z};
+
+                    auto filtered = dc.filterDiffs(outVerts, refVerts, outTris, vd);
+
+                    // Write filtered diffs back to the OSD entry
+                    TargetDataDiffs tdd;
+                    for (auto& [idx, v] : filtered)
+                        tdd[idx] = {v.x, v.y, v.z};
+                    osd.SetDataDiff(key, tdd);
+                    modified = true;
+                }
+            }
+
+            if (modified) {
+                if (osd.Write(osdPath))
+                    PostLog(dlg, "  Written: " + osdName);
+                else
+                    PostLog(dlg, "  ERROR writing: " + osdName);
+            }
+        }
+        ++totalSets;
+    }
+
+    PostLog(dlg, totalSets > 0
+        ? "Done — " + std::to_string(totalSets) + " set(s) filtered.\n"
+          "Reload the project in OutfitStudio to see the result."
+        : "Nothing was filtered.");
+
+    PostMessageA(dlg, WM_DRAPE_DONE, 0, 0);
+}
+
+// ── Dialog procedure ──────────────────────────────────────────────────
 
 static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
                                       WPARAM wp, LPARAM lp) {
@@ -164,10 +383,8 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
     case WM_INITDIALOG: {
         d = reinterpret_cast<DlgData*>(lp);
         SetWindowLongPtrA(dlg, GWLP_USERDATA, lp);
-
         SetWindowTextA(dlg, "Drape Conform");
 
-        // ListView extended styles (checkboxes + gridlines)
         HWND lv = GetDlgItem(dlg, IDC_SHAPES_LIST);
         d->lvShapes  = lv;
         d->edStatus  = GetDlgItem(dlg, IDC_STATUS);
@@ -178,23 +395,21 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
         ListView_SetExtendedListViewStyle(lv,
             LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-        // Columns
         auto addCol = [&](int i, const char* text, int w) {
-            LVCOLUMNA c{LVCF_TEXT | LVCF_WIDTH, 0, w,
-                        const_cast<char*>(text)};
+            LVCOLUMNA c{LVCF_TEXT | LVCF_WIDTH, 0, w, const_cast<char*>(text)};
             ListView_InsertColumn(lv, i, &c);
         };
         RECT r; GetClientRect(lv, &r);
         int total = r.right - r.left;
-        addCol(COL_SHAPE, "Shape",     total - 160);
-        addCol(COL_ZONE,  "Zone",      80);
-        addCol(COL_DIST,  "Min Dist",  80);
+        addCol(COL_SHAPE, "Shape",    total - 160);
+        addCol(COL_ZONE,  "Zone",     90);
+        addCol(COL_DIST,  "Verts",    70);
 
-        // Default threshold values
         SetDlgItemTextA(dlg, IDC_D_TIGHT_EDT, "2.0");
         SetDlgItemTextA(dlg, IDC_D_RIGID_EDT, "20.0");
+        SendMessageA(d->progress, PBM_SETRANGE32, 0, 100);
 
-        // Try to populate from current OutfitStudio project
+        // Auto-load project from OutfitStudio window title
         HWND osWnd = GetParent(dlg);
         std::string proj = ProjectFromTitle(osWnd);
         if (!proj.empty()) {
@@ -202,11 +417,10 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
             std::string osp = FindOsp(d->bsDir, proj);
             if (!osp.empty()) {
                 d->ospPath = osp;
-                PopulateShapes(lv, ParseShapes(osp));
+                d->ospSets = ParseOspSets(osp);
+                PopulateSets(lv, d->ospSets);
             }
         }
-
-        SendMessageA(d->progress, PBM_SETRANGE32, 0, 100);
         return TRUE;
     }
 
@@ -214,7 +428,6 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
         WORD id = LOWORD(wp);
 
         if (id == IDC_OSP_BROWSE) {
-            // Simple open dialog for .osp file
             char path[MAX_PATH] = "";
             OPENFILENAMEA ofn{sizeof(ofn)};
             ofn.hwndOwner   = dlg;
@@ -224,129 +437,114 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
             ofn.Flags       = OFN_FILEMUSTEXIST;
             if (GetOpenFileNameA(&ofn)) {
                 d->ospPath = path;
-                // show just filename in edit
                 SetDlgItemTextA(dlg, IDC_OSP_EDIT,
                     fs::path(path).stem().string().c_str());
-                PopulateShapes(d->lvShapes, ParseShapes(path));
+                d->ospSets = ParseOspSets(path);
+                PopulateSets(d->lvShapes, d->ospSets);
+            }
+        }
+
+        else if (id == IDC_REF_NIF_BTN) {
+            char path[MAX_PATH] = "";
+            OPENFILENAMEA ofn{sizeof(ofn)};
+            ofn.hwndOwner   = dlg;
+            ofn.lpstrFilter = "NIF mesh\0*.nif\0";
+            ofn.lpstrFile   = path;
+            ofn.nMaxFile    = MAX_PATH;
+            ofn.Flags       = OFN_FILEMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                d->refNifPath = path;
+                SetDlgItemTextA(dlg, IDC_REF_NIF_EDT,
+                    fs::path(path).filename().string().c_str());
             }
         }
 
         else if (id == IDC_DETECT_BTN && !d->running) {
-            if (d->ospPath.empty()) {
-                MessageBoxA(dlg, "Select a project first.", "Drape", MB_OK);
-                break;
+            if (d->ospSets.empty()) {
+                MessageBoxA(dlg, "Load a project first.", "Drape", MB_OK); break;
             }
-            d->running = true;
-            EnableWindow(d->btnDetect,  FALSE);
-            EnableWindow(d->btnConform, FALSE);
-            SetWindowTextA(d->edStatus, "Detecting cloth zones...\r\n");
-            SendMessageA(d->progress, PBM_SETPOS, 0, 0);
-
             char tight[16], rigid[16];
             GetDlgItemTextA(dlg, IDC_D_TIGHT_EDT, tight, sizeof(tight));
             GetDlgItemTextA(dlg, IDC_D_RIGID_EDT, rigid, sizeof(rigid));
-            std::string cli = d->bsDir + "drape-cli.exe";
-            std::vector<std::string> args = {
-                "--detect",
-                "--input-osp", "\"" + d->ospPath + "\"",
-                "--d-tight", tight,
-                "--d-rigid", rigid
-            };
-            std::thread([=]{ RunCli(dlg, cli, args); }).detach();
+            d->running = true;
+            EnableWindow(d->btnDetect, FALSE); EnableWindow(d->btnConform, FALSE);
+            SetWindowTextA(d->edStatus, "");
+            SendMessageA(d->progress, PBM_SETPOS, 0, 0);
+            float dT = (float)atof(tight), dR = (float)atof(rigid);
+            std::thread([=]{ RunDetect(dlg, d, dT, dR); }).detach();
         }
 
         else if (id == IDC_CONFORM_BTN && !d->running) {
-            if (d->ospPath.empty()) {
-                MessageBoxA(dlg, "Select a project first.", "Drape", MB_OK);
-                break;
+            if (d->ospSets.empty()) {
+                MessageBoxA(dlg, "Load a project first.", "Drape", MB_OK); break;
             }
-            // Collect checked shapes
-            int n = ListView_GetItemCount(d->lvShapes);
-            std::vector<std::string> shapes;
-            for (int i = 0; i < n; ++i) {
-                if (ListView_GetCheckState(d->lvShapes, i)) {
-                    char buf[256];
-                    ListView_GetItemTextA(d->lvShapes, i, 0, buf, sizeof(buf));
-                    shapes.push_back(buf);
-                }
-            }
-            if (shapes.empty()) {
-                MessageBoxA(dlg, "Check at least one shape.", "Drape", MB_OK);
-                break;
-            }
-            d->running = true;
-            EnableWindow(d->btnDetect,  FALSE);
-            EnableWindow(d->btnConform, FALSE);
-            SetWindowTextA(d->edStatus, "Running Drape conform...\r\n");
-            SendMessageA(d->progress, PBM_SETPOS, 0, 0);
-
             char tight[16], rigid[16];
             GetDlgItemTextA(dlg, IDC_D_TIGHT_EDT, tight, sizeof(tight));
             GetDlgItemTextA(dlg, IDC_D_RIGID_EDT, rigid, sizeof(rigid));
-
-            // Write temp shapes file
-            std::string tmpShapes = d->bsDir + "drape_shapes_tmp.txt";
-            { std::ofstream f(tmpShapes);
-              for (auto& s : shapes) f << s << "\n"; }
-
-            std::string cli = d->bsDir + "drape-cli.exe";
-            std::vector<std::string> args = {
-                "--conform",
-                "--input-osp",    "\"" + d->ospPath + "\"",
-                "--shapes-file",  "\"" + tmpShapes + "\"",
-                "--d-tight", tight,
-                "--d-rigid", rigid
-            };
-            std::thread([=]{ RunCli(dlg, cli, args); }).detach();
+            d->running = true;
+            EnableWindow(d->btnDetect, FALSE); EnableWindow(d->btnConform, FALSE);
+            SetWindowTextA(d->edStatus, "");
+            SendMessageA(d->progress, PBM_SETPOS, 0, 0);
+            float dT = (float)atof(tight), dR = (float)atof(rigid);
+            std::thread([=]{ RunConform(dlg, d, dT, dR); }).detach();
         }
 
         else if (id == IDC_CANCEL_BTN || id == IDCANCEL) {
-            EndDialog(dlg, 0);
+            if (!d->running) EndDialog(dlg, 0);
         }
         break;
     }
 
     case WM_DRAPE_LINE: {
-        // Append line to status edit
         char* line = reinterpret_cast<char*>(lp);
         if (line) {
             int len = GetWindowTextLengthA(d->edStatus);
             SendMessageA(d->edStatus, EM_SETSEL, len, len);
-            SendMessageA(d->edStatus, EM_REPLACESEL, FALSE, (LPARAM)(std::string(line) + "\r\n").c_str());
+            std::string s(line); s += "\r\n";
+            SendMessageA(d->edStatus, EM_REPLACESEL, FALSE, (LPARAM)s.c_str());
             free(line);
+        }
+        break;
+    }
+
+    case WM_DRAPE_ZONE: {
+        int item = (int)wp;
+        char* payload = reinterpret_cast<char*>(lp);
+        if (payload) {
+            std::istringstream ss(payload);
+            std::string zone, verts;
+            std::getline(ss, zone,  '|');
+            std::getline(ss, verts, '|');
+            ListView_SetItemText(d->lvShapes, item, COL_ZONE,
+                                 const_cast<char*>(zone.c_str()));
+            ListView_SetItemText(d->lvShapes, item, COL_DIST,
+                                 const_cast<char*>(verts.c_str()));
+            free(payload);
         }
         break;
     }
 
     case WM_DRAPE_DONE: {
         d->running = false;
-        EnableWindow(d->btnDetect,  TRUE);
-        EnableWindow(d->btnConform, TRUE);
-        DWORD exitCode = (DWORD)wp;
-        SendMessageA(d->progress, PBM_SETPOS, exitCode == 0 ? 100 : 0, 0);
-        if (exitCode == 0)
-            SendMessageA(d->edStatus, EM_REPLACESEL, FALSE,
-                         (LPARAM)"Done.\r\n");
-        else
-            SendMessageA(d->edStatus, EM_REPLACESEL, FALSE,
-                         (LPARAM)"Error — check log above.\r\n");
+        EnableWindow(d->btnDetect, TRUE); EnableWindow(d->btnConform, TRUE);
+        SendMessageA(d->progress, PBM_SETPOS, (DWORD)wp == 0 ? 100 : 0, 0);
         break;
     }
 
     case WM_SIZE: {
-        // Basic resize: stretch listview and status
+        if (!d) break;
         RECT cr; GetClientRect(dlg, &cr);
-        int w = cr.right - 16, top = 52;
+        int w = cr.right - 16, top = 60;
         SetWindowPos(GetDlgItem(dlg, IDC_SHAPES_LIST), nullptr,
                      8, top, w, cr.bottom - top - 190, SWP_NOZORDER);
         int statusTop = cr.bottom - 174;
         SetWindowPos(d->edStatus, nullptr,
                      8, statusTop, w, 120, SWP_NOZORDER);
-        // Reflow bottom controls
         int btnY = cr.bottom - 46;
-        SetWindowPos(d->btnDetect,  nullptr, 8,        btnY, 130, 30, SWP_NOZORDER);
-        SetWindowPos(d->btnConform, nullptr, 148,      btnY, 150, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(dlg, IDC_CANCEL_BTN), nullptr, w - 90, btnY, 90, 30, SWP_NOZORDER);
+        SetWindowPos(d->btnDetect,  nullptr, 8,      btnY, 130, 30, SWP_NOZORDER);
+        SetWindowPos(d->btnConform, nullptr, 148,    btnY, 150, 30, SWP_NOZORDER);
+        SetWindowPos(GetDlgItem(dlg, IDC_CANCEL_BTN),
+                                  nullptr, w - 90,  btnY,  90, 30, SWP_NOZORDER);
         break;
     }
 
@@ -354,36 +552,21 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
     return FALSE;
 }
 
-// ── Build dialog template in memory (no .rc file needed) ─────────────
+// ── Build dialog template in memory ──────────────────────────────────
 
 struct DlgBuilder {
     std::vector<WORD> data;
     void w(WORD v)  { data.push_back(v); }
     void dw(DWORD v){ w(LOWORD(v)); w(HIWORD(v)); }
-    void str(const wchar_t* s) {
-        for (; *s; ++s) w((WORD)*s);
-        w(0);
-    }
+    void str(const wchar_t* s) { for (; *s; ++s) w((WORD)*s); w(0); }
     void align() { if (data.size() & 1) w(0); }
-
-    void header(DWORD style, short x, short y, short cx, short cy,
-                const wchar_t* title) {
-        dw(style); dw(0);
-        w(0);           // no menu
-        w(0x0000);      // default class
-        str(title);
-        w(cx); w(cy);   // font size (ignored without DS_SETFONT)
-    }
 
     void control(DWORD style, short x, short y, short cx, short cy,
                  WORD id, const wchar_t* cls, const wchar_t* text) {
         align();
-        dw(style | WS_CHILD | WS_VISIBLE);
-        dw(0);
+        dw(style | WS_CHILD | WS_VISIBLE); dw(0);
         w(x); w(y); w(cx); w(cy);
-        w(id);
-        str(cls); str(text);
-        w(0); // extra data size
+        w(id); str(cls); str(text); w(0);
     }
 };
 
@@ -393,57 +576,68 @@ void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
 
-    // Build DLGTEMPLATE in memory
-    // Layout (560x480):
-    //  [Label "Project:"] [Edit osp name] [Browse...]
-    //  [ListView shapes]
-    //  [Label "d_tight:"] [Edit] [Label "d_rigid:"] [Edit]
-    //  [Edit status (multi-line, read-only)]
-    //  [Detect Zones] [Conform with Drape] [Close]
+    // Layout (420 × 356 DLU):
+    //  y=2:  [Project:] [edit] [Browse...]
+    //  y=18: [Ref Body:] [edit] [Browse...]
+    //  y=32: [ListView]
+    //  y=207:[d_tight:] [edit] [d_rigid:] [edit]
+    //  y=221:[Status]
+    //  y=313:[Progress]
+    //  y=328:[Detect Zones] [Conform with Drape] [Close]
 
     DlgBuilder b;
-    WORD nControls = 12;
+    const WORD nControls = 14;
 
-    // DLGTEMPLATE
-    b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_POPUP);
-    b.dw(0);            // extended style
-    b.w(nControls);
-    b.w(0); b.w(0);     // x, y  (DS_CENTER handles it)
-    b.w(420); b.w(340); // cx, cy in DLU
-    b.w(0);             // no menu
-    b.w(0);             // default class
-    b.str(L"Drape Conform");
-    b.w(9); b.str(L"Segoe UI"); // font
+    b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT |
+         WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_POPUP);
+    b.dw(0); b.w(nControls);
+    b.w(0); b.w(0); b.w(420); b.w(356);
+    b.w(0); b.w(0); b.str(L"Drape Conform");
+    b.w(9); b.str(L"Segoe UI");
 
-    // Controls (all coords in DLUs)
-    b.control(SS_LEFT, 4, 4, 42, 10, 0, L"STATIC", L"Project:");
+    // Row 1 — Project OSP
+    b.control(SS_LEFT,
+              4, 4, 40, 10, 0, L"STATIC", L"Project:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | ES_READONLY,
-              48, 2, 294, 12, IDC_OSP_EDIT, L"EDIT", L"");
+              48, 2, 280, 12, IDC_OSP_EDIT, L"EDIT", L"");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              346, 2, 50, 12, IDC_OSP_BROWSE, L"BUTTON", L"Browse...");
+              332, 2, 54, 12, IDC_OSP_BROWSE, L"BUTTON", L"Browse...");
 
+    // Row 2 — Reference body NIF
+    b.control(SS_LEFT,
+              4, 18, 40, 10, 0, L"STATIC", L"Ref Body:");
+    b.control(ES_AUTOHSCROLL | WS_BORDER | ES_READONLY,
+              48, 16, 280, 12, IDC_REF_NIF_EDT, L"EDIT", L"");
+    b.control(BS_PUSHBUTTON | WS_TABSTOP,
+              332, 16, 54, 12, IDC_REF_NIF_BTN, L"BUTTON", L"Browse...");
+
+    // ListView
     b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL,
-              4, 18, 392, 170, IDC_SHAPES_LIST, L"SysListView32", L"");
+              4, 32, 392, 166, IDC_SHAPES_LIST, L"SysListView32", L"");
 
-    b.control(SS_LEFT, 4, 193, 42, 10, 0, L"STATIC", L"d_tight:");
+    // Thresholds
+    b.control(SS_LEFT, 4, 203, 42, 10, 0, L"STATIC", L"d_tight:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-              50, 191, 40, 12, IDC_D_TIGHT_EDT, L"EDIT", L"");
-    b.control(SS_LEFT, 100, 193, 42, 10, 0, L"STATIC", L"d_rigid:");
+              50, 201, 40, 12, IDC_D_TIGHT_EDT, L"EDIT", L"");
+    b.control(SS_LEFT, 100, 203, 42, 10, 0, L"STATIC", L"d_rigid:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-              146, 191, 40, 12, IDC_D_RIGID_EDT, L"EDIT", L"");
+              146, 201, 40, 12, IDC_D_RIGID_EDT, L"EDIT", L"");
 
-    b.control(ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
-              WS_BORDER | WS_VSCROLL,
-              4, 208, 392, 88, IDC_STATUS, L"EDIT", L"");
+    // Status
+    b.control(ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
+              4, 217, 392, 92, IDC_STATUS, L"EDIT", L"");
 
-    b.control(PBS_SMOOTH, 4, 300, 392, 10, IDC_PROGRESS, L"msctls_progress32", L"");
+    // Progress
+    b.control(PBS_SMOOTH, 4, 313, 392, 10,
+              IDC_PROGRESS, L"msctls_progress32", L"");
 
+    // Buttons
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              4, 316, 100, 18, IDC_DETECT_BTN, L"BUTTON", L"Detect Zones");
+              4, 330, 110, 18, IDC_DETECT_BTN, L"BUTTON", L"Detect Zones");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              110, 316, 120, 18, IDC_CONFORM_BTN, L"BUTTON", L"Conform with Drape");
+              120, 330, 140, 18, IDC_CONFORM_BTN, L"BUTTON", L"Conform with Drape");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              340, 316, 56, 18, IDC_CANCEL_BTN, L"BUTTON", L"Close");
+              350, 330, 56, 18, IDC_CANCEL_BTN, L"BUTTON", L"Close");
 
     DlgData data;
     data.bsDir = bsDir;
@@ -451,7 +645,6 @@ void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
     DialogBoxIndirectParamW(
         GetModuleHandleW(nullptr),
         reinterpret_cast<LPCDLGTEMPLATEW>(b.data.data()),
-        parent,
-        DrapeDlgProc,
+        parent, DrapeDlgProc,
         reinterpret_cast<LPARAM>(&data));
 }

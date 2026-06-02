@@ -51,12 +51,23 @@ public:
 
     // Full conform: apply Automorph-style displacement filtered by cloth zone.
     // outfitNif    : path to the outfit .nif
-    // refBodyNif   : path to the MPP reference body .nif (neutral pose)
+    // refBodyNif   : path to the reference body .nif (neutral pose)
     // refBodyDiffs : per-vertex displacements of the reference body for one slider
     // Returns post-processed diffs for every shape in the outfit.
     std::vector<ShapeResult> conform(const std::string& outfitNif,
                                      const std::string& refBodyNif,
                                      const VertexDiffs& refBodyDiffs) const;
+
+    // Filter already-computed outfit diffs (e.g. from vanilla Automorph) by cloth zone.
+    // outVerts  : outfit mesh vertex positions (pre-loaded from NIF)
+    // refVerts  : reference body vertex positions (pre-loaded from NIF)
+    // outTris   : outfit mesh triangles (for rigid island flood-fill)
+    // existing  : vanilla diffs keyed by outfit vertex index
+    // Returns   : zone-scaled version of existing diffs
+    VertexDiffs filterDiffs(const std::vector<Vec3>& outVerts,
+                            const std::vector<Vec3>& refVerts,
+                            const std::vector<std::array<uint16_t,3>>& outTris,
+                            const VertexDiffs& existing) const;
 
 private:
     DrapeOptions m_opts;

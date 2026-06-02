@@ -2,10 +2,11 @@
 #include <windows.h>
 #include <string>
 
-// Unique ID for our injected menu item (arbitrary, avoids wx ID space)
 static constexpr UINT DRAPE_CMD_ID = 0xD4A9u;
 
-static WNDPROC g_oldProc = nullptr;
+static WNDPROC g_oldProc      = nullptr;
+HWND           g_osHwnd        = nullptr;  // OutfitStudio main window
+UINT           g_conformAllId  = 0;        // WM_COMMAND ID for "Conform All"
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -55,6 +56,7 @@ static DWORD WINAPI InjectThread(LPVOID) {
         hw = FindOsWindow();
     }
     if (!hw) return 1;
+    g_osHwnd = hw;
 
     HMENU bar = GetMenu(hw);
     if (!bar) return 1;
@@ -77,6 +79,7 @@ static DWORD WINAPI InjectThread(LPVOID) {
     for (int i = 0; i < nItems; ++i) {
         char lbl[128]; GetMenuStringA(sliderMenu, i, lbl, sizeof(lbl), MF_BYPOSITION);
         if (std::string(lbl).find("Conform All") != std::string::npos) {
+            g_conformAllId = GetMenuItemID(sliderMenu, i);
             insertPos = i + 1;
             break;
         }
