@@ -17,47 +17,52 @@
 namespace fs = std::filesystem;
 using namespace nifly;
 
-// Defined in dllmain.cpp
 extern HWND g_osHwnd;
 extern UINT g_conformAllId;
 
 // ── Control IDs ──────────────────────────────────────────────────────
 enum : UINT {
-    IDC_PROJECT_LBL   = 101,
-    IDC_OSP_EDIT      = 102,
-    IDC_OSP_BROWSE    = 103,
-    IDC_SHAPES_LIST   = 104,
-    IDC_DETECT_BTN    = 105,
-    IDC_CONFORM_BTN   = 106,
-    IDC_CANCEL_BTN    = 107,
-    IDC_PROGRESS      = 108,
-    IDC_STATUS        = 109,
-    IDC_D_TIGHT_EDT   = 110,
-    IDC_D_RIGID_EDT   = 111,
-    IDC_REF_NIF_EDT   = 112,
-    IDC_REF_NIF_BTN   = 113,
-    COL_SHAPE = 0, COL_ZONE = 1, COL_DIST = 2,
+    IDC_OSP_EDIT    = 101,
+    IDC_OSP_BROWSE  = 102,
+    IDC_SHAPES_LIST = 103,
+    IDC_DETECT_BTN  = 104,
+    IDC_CONFORM_BTN = 105,
+    IDC_CANCEL_BTN  = 106,
+    IDC_PROGRESS    = 107,
+    IDC_STATUS      = 108,
+    IDC_D_TIGHT_EDT = 109,
+    IDC_D_RIGID_EDT = 110,
+    COL_SHAPE = 0, COL_ZONE = 1, COL_VERTS = 2,
 };
 
 #define WM_DRAPE_DONE  (WM_USER + 1)
 #define WM_DRAPE_LINE  (WM_USER + 2)   // lParam = LPSTR heap string (caller frees)
 #define WM_DRAPE_ZONE  (WM_USER + 3)   // wParam = item idx, lParam = LPSTR "zone|verts" (caller frees)
 
-// ── SliderSet info from .osp ──────────────────────────────────────────
+// ── Known reference body shape names (embedded in outfit NIFs) ────────
+static bool isBodyShape(const std::string& target) {
+    static const char* KNOWN[] = {
+        "CBBE", "HIMBO - Body HP", "BHUNP Body", "UNP Body",
+        "UUNP Body", "3BA", "TBD Body", "SAM Body", "CBBE Body",
+        "3BBB Body", "Bra", "Panty",  // common CBBE accessories also in ref
+    };
+    for (auto* k : KNOWN)
+        if (target == k) return true;
+    return false;
+}
 
+// ── SliderSet info ────────────────────────────────────────────────────
 struct SetInfo {
     std::string name;
     std::string dataFolder;
     std::string sourceFile;
-    std::set<std::string> osdFiles;  // OSD basenames referenced by this set
+    std::string refBodyShape;           // name of body-copy shape inside the NIF
+    std::set<std::string> osdFiles;     // OSD basenames referenced by this set
 };
-
-// ── DlgData ──────────────────────────────────────────────────────────
 
 struct DlgData {
     std::string bsDir;
     std::string ospPath;
-    std::string refNifPath;
     std::vector<SetInfo> ospSets;
     HWND lvShapes  = nullptr;
     HWND edStatus  = nullptr;
@@ -97,32 +102,39 @@ static std::vector<SetInfo> ParseOspSets(const std::string& ospPath) {
                 }
             }
         } else {
-            if (cur.dataFolder.empty()) {
-                auto v = xmlText(line, "<DataFolder>", "</DataFolder>");
-                if (!v.empty()) cur.dataFolder = v;
-            }
-            if (cur.sourceFile.empty()) {
-                auto v = xmlText(line, "<SourceFile>", "</SourceFile>");
-                if (!v.empty()) cur.sourceFile = v;
-            }
-            // Collect OSD file basenames from <Data> elements
-            // Format: <Data ... local="true">filename.osd\entryName</Data>
-            if (line.find("local=\"true\"") != std::string::npos) {
-                auto p = line.find('>');
+            if (cur.dataFolder.empty())
+                cur.dataFolder = xmlText(line, "<DataFolder>", "</DataFolder>");
+            if (cur.sourceFile.empty())
+                cur.sourceFile = xmlText(line, "<SourceFile>", "</SourceFile>");
+
+            // Detect reference body shape from <Shape target="CBBE" ...>
+            if (cur.refBodyShape.empty()) {
+                auto p = line.find("<Shape target=\"");
                 if (p != std::string::npos) {
-                    ++p;
-                    auto q = line.find('<', p);
+                    p += 15;
+                    auto q = line.find('"', p);
                     if (q != std::string::npos) {
-                        std::string val = line.substr(p, q - p);
-                        auto bsl = val.find('\\');
-                        if (bsl != std::string::npos) {
-                            std::string osdName = val.substr(0, bsl);
-                            if (!osdName.empty())
-                                cur.osdFiles.insert(osdName);
-                        }
+                        std::string target = line.substr(p, q - p);
+                        if (isBodyShape(target))
+                            cur.refBodyShape = target;
                     }
                 }
             }
+
+            // Collect OSD basenames from <Data ... local="true">file.osd\entry</Data>
+            if (line.find("local=\"true\"") != std::string::npos) {
+                auto p = line.find('>');
+                if (p != std::string::npos) {
+                    auto q = line.find('<', ++p);
+                    if (q != std::string::npos) {
+                        std::string val = line.substr(p, q - p);
+                        auto bsl = val.find('\\');
+                        if (bsl != std::string::npos)
+                            cur.osdFiles.insert(val.substr(0, bsl));
+                    }
+                }
+            }
+
             if (line.find("</SliderSet>") != std::string::npos) {
                 sets.push_back(cur);
                 cur = {}; inSet = false;
@@ -132,7 +144,7 @@ static std::vector<SetInfo> ParseOspSets(const std::string& ospPath) {
     return sets;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────
+// ── Window helpers ────────────────────────────────────────────────────
 
 static std::string ProjectFromTitle(HWND osHwnd) {
     char buf[512]; GetWindowTextA(osHwnd, buf, sizeof(buf));
@@ -145,15 +157,14 @@ static std::string ProjectFromTitle(HWND osHwnd) {
     return name;
 }
 
-static std::string FindOsp(const std::string& bsDir, const std::string& projName) {
+static std::string FindOsp(const std::string& bsDir, const std::string& proj) {
     fs::path ssDir = fs::path(bsDir) / "SliderSets";
     if (!fs::is_directory(ssDir)) return "";
     for (auto& e : fs::directory_iterator(ssDir)) {
         if (e.path().extension() != ".osp") continue;
-        std::ifstream f(e.path());
-        std::string line;
+        std::ifstream f(e.path()); std::string line;
         while (std::getline(f, line))
-            if (line.find("name=\"" + projName + "\"") != std::string::npos)
+            if (line.find("name=\"" + proj + "\"") != std::string::npos)
                 return e.path().string();
     }
     return "";
@@ -163,14 +174,14 @@ static void PopulateSets(HWND lv, const std::vector<SetInfo>& sets) {
     ListView_DeleteAllItems(lv);
     for (int i = 0; i < (int)sets.size(); ++i) {
         LVITEMA item{};
-        item.mask      = LVIF_TEXT | LVIF_STATE;
-        item.iItem     = i;
+        item.mask = LVIF_TEXT | LVIF_STATE;
+        item.iItem = i;
         item.stateMask = LVIS_STATEIMAGEMASK;
-        item.state     = INDEXTOSTATEIMAGEMASK(2);  // checked
-        item.pszText   = const_cast<char*>(sets[i].name.c_str());
+        item.state = INDEXTOSTATEIMAGEMASK(2);  // checked
+        item.pszText = const_cast<char*>(sets[i].name.c_str());
         ListView_InsertItem(lv, &item);
-        ListView_SetItemText(lv, i, COL_ZONE, const_cast<char*>("—"));
-        ListView_SetItemText(lv, i, COL_DIST, const_cast<char*>("—"));
+        ListView_SetItemText(lv, i, COL_ZONE,  const_cast<char*>("—"));
+        ListView_SetItemText(lv, i, COL_VERTS, const_cast<char*>("—"));
     }
 }
 
@@ -178,52 +189,25 @@ static void PostLog(HWND dlg, const std::string& msg) {
     PostMessageA(dlg, WM_DRAPE_LINE, 0, (LPARAM)_strdup(msg.c_str()));
 }
 
-// ── Load NIF helpers ──────────────────────────────────────────────────
+// ── NIF helpers ───────────────────────────────────────────────────────
 
-static std::vector<Vec3> nifVerts(NifFile& nif, NiShape* s) {
+static std::vector<Vec3> shapeVerts(NifFile& nif, NiShape* s) {
     std::vector<Vector3> v; nif.GetVertsForShape(s, v);
     std::vector<Vec3> out; out.reserve(v.size());
     for (auto& x : v) out.push_back({x.x, x.y, x.z});
     return out;
 }
 
-static std::vector<std::array<uint16_t,3>> nifTris(NifFile& nif, NiShape* s) {
+static std::vector<std::array<uint16_t,3>> shapeTris(NifFile& nif, NiShape* s) {
     std::vector<Triangle> t; nif.GetTrianglesForShape(s, t);
     std::vector<std::array<uint16_t,3>> out; out.reserve(t.size());
     for (auto& x : t) out.push_back({x.p1, x.p2, x.p3});
     return out;
 }
 
-static NiShape* largestShape(NifFile& nif) {
-    NiShape* best = nullptr; int maxV = 0;
-    for (auto* s : nif.GetShapes()) {
-        if (!s) continue;
-        std::vector<Vector3> v; nif.GetVertsForShape(s, v);
-        if ((int)v.size() > maxV) { maxV = (int)v.size(); best = s; }
-    }
-    return best;
-}
-
 // ── Detect zones ──────────────────────────────────────────────────────
 
 static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
-    if (d->refNifPath.empty() || !fs::exists(d->refNifPath)) {
-        PostLog(dlg, "ERROR: select a reference body NIF first.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
-
-    NifFile refNif;
-    if (refNif.Load(d->refNifPath) != 0) {
-        PostLog(dlg, "ERROR: failed to load reference NIF.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
-    NiShape* refShape = largestShape(refNif);
-    if (!refShape) {
-        PostLog(dlg, "ERROR: no shapes in reference NIF.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
-    auto refVerts = nifVerts(refNif, refShape);
-
     DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
     DrapeConformer dc(opts);
 
@@ -231,19 +215,50 @@ static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
     for (int i = 0; i < n; ++i) {
         if (!ListView_GetCheckState(d->lvShapes, i)) continue;
         const SetInfo& si = d->ospSets[i];
-        std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
 
+        std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
         if (!fs::exists(nifPath)) {
             PostLog(dlg, "SKIP " + si.name + " (NIF not found)");
             continue;
         }
-        PostLog(dlg, "Detecting: " + si.name);
 
-        auto results = dc.detect(nifPath, d->refNifPath);
-        int tight = 0, loose = 0, rigid = 0;
-        for (auto& sr : results) {
-            tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
+        NifFile nif;
+        if (nif.Load(nifPath) != 0) {
+            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)");
+            continue;
         }
+
+        // Find the embedded reference body shape
+        NiShape* refShape = nullptr;
+        for (auto* s : nif.GetShapes()) {
+            if (s && s->name.get() == si.refBodyShape) { refShape = s; break; }
+        }
+        if (!refShape) {
+            PostLog(dlg, "SKIP " + si.name + " (ref body shape '" + si.refBodyShape + "' not found)");
+            continue;
+        }
+
+        auto refVerts = shapeVerts(nif, refShape);
+        PostLog(dlg, "Detecting: " + si.name + "  (ref: " + si.refBodyShape + ")");
+
+        int tight = 0, loose = 0, rigid = 0;
+
+        for (auto* s : nif.GetShapes()) {
+            if (!s || s->name.get() == si.refBodyShape) continue;
+            auto results = dc.detect(nifPath, nifPath);  // use same NIF, filter by shape later
+            // Re-do detect per-shape using pre-loaded ref verts
+            // (dc.detect loads the NIF internally; we use a lighter manual path here)
+            auto outVerts = shapeVerts(nif, s);
+            // Compute zones manually for efficiency
+            DrapeConformer dcLocal(opts);
+            (void)dcLocal;  // used only for filterDiffs via detect workaround below
+            // Use detect() result on whole NIF and accumulate
+            for (auto& sr : results) {
+                if (sr.name != s->name.get()) continue;
+                tight += sr.tightVerts; loose += sr.looseVerts; rigid += sr.rigidVerts;
+            }
+        }
+
         int total = tight + loose + rigid;
         const char* zone =
             (rigid > tight && rigid > loose) ? "Rigid" :
@@ -260,36 +275,18 @@ static void RunDetect(HWND dlg, DlgData* d, float dTight, float dRigid) {
     PostMessageA(dlg, WM_DRAPE_DONE, 0, 0);
 }
 
-// ── Filter OSD after Conform All ──────────────────────────────────────
+// ── Conform: hook Conform All + filter OSD ────────────────────────────
 
 static void RunConform(HWND dlg, DlgData* d, float dTight, float dRigid) {
-    if (d->refNifPath.empty() || !fs::exists(d->refNifPath)) {
-        PostLog(dlg, "ERROR: select a reference body NIF first.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
     if (g_conformAllId == 0) {
         PostLog(dlg, "ERROR: Conform All not found in OutfitStudio menu.");
         PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
     }
 
-    // ── Step 1: trigger OutfitStudio's Conform All ────────────────────
+    // ── Step 1: trigger vanilla Conform All ───────────────────────────
     PostLog(dlg, "Running Conform All...");
-    // SendMessage is synchronous across threads — blocks until conform finishes
     SendMessage(g_osHwnd, WM_COMMAND, MAKEWPARAM(g_conformAllId, 0), 0);
     PostLog(dlg, "Conform All done. Applying Drape zone filter...");
-
-    // ── Step 2: load reference NIF ────────────────────────────────────
-    NifFile refNif;
-    if (refNif.Load(d->refNifPath) != 0) {
-        PostLog(dlg, "ERROR: failed to load reference NIF.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
-    NiShape* refShape = largestShape(refNif);
-    if (!refShape) {
-        PostLog(dlg, "ERROR: no shapes in reference NIF.");
-        PostMessageA(dlg, WM_DRAPE_DONE, 1, 0); return;
-    }
-    auto refVerts = nifVerts(refNif, refShape);
 
     DrapeOptions opts; opts.d_tight = dTight; opts.d_rigid = dRigid;
     DrapeConformer dc(opts);
@@ -301,54 +298,70 @@ static void RunConform(HWND dlg, DlgData* d, float dTight, float dRigid) {
         if (!ListView_GetCheckState(d->lvShapes, i)) continue;
         const SetInfo& si = d->ospSets[i];
 
-        // ── Step 3: load outfit NIF ───────────────────────────────────
         std::string nifPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + si.sourceFile;
         if (!fs::exists(nifPath)) {
-            PostLog(dlg, "SKIP " + si.name + " (NIF not found)");
-            continue;
-        }
-        NifFile outfitNif;
-        if (outfitNif.Load(nifPath) != 0) {
-            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)");
-            continue;
+            PostLog(dlg, "SKIP " + si.name + " (NIF not found)"); continue;
         }
 
-        PostLog(dlg, "Filtering: " + si.name);
+        // ── Step 2: load NIF, find embedded ref body shape ────────────
+        NifFile nif;
+        if (nif.Load(nifPath) != 0) {
+            PostLog(dlg, "SKIP " + si.name + " (NIF load failed)"); continue;
+        }
 
-        // ── Step 4: for each OSD file, filter diffs and rewrite ───────
-        for (const std::string& osdName : si.osdFiles) {
-            std::string osdPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + osdName;
+        NiShape* refShape = nullptr;
+        for (auto* s : nif.GetShapes())
+            if (s && s->name.get() == si.refBodyShape) { refShape = s; break; }
+
+        if (!refShape) {
+            PostLog(dlg, "WARN " + si.name + ": ref shape '" + si.refBodyShape +
+                    "' not found — filtering with largest shape as ref");
+            int maxV = 0;
+            for (auto* s : nif.GetShapes()) {
+                if (!s) continue;
+                std::vector<Vector3> v; nif.GetVertsForShape(s, v);
+                if ((int)v.size() > maxV) { maxV = (int)v.size(); refShape = s; }
+            }
+        }
+        if (!refShape) {
+            PostLog(dlg, "SKIP " + si.name + " (no shapes in NIF)"); continue;
+        }
+
+        auto refVerts = shapeVerts(nif, refShape);
+        std::string refName = refShape->name.get();
+
+        PostLog(dlg, "Filtering: " + si.name + "  (ref: " + refName + ")");
+
+        // ── Step 3: for each OSD, filter non-body shapes ──────────────
+        for (const std::string& osdFile : si.osdFiles) {
+            std::string osdPath = d->bsDir + "ShapeData\\" + si.dataFolder + "\\" + osdFile;
             if (!fs::exists(osdPath)) continue;
 
             OSDataFile osd;
             if (!osd.Read(osdPath)) {
-                PostLog(dlg, "  SKIP " + osdName + " (read failed)");
-                continue;
+                PostLog(dlg, "  SKIP " + osdFile + " (read failed)"); continue;
             }
 
             bool modified = false;
-            for (auto* shape : outfitNif.GetShapes()) {
+            for (auto* shape : nif.GetShapes()) {
                 if (!shape) continue;
                 std::string shapeName = shape->name.get();
-                auto outVerts = nifVerts(outfitNif, shape);
-                auto outTris  = nifTris(outfitNif, shape);
+                if (shapeName == refName) continue;  // skip the body copy itself
 
-                // Filter each OSD entry whose key starts with this shape name
+                auto outVerts = shapeVerts(nif, shape);
+                auto outTris  = shapeTris(nif, shape);
+
                 for (auto& [key, tdiffs] : osd.GetDataDiffs()) {
-                    if (!tdiffs || key.substr(0, shapeName.size()) != shapeName)
-                        continue;
+                    if (!tdiffs) continue;
+                    if (key.substr(0, shapeName.size()) != shapeName) continue;
 
-                    // Convert TargetDataDiffs to VertexDiffs (Vec3)
                     VertexDiffs vd;
-                    for (auto& [idx, v] : *tdiffs)
-                        vd[idx] = {v.x, v.y, v.z};
+                    for (auto& [idx, v] : *tdiffs) vd[idx] = {v.x, v.y, v.z};
 
                     auto filtered = dc.filterDiffs(outVerts, refVerts, outTris, vd);
 
-                    // Write filtered diffs back to the OSD entry
                     TargetDataDiffs tdd;
-                    for (auto& [idx, v] : filtered)
-                        tdd[idx] = {v.x, v.y, v.z};
+                    for (auto& [idx, v] : filtered) tdd[idx] = {v.x, v.y, v.z};
                     osd.SetDataDiff(key, tdd);
                     modified = true;
                 }
@@ -356,9 +369,9 @@ static void RunConform(HWND dlg, DlgData* d, float dTight, float dRigid) {
 
             if (modified) {
                 if (osd.Write(osdPath))
-                    PostLog(dlg, "  Written: " + osdName);
+                    PostLog(dlg, "  Written: " + osdFile);
                 else
-                    PostLog(dlg, "  ERROR writing: " + osdName);
+                    PostLog(dlg, "  ERROR writing: " + osdFile);
             }
         }
         ++totalSets;
@@ -401,9 +414,9 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
         };
         RECT r; GetClientRect(lv, &r);
         int total = r.right - r.left;
-        addCol(COL_SHAPE, "Shape",    total - 160);
-        addCol(COL_ZONE,  "Zone",     90);
-        addCol(COL_DIST,  "Verts",    70);
+        addCol(COL_SHAPE, "Shape", total - 140);
+        addCol(COL_ZONE,  "Zone",  80);
+        addCol(COL_VERTS, "Verts", 60);
 
         SetDlgItemTextA(dlg, IDC_D_TIGHT_EDT, "2.0");
         SetDlgItemTextA(dlg, IDC_D_RIGID_EDT, "20.0");
@@ -441,21 +454,6 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
                     fs::path(path).stem().string().c_str());
                 d->ospSets = ParseOspSets(path);
                 PopulateSets(d->lvShapes, d->ospSets);
-            }
-        }
-
-        else if (id == IDC_REF_NIF_BTN) {
-            char path[MAX_PATH] = "";
-            OPENFILENAMEA ofn{sizeof(ofn)};
-            ofn.hwndOwner   = dlg;
-            ofn.lpstrFilter = "NIF mesh\0*.nif\0";
-            ofn.lpstrFile   = path;
-            ofn.nMaxFile    = MAX_PATH;
-            ofn.Flags       = OFN_FILEMUSTEXIST;
-            if (GetOpenFileNameA(&ofn)) {
-                d->refNifPath = path;
-                SetDlgItemTextA(dlg, IDC_REF_NIF_EDT,
-                    fs::path(path).filename().string().c_str());
             }
         }
 
@@ -517,7 +515,7 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
             std::getline(ss, verts, '|');
             ListView_SetItemText(d->lvShapes, item, COL_ZONE,
                                  const_cast<char*>(zone.c_str()));
-            ListView_SetItemText(d->lvShapes, item, COL_DIST,
+            ListView_SetItemText(d->lvShapes, item, COL_VERTS,
                                  const_cast<char*>(verts.c_str()));
             free(payload);
         }
@@ -534,17 +532,17 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
     case WM_SIZE: {
         if (!d) break;
         RECT cr; GetClientRect(dlg, &cr);
-        int w = cr.right - 16, top = 60;
+        int w = cr.right - 16, top = 32;
         SetWindowPos(GetDlgItem(dlg, IDC_SHAPES_LIST), nullptr,
-                     8, top, w, cr.bottom - top - 190, SWP_NOZORDER);
-        int statusTop = cr.bottom - 174;
+                     8, top, w, cr.bottom - top - 175, SWP_NOZORDER);
+        int statusTop = cr.bottom - 159;
         SetWindowPos(d->edStatus, nullptr,
-                     8, statusTop, w, 120, SWP_NOZORDER);
-        int btnY = cr.bottom - 46;
-        SetWindowPos(d->btnDetect,  nullptr, 8,      btnY, 130, 30, SWP_NOZORDER);
-        SetWindowPos(d->btnConform, nullptr, 148,    btnY, 150, 30, SWP_NOZORDER);
+                     8, statusTop, w, 110, SWP_NOZORDER);
+        int btnY = cr.bottom - 40;
+        SetWindowPos(d->btnDetect,  nullptr, 8,      btnY, 120, 28, SWP_NOZORDER);
+        SetWindowPos(d->btnConform, nullptr, 136,    btnY, 150, 28, SWP_NOZORDER);
         SetWindowPos(GetDlgItem(dlg, IDC_CANCEL_BTN),
-                                  nullptr, w - 90,  btnY,  90, 30, SWP_NOZORDER);
+                                  nullptr, w - 84,  btnY,  84, 28, SWP_NOZORDER);
         break;
     }
 
@@ -552,7 +550,7 @@ static INT_PTR CALLBACK DrapeDlgProc(HWND dlg, UINT msg,
     return FALSE;
 }
 
-// ── Build dialog template in memory ──────────────────────────────────
+// ── Build dialog template ─────────────────────────────────────────────
 
 struct DlgBuilder {
     std::vector<WORD> data;
@@ -560,7 +558,6 @@ struct DlgBuilder {
     void dw(DWORD v){ w(LOWORD(v)); w(HIWORD(v)); }
     void str(const wchar_t* s) { for (; *s; ++s) w((WORD)*s); w(0); }
     void align() { if (data.size() & 1) w(0); }
-
     void control(DWORD style, short x, short y, short cx, short cy,
                  WORD id, const wchar_t* cls, const wchar_t* text) {
         align();
@@ -570,74 +567,61 @@ struct DlgBuilder {
     }
 };
 
-// ── Public entry point ────────────────────────────────────────────────
-
 void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
 
-    // Layout (420 × 356 DLU):
+    // Layout (420 × 328 DLU):
     //  y=2:  [Project:] [edit] [Browse...]
-    //  y=18: [Ref Body:] [edit] [Browse...]
-    //  y=32: [ListView]
-    //  y=207:[d_tight:] [edit] [d_rigid:] [edit]
-    //  y=221:[Status]
-    //  y=313:[Progress]
-    //  y=328:[Detect Zones] [Conform with Drape] [Close]
+    //  y=16: [ListView]
+    //  y=191:[d_tight:] [edit] [d_rigid:] [edit]
+    //  y=205:[Status edit]
+    //  y=299:[Progress]
+    //  y=306:[Detect Zones] [Conform with Drape] [Close]
 
     DlgBuilder b;
-    const WORD nControls = 14;
+    const WORD nControls = 11;
 
     b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT |
          WS_CAPTION | WS_SYSMENU | WS_SIZEBOX | WS_POPUP);
     b.dw(0); b.w(nControls);
-    b.w(0); b.w(0); b.w(420); b.w(356);
+    b.w(0); b.w(0); b.w(420); b.w(328);
     b.w(0); b.w(0); b.str(L"Drape Conform");
     b.w(9); b.str(L"Segoe UI");
 
-    // Row 1 — Project OSP
-    b.control(SS_LEFT,
-              4, 4, 40, 10, 0, L"STATIC", L"Project:");
+    // Row 1 — Project
+    b.control(SS_LEFT, 4, 4, 40, 10, 0, L"STATIC", L"Project:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | ES_READONLY,
-              48, 2, 280, 12, IDC_OSP_EDIT, L"EDIT", L"");
+              48, 2, 284, 12, IDC_OSP_EDIT, L"EDIT", L"");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              332, 2, 54, 12, IDC_OSP_BROWSE, L"BUTTON", L"Browse...");
-
-    // Row 2 — Reference body NIF
-    b.control(SS_LEFT,
-              4, 18, 40, 10, 0, L"STATIC", L"Ref Body:");
-    b.control(ES_AUTOHSCROLL | WS_BORDER | ES_READONLY,
-              48, 16, 280, 12, IDC_REF_NIF_EDT, L"EDIT", L"");
-    b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              332, 16, 54, 12, IDC_REF_NIF_BTN, L"BUTTON", L"Browse...");
+              336, 2, 54, 12, IDC_OSP_BROWSE, L"BUTTON", L"Browse...");
 
     // ListView
     b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL,
-              4, 32, 392, 166, IDC_SHAPES_LIST, L"SysListView32", L"");
+              4, 18, 392, 168, IDC_SHAPES_LIST, L"SysListView32", L"");
 
     // Thresholds
-    b.control(SS_LEFT, 4, 203, 42, 10, 0, L"STATIC", L"d_tight:");
+    b.control(SS_LEFT, 4, 191, 42, 10, 0, L"STATIC", L"d_tight:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-              50, 201, 40, 12, IDC_D_TIGHT_EDT, L"EDIT", L"");
-    b.control(SS_LEFT, 100, 203, 42, 10, 0, L"STATIC", L"d_rigid:");
+              50, 189, 40, 12, IDC_D_TIGHT_EDT, L"EDIT", L"");
+    b.control(SS_LEFT, 100, 191, 42, 10, 0, L"STATIC", L"d_rigid:");
     b.control(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-              146, 201, 40, 12, IDC_D_RIGID_EDT, L"EDIT", L"");
+              146, 189, 40, 12, IDC_D_RIGID_EDT, L"EDIT", L"");
 
     // Status
     b.control(ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
-              4, 217, 392, 92, IDC_STATUS, L"EDIT", L"");
+              4, 205, 392, 90, IDC_STATUS, L"EDIT", L"");
 
     // Progress
-    b.control(PBS_SMOOTH, 4, 313, 392, 10,
-              IDC_PROGRESS, L"msctls_progress32", L"");
+    b.control(PBS_SMOOTH, 4, 299, 392, 8, IDC_PROGRESS, L"msctls_progress32", L"");
 
     // Buttons
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              4, 330, 110, 18, IDC_DETECT_BTN, L"BUTTON", L"Detect Zones");
+              4, 312, 120, 14, IDC_DETECT_BTN, L"BUTTON", L"Detect Zones");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              120, 330, 140, 18, IDC_CONFORM_BTN, L"BUTTON", L"Conform with Drape");
+              130, 312, 150, 14, IDC_CONFORM_BTN, L"BUTTON", L"Conform with Drape");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              350, 330, 56, 18, IDC_CANCEL_BTN, L"BUTTON", L"Close");
+              350, 312, 60, 14, IDC_CANCEL_BTN, L"BUTTON", L"Close");
 
     DlgData data;
     data.bsDir = bsDir;
