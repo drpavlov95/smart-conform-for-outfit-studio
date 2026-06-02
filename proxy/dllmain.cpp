@@ -49,14 +49,16 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
 // ── Injection thread ─────────────────────────────────────────────────
 
 static DWORD WINAPI InjectThread(LPVOID) {
-    // Poll until OutfitStudio window appears (up to 30 s)
+    // Poll until OutfitStudio window appears (up to 60 s, more reliable)
     HWND hw = nullptr;
-    for (int i = 0; i < 300 && !hw; ++i) {
+    for (int i = 0; i < 600 && !hw; ++i) {
         Sleep(100);
         hw = FindOsWindow();
     }
     if (!hw) return 1;
     g_osHwnd = hw;
+
+    Sleep(500);  // Give menu bar time to initialize
 
     HMENU bar = GetMenu(hw);
     if (!bar) return 1;
@@ -65,7 +67,8 @@ static DWORD WINAPI InjectThread(LPVOID) {
     HMENU sliderMenu = nullptr;
     int nTop = GetMenuItemCount(bar);
     for (int i = 0; i < nTop; ++i) {
-        char lbl[64]; GetMenuStringA(bar, i, lbl, sizeof(lbl), MF_BYPOSITION);
+        char lbl[64] = {};
+        GetMenuStringA(bar, i, lbl, sizeof(lbl), MF_BYPOSITION);
         if (std::string(lbl) == "Slider") {
             sliderMenu = GetSubMenu(bar, i);
             break;
@@ -75,15 +78,19 @@ static DWORD WINAPI InjectThread(LPVOID) {
 
     // Find "Conform All" position
     int nItems = GetMenuItemCount(sliderMenu);
-    int insertPos = 1; // fallback
+    int insertPos = 1;
+    bool foundConformAll = false;
     for (int i = 0; i < nItems; ++i) {
-        char lbl[128]; GetMenuStringA(sliderMenu, i, lbl, sizeof(lbl), MF_BYPOSITION);
+        char lbl[128] = {};
+        GetMenuStringA(sliderMenu, i, lbl, sizeof(lbl), MF_BYPOSITION);
         if (std::string(lbl).find("Conform All") != std::string::npos) {
             g_conformAllId = GetMenuItemID(sliderMenu, i);
             insertPos = i + 1;
+            foundConformAll = true;
             break;
         }
     }
+    if (!foundConformAll) return 1;
 
     // Insert separator + "Drape Conform..." right after Conform All
     InsertMenuA(sliderMenu, insertPos,     MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
