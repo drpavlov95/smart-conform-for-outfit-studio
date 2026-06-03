@@ -11,6 +11,11 @@ static WNDPROC g_oldProc      = nullptr;
 HWND           g_osHwnd        = nullptr;  // OutfitStudio main window
 UINT           g_conformAllId  = 0;        // WM_COMMAND ID for "Conform All"
 
+// Toggles the in-memory cloth-aware hook (drape-algo.dll export). Enabled only
+// for the duration of a Smart Conform, so the vanilla Conform All stays vanilla.
+typedef void (*PfnSetHookEnabled)(int);
+static PfnSetHookEnabled g_setHookEnabled = nullptr;
+
 // ── Debug logging (pure Win32, safe in DllMain context) ───────────────
 // Writes to %TEMP%\drape_debug.log so it works regardless of MO2 VFS.
 
@@ -76,8 +81,20 @@ static HWND FindOsWindow() {
 
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
-        DbgLog("WM_COMMAND received for Drape menu item");
-        ShowDrapeDialog(hw, ExeDir());
+        DbgLog("Smart Conform All clicked");
+        if (g_setHookEnabled && g_conformAllId) {
+            // Enable the cloth-aware hook ONLY for this conform, run the engine's
+            // own Conform All synchronously, then disable it again. The vanilla
+            // Conform All menu item is unaffected.
+            g_setHookEnabled(1);
+            SendMessageA(hw, WM_COMMAND, MAKEWPARAM(g_conformAllId, 0), 0);
+            g_setHookEnabled(0);
+            DbgLog("Smart Conform All done");
+        } else {
+            DbgLog("Smart Conform unavailable (hook=%p conformAllId=%u)",
+                   (void*)g_setHookEnabled, g_conformAllId);
+            ShowDrapeDialog(hw, ExeDir());  // fallback to the disk dialog
+        }
         return 0;
     }
     return CallWindowProc(g_oldProc, hw, msg, wp, lp);
@@ -134,7 +151,7 @@ static bool TryInjectMenu(HWND hw) {
 
     BOOL r1 = InsertMenuA(sliderMenu, insertPos, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
     BOOL r2 = InsertMenuA(sliderMenu, insertPos + 1, MF_BYPOSITION | MF_STRING,
-                          DRAPE_CMD_ID, "Smart Conform...");
+                          DRAPE_CMD_ID, "Smart Conform All");
     DbgLog("  TryInject: InsertMenu sep=%d item=%d", (int)r1, (int)r2);
     if (!r2) return false;
 
@@ -173,9 +190,12 @@ static DWORD WINAPI InjectThread(LPVOID) {
             typedef int (*PfnInstall)(void*, const char*, float, float);
             auto pInstall = reinterpret_cast<PfnInstall>(
                 GetProcAddress(hAlgo, "DrapeInstallConformHook"));
+            g_setHookEnabled = reinterpret_cast<PfnSetHookEnabled>(
+                GetProcAddress(hAlgo, "DrapeSetHookEnabled"));
             if (pInstall) {
                 int rc = pInstall(hw, ExeDir().c_str(), 2.0f, 20.0f);
-                DbgLog("InjectThread: DrapeInstallConformHook rc=%d", rc);
+                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p",
+                       rc, (void*)g_setHookEnabled);
             } else {
                 DbgLog("InjectThread: DrapeInstallConformHook not found");
             }

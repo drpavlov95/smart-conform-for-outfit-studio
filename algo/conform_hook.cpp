@@ -82,7 +82,9 @@ static PfnDiffZeroVert g_diffZeroVert  = nullptr;
 static HWND        g_osHwnd = nullptr;
 static std::string g_bsDir;
 static DrapeOptions g_opts;        // tight/loose distances
-static bool        g_enabled = true;
+// Disabled by default so the vanilla Conform All / Conform Selected pass through
+// UNCHANGED. version.dll flips this on only for the duration of a Smart Conform.
+static bool        g_enabled = false;
 
 // ── Per-shape weight cache (rebuilt when the open project changes) ─────
 static std::mutex g_cacheMx;
