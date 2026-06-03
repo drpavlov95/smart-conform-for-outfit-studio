@@ -1614,17 +1614,17 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // pbdIterations = relaxation steps; constraintIterations = passes/step;
         // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
         p.verletCloth = true;
-        p.pbdIterations = 60;             // relaxation steps
-        p.constraintIterations = 6;       // constraint passes per step
-        p.gravity = 0.25f;                // per-step downward nudge (no momentum)
-        p.clothMaxDrop = 14.0f;           // longer hang (sag up to ~14 below conform)
-        p.stretchStiffness = 0.60f;       // resist stretching (shapes the hang)
+        p.pbdIterations = 80;             // relaxation steps
+        p.constraintIterations = 5;       // constraint passes per step
+        p.gravity = 0.40f;                // per-step downward nudge (no momentum)
+        p.clothMaxDrop = 20.0f;           // allow a real, visible hang
+        p.stretchStiffness = 0.35f;       // SOFT: let gravity stretch/reorient edges
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
         p.bodyClearance = 0.70f;          // sit the cloth off the body (hides clipping)
-        p.bendingStiffness = 0.10f;       // light smoothing of folds
+        p.bendingStiffness = 0.06f;       // very light: don't fight folds
         p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 6;    // smoother skirt surface
-        p.surfaceSmoothStrength = 0.18f;
+        p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
+        p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
         // Column drape: low return rate + strong envelope = the skirt hangs as a
         // straight column from the hips instead of tucking back to the legs.
@@ -2678,7 +2678,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float gStep     = params.gravity;            // per-step downward nudge
         const float stretchK2 = Clamp01(params.stretchStiffness);
         const float maxDrop   = params.clothMaxDrop;
-        const float kMaxStretch = 1.06f;  // hard cap: no edge may exceed rest*this
+        // Loose cap: edges may elongate up to +30% so gravity can actually pull the
+        // skirt down and reorient it OFF the body (seam welding handles real splits,
+        // so this no longer tears). A tight cap kept the cloth glued to the conform.
+        const float kMaxStretch = 1.30f;
 
         auto solveStretch = [&](float k) {
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -3012,12 +3015,23 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
     }
 
-    // Smoothing sweep (verletCloth): the radial body shell (48 bins) and the
-    // envelope leave faceting on the skirt. A few Laplacian passes over the drape
-    // verts even out the surface for a smoother hang. Done BEFORE the final
-    // collision so any vert nudged inward gets pushed back out.
+    // Final body-collision sweep (verletCloth): the post-PBD passes can leave
+    // drape verts inside the body (visible as the body poking through). Push them
+    // back outside the body shell FIRST.
+    if (params.verletCloth && bodyShell && bodyShell->valid) {
+        for (int it = 0; it < 3; ++it)
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f && collideVertex(i, 1.0f))
+                    ++stats.collisionAdjusted;
+    }
+
+    // Smoothing sweep LAST (verletCloth): the radial body shell (48 bins) leaves
+    // faceting that reads as jagged. A few Laplacian passes over the drape verts
+    // even out the surface. Runs AFTER collision so it removes the collision
+    // facets; the 0.70 body clearance absorbs the slight inward pull without
+    // letting the cloth clip back into the body.
     if (params.verletCloth && !useEdges.empty()) {
-        for (int it = 0; it < 4; ++it) {
+        for (int it = 0; it < 5; ++it) {
             std::vector<Vec3> sum(n, Vec3{});
             std::vector<int> cnt(n, 0);
             for (const auto& e : useEdges) {
@@ -3031,16 +3045,6 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
             }
         }
-    }
-
-    // Final body-collision sweep (verletCloth): the post-PBD passes can leave
-    // drape verts inside the body (visible as the body poking through). Push them
-    // back outside the body shell before the final weld so there is no clipping.
-    if (params.verletCloth && bodyShell && bodyShell->valid) {
-        for (int it = 0; it < 3; ++it)
-            for (size_t i = 0; i < n; ++i)
-                if (drapeEl[i] >= 0.20f && collideVertex(i, 1.0f))
-                    ++stats.collisionAdjusted;
     }
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
