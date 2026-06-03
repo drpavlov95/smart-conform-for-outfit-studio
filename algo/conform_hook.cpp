@@ -1616,12 +1616,12 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.verletCloth = true;
         p.pbdIterations = 80;             // relaxation steps
         p.constraintIterations = 5;       // constraint passes per step
-        p.gravity = 0.40f;                // per-step downward nudge (no momentum)
-        p.clothMaxDrop = 20.0f;           // allow a real, visible hang
-        p.stretchStiffness = 0.35f;       // SOFT: let gravity stretch/reorient edges
+        p.gravity = 0.30f;                // per-step downward nudge (no momentum)
+        p.clothMaxDrop = 12.0f;           // visible hang, but no melted over-sag
+        p.stretchStiffness = 0.45f;       // enough structure to keep the hem crisp
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
-        p.bodyClearance = 0.70f;          // sit the cloth off the body (hides clipping)
-        p.bendingStiffness = 0.06f;       // very light: don't fight folds
+        p.bodyClearance = 0.85f;          // sit the cloth off the body (hides clipping)
+        p.bendingStiffness = 0.08f;       // light: smooths folds without melting
         p.bendingIterations = 1;
         p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
         p.surfaceSmoothStrength = 0.15f;
@@ -2678,10 +2678,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float gStep     = params.gravity;            // per-step downward nudge
         const float stretchK2 = Clamp01(params.stretchStiffness);
         const float maxDrop   = params.clothMaxDrop;
-        // Loose cap: edges may elongate up to +30% so gravity can actually pull the
-        // skirt down and reorient it OFF the body (seam welding handles real splits,
-        // so this no longer tears). A tight cap kept the cloth glued to the conform.
-        const float kMaxStretch = 1.30f;
+        // Edges may elongate up to +18%: enough for gravity to pull the skirt down
+        // and reorient it off the body, but not so much it over-stretches into a
+        // melted sag at the hem. (Seam welding handles real splits.)
+        const float kMaxStretch = 1.18f;
 
         auto solveStretch = [&](float k) {
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -3031,7 +3031,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // facets; the 0.70 body clearance absorbs the slight inward pull without
     // letting the cloth clip back into the body.
     if (params.verletCloth && !useEdges.empty()) {
-        for (int it = 0; it < 5; ++it) {
+        for (int it = 0; it < 3; ++it) {
             std::vector<Vec3> sum(n, Vec3{});
             std::vector<int> cnt(n, 0);
             for (const auto& e : useEdges) {
@@ -3042,7 +3042,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             for (size_t i = 0; i < n; ++i) {
                 if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
                 Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
-                finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
+                finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.22f));
             }
         }
     }
