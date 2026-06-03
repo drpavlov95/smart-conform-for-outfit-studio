@@ -1617,12 +1617,13 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.pbdIterations = 60;             // relaxation steps
         p.constraintIterations = 6;       // constraint passes per step
         p.gravity = 0.25f;                // per-step downward nudge (no momentum)
-        p.clothMaxDrop = 9.0f;            // hem sags at most ~9 units below conform
+        p.clothMaxDrop = 11.0f;           // hem sags at most ~11 units below conform
         p.stretchStiffness = 0.60f;       // resist stretching (shapes the hang)
-        p.collisionStiffness = 0.60f;     // keep cloth outside the body
+        p.collisionStiffness = 0.85f;     // keep cloth outside the body
+        p.bodyClearance = 0.70f;          // sit the cloth off the body (hides clipping)
         p.bendingStiffness = 0.10f;       // light smoothing of folds
         p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 3;
+        p.surfaceSmoothIterations = 4;
         p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
         // Column drape: keep the skirt from tucking back to the legs below the hips.
@@ -3005,6 +3006,16 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
         HLog("detour: DIAG_WRITE_TEST shape='%s' slider='%s' dropped=%d verts by %.1f",
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
+    }
+
+    // Final body-collision sweep (verletCloth): the post-PBD passes can leave
+    // drape verts inside the body (visible as the body poking through). Push them
+    // back outside the body shell before the final weld so there is no clipping.
+    if (params.verletCloth && bodyShell && bodyShell->valid) {
+        for (int it = 0; it < 3; ++it)
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f && collideVertex(i, 1.0f))
+                    ++stats.collisionAdjusted;
     }
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
