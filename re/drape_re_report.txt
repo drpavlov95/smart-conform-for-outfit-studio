@@ -1,0 +1,2359 @@
+imagebase: 140000000
+
+string 'Conforming shapes...' @ 140fc1318
+  ref by FUN_140260320 @ 140260320
+  ref by FUN_140260320 @ 140260320
+
+string 'proximityRadiusSlider' @ 140fc1330
+  ref by FUN_140276f50 @ 140276f50
+  ref by FUN_140262ac0 @ 140262ac0
+  ref by FUN_140262f30 @ 140262f30
+  ref by FUN_140262130 @ 140262130
+  ref by FUN_1402624f0 @ 1402624f0
+  ref by FUN_140261b90 @ 140261b90
+  ref by FUN_1402a1170 @ 1402a1170
+  ref by FUN_140260d60 @ 140260d60
+
+string 'All shapes conformed.' @ 140fc1348
+  ref by FUN_140260320 @ 140260320
+  ref by FUN_140260320 @ 140260320
+
+string 'dlgConforming' @ 140fc1360
+  ref by FUN_140260d60 @ 140260d60
+
+=== CALL TREE (depth 4) ===
+
+>>> root FUN_140260320 @ 140260320
+  FUN_140260320 @ 140260320  [bytes=2615 calls=121]
+      FUN_140123150 @ 140123150  [bytes=203 calls=9]
+          FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+              FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  AcquireSRWLockExclusive @ EXTERNAL:00000082  [bytes=0 calls=0]
+                  SleepConditionVariableSRW @ EXTERNAL:00000087  [bytes=0 calls=0]
+              atexit @ 140b2b468  [bytes=23 calls=1]
+                  _onexit @ 140b2b42c  [bytes=58 calls=2]
+              _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+                  AcquireSRWLockExclusive @ EXTERNAL:00000082  (revisited)
+                  ReleaseSRWLockExclusive @ EXTERNAL:00000081  [bytes=0 calls=0]
+          FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+              FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              _malloc_base @ 140b57498  (revisited)
+              FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+          FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+              FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+              FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_140b27794 @ 140b27794  [bytes=34 calls=2]
+              FUN_14002b010 @ 14002b010  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+      FUN_1407feb30 @ 1407feb30  [bytes=8 calls=0]
+      FUN_140802320 @ 140802320  [bytes=28 calls=1]
+          FUN_140802340 @ 140802340  [bytes=3895 calls=99]
+              FUN_1407fea40 @ 1407fea40  [bytes=232 calls=1]
+                  FUN_1407cc130 @ 1407cc130  [bytes=106 calls=0]
+              FUN_140801f70 @ 140801f70  [bytes=930 calls=43]
+                  FUN_1407fc9a0 @ 1407fc9a0  [bytes=240 calls=1]
+                  FUN_140808700 @ 140808700  [bytes=652 calls=19]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_1407c8c80 @ 1407c8c80  [bytes=181 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  FUN_1407c8910 @ 1407c8910  [bytes=81 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407ca230 @ 1407ca230  [bytes=378 calls=8]
+                  FUN_1407c85b0 @ 1407c85b0  [bytes=292 calls=10]
+                  FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14002fe00 @ 14002fe00  [bytes=325 calls=7]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+              FUN_1407f6290 @ 1407f6290  [bytes=32 calls=0]
+              FUN_1407f5cf0 @ 1407f5cf0  [bytes=621 calls=15]
+                  FUN_1407f6030 @ 1407f6030  [bytes=126 calls=4]
+                  EnterCriticalSection @ 1407f05f0  [bytes=7 calls=0]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407f5f60 @ 1407f5f60  [bytes=208 calls=5]
+                  FUN_1407cc130 @ 1407cc130  (revisited)
+                  FUN_1407c96f0 @ 1407c96f0  [bytes=576 calls=9]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  LeaveCriticalSection @ 1407f0620  [bytes=7 calls=0]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              FUN_140191500 @ 140191500  [bytes=364 calls=13]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031dd0 @ 140031dd0  [bytes=59 calls=0]
+              FUN_14012b8b0 @ 14012b8b0  [bytes=236 calls=6]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407d6810 @ 1407d6810  (revisited)
+              FUN_1407c9a20 @ 1407c9a20  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+              FUN_1407fb890 @ 1407fb890  [bytes=757 calls=40]
+                  FUN_1407f6200 @ 1407f6200  [bytes=132 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407ca230 @ 1407ca230  (revisited)
+                  FUN_1407fc170 @ 1407fc170  [bytes=167 calls=7]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1407fb1d0 @ 1407fb1d0  [bytes=467 calls=17]
+                  FUN_1407f2e20 @ 1407f2e20  [bytes=88 calls=1]
+                  FUN_1407f67c0 @ 1407f67c0  [bytes=517 calls=22]
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140124020 @ 140124020  [bytes=232 calls=8]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14012a060 @ 14012a060  [bytes=124 calls=4]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1400303a0 @ 1400303a0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_14002b0b0 @ 14002b0b0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+      FUN_140803290 @ 140803290  [bytes=212 calls=4]
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_1407d60b0 @ 1407d60b0  [bytes=312 calls=6]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1400316a0 @ 1400316a0  [bytes=132 calls=0]
+              FUN_14002b010 @ 14002b010  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          __tlregdtor @ 140b2bd58  [bytes=152 calls=2]
+              _malloc_base @ 140b57498  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+          FUN_1407fc6a0 @ 1407fc6a0  [bytes=767 calls=7]
+              FUN_1407cc130 @ 1407cc130  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              ceilf @ 140b770dc  [bytes=135 calls=1]
+                  _handle_nanf @ 140b94204  [bytes=15 calls=0]
+              FUN_1408082d0 @ 1408082d0  [bytes=529 calls=4]
+                  FUN_1407d60b0 @ 1407d60b0  (revisited)
+                  FUN_1407cc130 @ 1407cc130  (revisited)
+                  FUN_140b27794 @ 140b27794  (revisited)
+              FUN_140b27794 @ 140b27794  (revisited)
+      FUN_14018aad0 @ 14018aad0  [bytes=680 calls=23]
+          FUN_140190e60 @ 140190e60  [bytes=284 calls=6]
+              FUN_140031c80 @ 140031c80  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              FUN_1400da570 @ 1400da570  [bytes=134 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031e90 @ 140031e90  [bytes=16 calls=1]
+                  FUN_140b27794 @ 140b27794  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+          FUN_1408f4a40 @ 1408f4a40  [bytes=328 calls=8]
+              FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1409054f0 @ 1409054f0  [bytes=1235 calls=45]
+                  FUN_14083c8b0 @ 14083c8b0  [bytes=8 calls=0]
+                  LoadCursorW @ EXTERNAL:0000019d  [bytes=0 calls=0]
+                  FUN_1408ffb50 @ 1408ffb50  [bytes=1058 calls=38]
+                  DeleteObject @ EXTERNAL:0000026f  [bytes=0 calls=0]
+                  FUN_1408e2c10 @ 1408e2c10  [bytes=75 calls=2]
+                  FUN_1409c1880 @ 1409c1880  [bytes=51 calls=1]
+                  FUN_1409c1730 @ 1409c1730  [bytes=42 calls=1]
+                  FUN_1409c1430 @ 1409c1430  [bytes=177 calls=6]
+                  FUN_1409c1ce0 @ 1409c1ce0  [bytes=116 calls=3]
+                  FUN_1408f5da0 @ 1408f5da0  [bytes=39 calls=2]
+                  FUN_1409059d0 @ 1409059d0  [bytes=330 calls=7]
+                  CreateIconIndirect @ EXTERNAL:000001bb  [bytes=0 calls=0]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  FUN_1407ca230 @ 1407ca230  (revisited)
+                  GetCurrentThreadId @ 1407f0610  (revisited)
+                  FUN_1407f6290 @ 1407f6290  (revisited)
+                  FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  GetLastError @ 1407f71d0  [bytes=7 calls=0]
+                  FUN_1407f71e0 @ 1407f71e0  [bytes=43 calls=2]
+                  FUN_1407dc330 @ 1407dc330  [bytes=450 calls=17]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123dd0 @ 140123dd0  [bytes=383 calls=13]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1409052d0 @ 1409052d0  [bytes=131 calls=4]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1408fd5f0 @ 1408fd5f0  [bytes=62 calls=1]
+              SetCursor @ EXTERNAL:0000019e  [bytes=0 calls=0]
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_1407ca230 @ 1407ca230  (revisited)
+          FUN_14018a350 @ 14018a350  [bytes=153 calls=2]
+              FUN_1408c5370 @ 1408c5370  [bytes=712 calls=16]
+                  FUN_14080b870 @ 14080b870  [bytes=90 calls=1]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1409052b0 @ 1409052b0  [bytes=22 calls=0]
+                  FUN_1408fd430 @ 1408fd430  [bytes=13 calls=0]
+                  FUN_1409c2230 @ 1409c2230  [bytes=20 calls=0]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  FUN_1408518e0 @ 1408518e0  [bytes=83 calls=4]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1408d82b0 @ 1408d82b0  [bytes=66 calls=0]
+          FUN_1408f9880 @ 1408f9880  [bytes=523 calls=12]
+              FUN_1408eb1f0 @ 1408eb1f0  [bytes=185 calls=4]
+                  FUN_1408c69a0 @ 1408c69a0  [bytes=304 calls=8]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              FUN_1400308b0 @ 1400308b0  (revisited)
+              FUN_1408f7bb0 @ 1408f7bb0  [bytes=126 calls=3]
+                  FUN_1408f7c30 @ 1408f7c30  [bytes=1002 calls=30]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1408f9620 @ 1408f9620  [bytes=123 calls=4]
+                  FUN_1408cf370 @ 1408cf370  [bytes=53 calls=1]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1409fcad0 @ 1409fcad0  [bytes=340 calls=6]
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14002b0b0 @ 14002b0b0  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          FUN_140123150 @ 140123150  (revisited)
+          FUN_1407feb30 @ 1407feb30  (revisited)
+          FUN_140802320 @ 140802320  (revisited)
+          FUN_140803290 @ 140803290  (revisited)
+          FUN_1408baf30 @ 1408baf30  [bytes=264 calls=6]
+              FUN_1407cc130 @ 1407cc130  (revisited)
+              FUN_140189640 @ 140189640  [bytes=42 calls=1]
+                  FUN_14002fe00 @ 14002fe00  (revisited)
+              FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      FUN_140260d60 @ 140260d60  [bytes=3622 calls=145]
+          FUN_1408e8050 @ 1408e8050  [bytes=505 calls=11]
+              FUN_1408eef20 @ 1408eef20  [bytes=122 calls=2]
+                  FUN_1408fdd20 @ 1408fdd20  [bytes=118 calls=2]
+                  FUN_1409b45e0 @ 1409b45e0  [bytes=22 calls=0]
+              FUN_1408c23f0 @ 1408c23f0  [bytes=34 calls=0]
+              FUN_1408b7140 @ 1408b7140  [bytes=30 calls=0]
+              FUN_1401ab950 @ 1401ab950  [bytes=123 calls=2]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14080c340 @ 14080c340  [bytes=336 calls=10]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1401899c0 @ 1401899c0  [bytes=118 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1404f8500 @ 1404f8500  [bytes=242 calls=5]
+                  FUN_14080c840 @ 14080c840  [bytes=168 calls=3]
+              FUN_1408df620 @ 1408df620  [bytes=62 calls=2]
+                  FUN_1408de300 @ 1408de300  [bytes=927 calls=29]
+          FUN_1408ee9c0 @ 1408ee9c0  [bytes=24 calls=0]
+          FUN_140adf9c0 @ 140adf9c0  [bytes=690 calls=15]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14012d3f0 @ 14012d3f0  (revisited)
+              FUN_140ad66e0 @ 140ad66e0  [bytes=370 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ad6e50 @ 140ad6e50  [bytes=155 calls=2]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1407d60b0 @ 1407d60b0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              FUN_1400308b0 @ 1400308b0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14002b0b0 @ 14002b0b0  (revisited)
+          FUN_140123150 @ 140123150  (revisited)
+          FUN_140ae7380 @ 140ae7380  [bytes=241 calls=7]
+              FUN_14012d3f0 @ 14012d3f0  (revisited)
+              FUN_140adf7a0 @ 140adf7a0  [bytes=541 calls=20]
+                  FUN_140aea820 @ 140aea820  [bytes=508 calls=13]
+                  FUN_140ba9f00 @ 140ba9f00  [bytes=43 calls=0]
+                  FUN_140ada8b0 @ 140ada8b0  [bytes=2169 calls=62]
+                  FUN_140189640 @ 140189640  (revisited)
+                  FUN_140ba35b0 @ 140ba35b0  [bytes=533 calls=11]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140030400 @ 140030400  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1402a20c0 @ 1402a20c0  [bytes=489 calls=19]
+                  FUN_140ae8a50 @ 140ae8a50  [bytes=262 calls=9]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_140123220 @ 140123220  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ada170 @ 140ada170  [bytes=1839 calls=78]
+                  FUN_1407cc2a0 @ 1407cc2a0  [bytes=22 calls=1]
+                  FUN_14012d3f0 @ 14012d3f0  (revisited)
+                  FUN_140ba9960 @ 140ba9960  [bytes=254 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140adf7a0 @ 140adf7a0  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140030400 @ 140030400  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140191500 @ 140191500  (revisited)
+                  FUN_140ae1f50 @ 140ae1f50  [bytes=836 calls=28]
+                  FUN_140123220 @ 140123220  (revisited)
+                  FUN_140ada170 @ 140ada170  (revisited)
+                  FUN_140ba91e0 @ 140ba91e0  [bytes=110 calls=1]
+                  FUN_140ae7850 @ 140ae7850  [bytes=1671 calls=58]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_140ba9490 @ 140ba9490  [bytes=125 calls=3]
+                  FUN_140ba9320 @ 140ba9320  [bytes=74 calls=5]
+                  FUN_140c477e0 @ 140c477e0  [bytes=115 calls=2]
+                  FUN_1402a20c0 @ 1402a20c0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+              FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+                  FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+              FUN_140aead40 @ 140aead40  (revisited)
+          FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+              FUN_1408c7df0 @ 1408c7df0  (revisited)
+          FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+              FUN_1401898e0 @ 1401898e0  (revisited)
+          FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14080c340 @ 14080c340  (revisited)
+          FUN_1408eedc0 @ 1408eedc0  [bytes=337 calls=15]
+              FUN_1409fa730 @ 1409fa730  [bytes=387 calls=8]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14087b720 @ 14087b720  [bytes=1036 calls=37]
+                  FUN_140850ec0 @ 140850ec0  [bytes=43 calls=0]
+                  CreateEventW @ EXTERNAL:0000005c  [bytes=0 calls=0]
+                  FUN_1407ca230 @ 1407ca230  (revisited)
+                  GetCurrentThreadId @ 1407f0610  (revisited)
+                  FUN_1407f6290 @ 1407f6290  (revisited)
+                  FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  GetLastError @ 1407f71d0  (revisited)
+                  FUN_1407f71e0 @ 1407f71e0  (revisited)
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407dc500 @ 1407dc500  [bytes=590 calls=22]
+                  FUN_1407f2e20 @ 1407f2e20  (revisited)
+                  FUN_1407f67c0 @ 1407f67c0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123220 @ 140123220  (revisited)
+                  FUN_140123dd0 @ 140123dd0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1408b1c20 @ 1408b1c20  [bytes=126 calls=3]
+                  FUN_1405fd840 @ 1405fd840  [bytes=412 calls=8]
+                  FUN_1408b1f50 @ 1408b1f50  [bytes=246 calls=5]
+              FUN_140851220 @ 140851220  [bytes=261 calls=6]
+                  FUN_140850e90 @ 140850e90  [bytes=16 calls=0]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_140851150 @ 140851150  [bytes=99 calls=2]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_14087bb40 @ 14087bb40  [bytes=951 calls=37]
+                  CloseHandle @ EXTERNAL:000000fa  [bytes=0 calls=0]
+                  FUN_1407ca230 @ 1407ca230  (revisited)
+                  GetCurrentThreadId @ 1407f0610  (revisited)
+                  FUN_1407f6290 @ 1407f6290  (revisited)
+                  FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  GetLastError @ 1407f71d0  (revisited)
+                  FUN_1407f71e0 @ 1407f71e0  (revisited)
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407dc500 @ 1407dc500  (revisited)
+                  FUN_1407f2e20 @ 1407f2e20  (revisited)
+                  FUN_1407f67c0 @ 1407f67c0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123220 @ 140123220  (revisited)
+                  FUN_140123dd0 @ 140123dd0  (revisited)
+                  FUN_140850f50 @ 140850f50  [bytes=17 calls=0]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1409fa8c0 @ 1409fa8c0  [bytes=373 calls=8]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+          FUN_14002b0d0 @ 14002b0d0  [bytes=95 calls=2]
+              FUN_1407d6810 @ 1407d6810  (revisited)
+              FUN_1407c93e0 @ 1407c93e0  [bytes=190 calls=3]
+                  _realloc_base @ 140b56c98  [bytes=5 calls=0]
+          FUN_140b75a98 @ 140b75a98  [bytes=7 calls=1]
+              common_atof_l<> @ 140b75a24  [bytes=116 calls=4]
+                  __doserrno @ 140b58068  [bytes=32 calls=1]
+                  FUN_140b57400 @ 140b57400  [bytes=30 calls=1]
+                  _LocaleUpdate @ 140b56ca0  [bytes=155 calls=3]
+                  parse_floating_point<> @ 140b73868  [bytes=158 calls=5]
+          FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_140b67c00 @ 140b67c00  [bytes=176 calls=3]
+              FUN_140b580b8 @ 140b580b8  [bytes=736 calls=9]
+                  __doserrno @ 140b58068  (revisited)
+                  FUN_140b57400 @ 140b57400  (revisited)
+                  FUN_140b57330 @ 140b57330  [bytes=206 calls=4]
+                  FUN_140b59580 @ 140b59580  [bytes=118 calls=3]
+                  FUN_140b595f8 @ 140b595f8  [bytes=118 calls=2]
+              FUN_140b57010 @ 140b57010  [bytes=102 calls=4]
+                  GetLastError @ EXTERNAL:000000df  [bytes=0 calls=0]
+                  FUN_140b8fa14 @ 140b8fa14  [bytes=190 calls=9]
+                  SetLastError @ EXTERNAL:00000066  [bytes=0 calls=0]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_1408ee310 @ 1408ee310  [bytes=83 calls=5]
+              FUN_140189e10 @ 140189e10  [bytes=12 calls=0]
+              FUN_1408c4a00 @ 1408c4a00  [bytes=455 calls=12]
+                  FUN_1408ce180 @ 1408ce180  [bytes=42 calls=0]
+                  IsIconic @ EXTERNAL:00000184  [bytes=0 calls=0]
+                  FUN_1408caa00 @ 1408caa00  [bytes=75 calls=3]
+                  IsZoomed @ EXTERNAL:00000183  [bytes=0 calls=0]
+                  BringWindowToTop @ EXTERNAL:000001a3  [bytes=0 calls=0]
+                  ShowWindow @ EXTERNAL:0000018a  [bytes=0 calls=0]
+                  FUN_1409b77c0 @ 1409b77c0  [bytes=335 calls=10]
+                  FUN_14080b7c0 @ 14080b7c0  [bytes=56 calls=0]
+                  FUN_14080b3c0 @ 14080b3c0  [bytes=136 calls=3]
+              FUN_1408ee790 @ 1408ee790  [bytes=159 calls=5]
+                  GetWindow @ EXTERNAL:00000143  [bytes=0 calls=0]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  DestroyWindow @ EXTERNAL:0000019f  [bytes=0 calls=0]
+              FUN_14018a4a0 @ 14018a4a0  [bytes=58 calls=2]
+                  FUN_140030510 @ 140030510  [bytes=90 calls=2]
+                  FUN_1408bf8d0 @ 1408bf8d0  [bytes=112 calls=4]
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_1407ca230 @ 1407ca230  (revisited)
+      GetCurrentThreadId @ 1407f0610  (revisited)
+      FUN_1407f6290 @ 1407f6290  (revisited)
+      FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+      FUN_140185300 @ 140185300  [bytes=372 calls=16]
+          FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+          FUN_1407fb140 @ 1407fb140  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407f9a30 @ 1407f9a30  (revisited)
+          FUN_1407c9c60 @ 1407c9c60  (revisited)
+          FUN_1407f2e20 @ 1407f2e20  (revisited)
+          FUN_1407f67c0 @ 1407f67c0  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          FUN_1400303a0 @ 1400303a0  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+      FUN_140123dd0 @ 140123dd0  (revisited)
+      thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+      FUN_14024b220 @ 14024b220  [bytes=759 calls=13]
+          FUN_1401b25f0 @ 1401b25f0  [bytes=93 calls=0]
+          FUN_14021c890 @ 14021c890  [bytes=668 calls=22]
+              FUN_1400302c0 @ 1400302c0  [bytes=191 calls=3]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+              FUN_1401328f0 @ 1401328f0  [bytes=287 calls=6]
+                  FUN_140033000 @ 140033000  [bytes=97 calls=1]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1400302c0 @ 1400302c0  (revisited)
+                  FUN_140032d60 @ 140032d60  [bytes=603 calls=0]
+                  FUN_140032920 @ 140032920  [bytes=16 calls=1]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140030400 @ 140030400  (revisited)
+              FUN_140031c80 @ 140031c80  (revisited)
+              FUN_1407fb140 @ 1407fb140  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1407f9a30 @ 1407f9a30  (revisited)
+              FUN_1407c9c60 @ 1407c9c60  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_1400303a0 @ 1400303a0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1400302c0 @ 1400302c0  (revisited)
+          FUN_140033000 @ 140033000  (revisited)
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_140032d60 @ 140032d60  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_14021cd40 @ 14021cd40  [bytes=467 calls=14]
+              FUN_140b4a0c8 @ 140b4a0c8  [bytes=321 calls=6]
+                  RtlPcToFileHeader @ EXTERNAL:0000007b  [bytes=0 calls=0]
+                  FUN_140b49cd4 @ 140b49cd4  [bytes=312 calls=0]
+                  FUN_140b49b50 @ 140b49b50  [bytes=386 calls=0]
+                  FUN_140b49e0c @ 140b49e0c  [bytes=530 calls=0]
+                  FUN_140b4a038 @ 140b4a038  [bytes=23 calls=0]
+                  FUN_140b4a2e0 @ 140b4a2e0  [bytes=167 calls=3]
+              FUN_14003d1a0 @ 14003d1a0  [bytes=344 calls=7]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1401b8430 @ 1401b8430  [bytes=2519 calls=30]
+                  FUN_1400e98e0 @ 1400e98e0  [bytes=420 calls=10]
+                  FUN_1400e9a90 @ 1400e9a90  [bytes=521 calls=11]
+                  FUN_1401b91d0 @ 1401b91d0  [bytes=236 calls=1]
+                  FUN_1400302c0 @ 1400302c0  (revisited)
+                  FUN_1401ab630 @ 1401ab630  [bytes=248 calls=3]
+                  FUN_14012f500 @ 14012f500  [bytes=192 calls=3]
+                  FUN_1401342d0 @ 1401342d0  [bytes=666 calls=8]
+                  FUN_140030920 @ 140030920  [bytes=93 calls=2]
+                  FUN_140130370 @ 140130370  [bytes=260 calls=5]
+                  FUN_140130220 @ 140130220  [bytes=327 calls=5]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4ac80 @ 140b4ac80  [bytes=725 calls=0]
+                  FUN_14012cab0 @ 14012cab0  [bytes=766 calls=9]
+                  FUN_140127de0 @ 140127de0  [bytes=491 calls=7]
+                  FUN_140123c00 @ 140123c00  [bytes=319 calls=6]
+                  FUN_140129910 @ 140129910  [bytes=248 calls=6]
+                  FUN_14012d0d0 @ 14012d0d0  [bytes=713 calls=5]
+                  FUN_1400f8960 @ 1400f8960  [bytes=327 calls=2]
+                  FUN_140123480 @ 140123480  [bytes=196 calls=4]
+                  FUN_140123340 @ 140123340  [bytes=309 calls=0]
+                  FUN_140030510 @ 140030510  (revisited)
+                  FUN_14003ef70 @ 14003ef70  [bytes=120 calls=2]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+              FUN_14018a7c0 @ 14018a7c0  [bytes=165 calls=1]
+                  memcmp @ 140b4a3a0  [bytes=198 calls=0]
+              FUN_1402c6e90 @ 1402c6e90  [bytes=282 calls=0]
+              FUN_14003cec0 @ 14003cec0  [bytes=251 calls=3]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140032d60 @ 140032d60  (revisited)
+                  FUN_140032920 @ 140032920  (revisited)
+              FUN_1400eec00 @ 1400eec00  [bytes=275 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1400316a0 @ 1400316a0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14013ec70 @ 14013ec70  [bytes=2949 calls=14]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1400cc340 @ 1400cc340  [bytes=164 calls=1]
+                  FUN_14013eb20 @ 14013eb20  [bytes=326 calls=5]
+                  FUN_140141270 @ 140141270  [bytes=151 calls=0]
+                  FUN_1400cc3f0 @ 1400cc3f0  [bytes=390 calls=3]
+                  FUN_140b8d938 @ 140b8d938  [bytes=159 calls=2]
+                  FUN_140141ac0 @ 140141ac0  [bytes=361 calls=7]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14013f800 @ 14013f800  [bytes=1983 calls=6]
+                  FUN_14003ef70 @ 14003ef70  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+              FUN_1400edcb0 @ 1400edcb0  [bytes=162 calls=4]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14002fa40 @ 14002fa40  [bytes=90 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1402949e0 @ 1402949e0  [bytes=2811 calls=26]
+                  FUN_1401f01e0 @ 1401f01e0  [bytes=430 calls=0]
+                  FUN_1402c43a0 @ 1402c43a0  [bytes=3289 calls=15]
+                  FUN_140030920 @ 140030920  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1402c34f0 @ 1402c34f0  [bytes=3744 calls=28]
+                  FUN_1402c5080 @ 1402c5080  [bytes=2171 calls=13]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1402954e0 @ 1402954e0  [bytes=633 calls=22]
+                  FUN_1402bfe90 @ 1402bfe90  [bytes=672 calls=21]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1402bfe90 @ 1402bfe90  (revisited)
+              FUN_14003ef70 @ 14003ef70  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140032920 @ 140032920  (revisited)
+      FUN_1401c5db0 @ 1401c5db0  [bytes=429 calls=19]
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14013c130 @ 14013c130  [bytes=1060 calls=7]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1400316a0 @ 1400316a0  (revisited)
+              FUN_1400eec00 @ 1400eec00  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_14013c580 @ 14013c580  [bytes=677 calls=34]
+              FUN_140030920 @ 140030920  (revisited)
+              FUN_14002fa40 @ 14002fa40  (revisited)
+              FUN_140032c10 @ 140032c10  [bytes=92 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              `eh_vector_destructor_iterator' @ 140b2b12c  [bytes=107 calls=1]
+                  _guard_dispatch_icall @ 140cc3490  [bytes=2 calls=0]
+              thunk_FUN_140b2b5c0 @ 140b2b0e8  [bytes=5 calls=0]
+              FUN_140140b30 @ 140140b30  [bytes=109 calls=3]
+                  FUN_140030510 @ 140030510  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14003ef70 @ 14003ef70  (revisited)
+              FUN_140030510 @ 140030510  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_140130610 @ 140130610  [bytes=631 calls=9]
+              FUN_1400e98e0 @ 1400e98e0  (revisited)
+              FUN_140030980 @ 140030980  [bytes=266 calls=6]
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140127cb0 @ 140127cb0  [bytes=294 calls=7]
+                  FUN_140127de0 @ 140127de0  (revisited)
+                  FUN_1400f8820 @ 1400f8820  [bytes=319 calls=2]
+                  FUN_1400dc550 @ 1400dc550  [bytes=257 calls=4]
+                  FUN_1400f8960 @ 1400f8960  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_14012f000 @ 14012f000  [bytes=405 calls=2]
+                  FUN_1400f8820 @ 1400f8820  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              thunk_FUN_140b2b0f0 @ 140b2b1fc  [bytes=5 calls=0]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1401348f0 @ 1401348f0  [bytes=190 calls=5]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140133860 @ 140133860  [bytes=56 calls=3]
+                  FUN_140133860 @ 140133860  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140134a40 @ 140134a40  [bytes=248 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140133860 @ 140133860  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_14002f9c0 @ 14002f9c0  [bytes=90 calls=2]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140133860 @ 140133860  (revisited)
+          FUN_14012f870 @ 14012f870  [bytes=202 calls=3]
+              FUN_14013c580 @ 14013c580  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140032ce0 @ 140032ce0  [bytes=118 calls=3]
+                  FUN_140032ce0 @ 140032ce0  (revisited)
+                  FUN_140030920 @ 140030920  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1400e5860 @ 1400e5860  [bytes=160 calls=2]
+              FUN_140b4a0c8 @ 140b4a0c8  (revisited)
+              FUN_14003d1a0 @ 14003d1a0  (revisited)
+          FUN_1401328f0 @ 1401328f0  (revisited)
+          FUN_14002fa40 @ 14002fa40  (revisited)
+      FUN_1407d6810 @ 1407d6810  (revisited)
+      FUN_1407c9a20 @ 1407c9a20  (revisited)
+      FUN_14002fe00 @ 14002fe00  (revisited)
+      FUN_1400303a0 @ 1400303a0  (revisited)
+      FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+      FUN_14012ab60 @ 14012ab60  (revisited)
+      FUN_1407c8910 @ 1407c8910  (revisited)
+      FUN_14018b010 @ 14018b010  [bytes=154 calls=1]
+          FUN_1408baf30 @ 1408baf30  (revisited)
+      FUN_14018ad80 @ 14018ad80  [bytes=172 calls=1]
+          FUN_140190e60 @ 140190e60  (revisited)
+      FUN_14025f970 @ 14025f970  [bytes=1675 calls=66]
+          FUN_1400302c0 @ 1400302c0  (revisited)
+          FUN_1407ca230 @ 1407ca230  (revisited)
+          GetCurrentThreadId @ 1407f0610  (revisited)
+          FUN_1407f6290 @ 1407f6290  (revisited)
+          FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          FUN_140123150 @ 140123150  (revisited)
+          FUN_14012bc30 @ 14012bc30  [bytes=270 calls=14]
+              FUN_1400302c0 @ 1400302c0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_14012bef0 @ 14012bef0  [bytes=374 calls=12]
+                  FUN_1400302c0 @ 1400302c0  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123020 @ 140123020  [bytes=222 calls=7]
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FUN_1400303a0 @ 1400303a0  (revisited)
+                  FUN_140030920 @ 140030920  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407f2e20 @ 1407f2e20  (revisited)
+              FUN_1407f67c0 @ 1407f67c0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_1400303a0 @ 1400303a0  (revisited)
+              FUN_140030920 @ 140030920  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140123dd0 @ 140123dd0  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407d6810 @ 1407d6810  (revisited)
+          FUN_1407c9a20 @ 1407c9a20  (revisited)
+          FUN_14002fe00 @ 14002fe00  (revisited)
+          FUN_1400303a0 @ 1400303a0  (revisited)
+          FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+          FUN_14012ab60 @ 14012ab60  (revisited)
+          FUN_1407feb30 @ 1407feb30  (revisited)
+          FUN_140802320 @ 140802320  (revisited)
+          FUN_140803290 @ 140803290  (revisited)
+          FUN_1407c8910 @ 1407c8910  (revisited)
+          FUN_14018b010 @ 14018b010  (revisited)
+          FUN_14018a7c0 @ 14018a7c0  (revisited)
+          FUN_1401328f0 @ 1401328f0  (revisited)
+          thunk_FUN_140b2b0f0 @ 140b2b1fc  (revisited)
+          FUN_140b4ac80 @ 140b4ac80  (revisited)
+          FUN_1401c5f60 @ 1401c5f60  [bytes=1174 calls=20]
+              FUN_1400eec00 @ 1400eec00  (revisited)
+              FUN_14018a7c0 @ 14018a7c0  (revisited)
+              FUN_140169cc0 @ 140169cc0  [bytes=561 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_1400f2120 @ 1400f2120  [bytes=159 calls=1]
+                  FUN_1400efae0 @ 1400efae0  [bytes=428 calls=2]
+                  FUN_140b27794 @ 140b27794  (revisited)
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140032d60 @ 140032d60  (revisited)
+              FUN_140130920 @ 140130920  [bytes=612 calls=9]
+                  FUN_140033000 @ 140033000  (revisited)
+                  FUN_1401328f0 @ 1401328f0  (revisited)
+                  FUN_140132410 @ 140132410  [bytes=129 calls=2]
+                  FUN_1400f3130 @ 1400f3130  [bytes=273 calls=6]
+                  FUN_140132780 @ 140132780  [bytes=250 calls=3]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14002f9c0 @ 14002f9c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1401b91d0 @ 1401b91d0  (revisited)
+              FUN_1400302c0 @ 1400302c0  (revisited)
+              memcmp @ 140b4a3a0  (revisited)
+              FUN_1401314f0 @ 1401314f0  [bytes=3870 calls=30]
+                  FUN_140033000 @ 140033000  (revisited)
+                  FUN_140137a70 @ 140137a70  [bytes=162 calls=2]
+                  FUN_1401328f0 @ 1401328f0  (revisited)
+                  FUN_1400f0390 @ 1400f0390  [bytes=246 calls=4]
+                  FUN_1400f8960 @ 1400f8960  (revisited)
+                  FUN_140123340 @ 140123340  (revisited)
+                  FUN_14012f500 @ 14012f500  (revisited)
+                  FUN_1401342d0 @ 1401342d0  (revisited)
+                  FUN_140137800 @ 140137800  [bytes=342 calls=10]
+                  FUN_140032090 @ 140032090  [bytes=204 calls=1]
+                  FUN_140138600 @ 140138600  [bytes=280 calls=5]
+                  FUN_1401383b0 @ 1401383b0  [bytes=411 calls=9]
+                  FUN_140132780 @ 140132780  (revisited)
+                  FUN_140132c40 @ 140132c40  [bytes=637 calls=4]
+                  FUN_14003ee40 @ 14003ee40  [bytes=246 calls=5]
+                  FUN_140133f70 @ 140133f70  [bytes=570 calls=4]
+                  FUN_140133770 @ 140133770  [bytes=153 calls=4]
+                  FUN_14012e840 @ 14012e840  [bytes=352 calls=6]
+                  FUN_14003ef70 @ 14003ef70  (revisited)
+                  FUN_140030510 @ 140030510  (revisited)
+                  FUN_140030920 @ 140030920  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140030920 @ 140030920  (revisited)
+              FUN_1400eef40 @ 1400eef40  [bytes=92 calls=3]
+                  FUN_1400f2cd0 @ 1400f2cd0  [bytes=85 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14002fa40 @ 14002fa40  (revisited)
+              FUN_140032c10 @ 140032c10  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140032920 @ 140032920  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1408baf30 @ 1408baf30  (revisited)
+          FUN_140030920 @ 140030920  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_14018ae30 @ 14018ae30  [bytes=472 calls=17]
+          FUN_140123150 @ 140123150  (revisited)
+          FUN_1407feb30 @ 1407feb30  (revisited)
+          FUN_140802320 @ 140802320  (revisited)
+          FUN_140803290 @ 140803290  (revisited)
+          FUN_1408baf30 @ 1408baf30  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          FUN_1408fd7e0 @ 1408fd7e0  [bytes=129 calls=3]
+              SetCursor @ EXTERNAL:0000019e  (revisited)
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140130890 @ 140130890  [bytes=138 calls=3]
+          FUN_140133ef0 @ 140133ef0  [bytes=118 calls=3]
+              FUN_140133ef0 @ 140133ef0  (revisited)
+              FUN_14002f9c0 @ 14002f9c0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_14002f9c0 @ 14002f9c0  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+      FUN_1408baf30 @ 1408baf30  (revisited)
+      FUN_140221b40 @ 140221b40  [bytes=427 calls=18]
+          FUN_1400302c0 @ 1400302c0  (revisited)
+          FUN_1407c9a20 @ 1407c9a20  (revisited)
+          FUN_14002fe00 @ 14002fe00  (revisited)
+          FUN_1400303a0 @ 1400303a0  (revisited)
+          FUN_140030920 @ 140030920  (revisited)
+          FUN_1407cc1a0 @ 1407cc1a0  [bytes=241 calls=12]
+              FUN_1407d6810 @ 1407d6810  (revisited)
+              FUN_1407c9a20 @ 1407c9a20  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1407cc010 @ 1407cc010  [bytes=125 calls=0]
+          FUN_1407c8970 @ 1407c8970  [bytes=471 calls=16]
+              FUN_1405f52d0 @ 1405f52d0  [bytes=392 calls=8]
+                  FUN_1400308b0 @ 1400308b0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1401eab40 @ 1401eab40  [bytes=366 calls=9]
+              FUN_1407d6810 @ 1407d6810  (revisited)
+              FUN_1407c9a20 @ 1407c9a20  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_140123150 @ 140123150  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_14002fa40 @ 14002fa40  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140276f50 @ 140276f50
+  FUN_140276f50 @ 140276f50  [bytes=2823 calls=115]
+      FUN_1408e8050 @ 1408e8050  [bytes=505 calls=11]
+          FUN_1408eef20 @ 1408eef20  [bytes=122 calls=2]
+              FUN_1408fdd20 @ 1408fdd20  [bytes=118 calls=2]
+                  FUN_1408c5370 @ 1408c5370  [bytes=712 calls=16]
+                  FUN_1408d82b0 @ 1408d82b0  [bytes=66 calls=0]
+              FUN_1409b45e0 @ 1409b45e0  [bytes=22 calls=0]
+          FUN_1408c23f0 @ 1408c23f0  [bytes=34 calls=0]
+          FUN_1408b7140 @ 1408b7140  [bytes=30 calls=0]
+          FUN_1401ab950 @ 1401ab950  [bytes=123 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  [bytes=203 calls=9]
+                  FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+          FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+              FUN_140b8e188 @ 140b8e188  [bytes=57 calls=2]
+                  _query_new_handler @ 140b8e1c4  [bytes=52 calls=2]
+                  _guard_dispatch_icall @ 140cc34b0  [bytes=6 calls=0]
+              _malloc_base @ 140b57498  [bytes=5 calls=0]
+              FUN_140b27730 @ 140b27730  [bytes=31 calls=2]
+                  FUN_140135450 @ 140135450  [bytes=33 calls=0]
+                  FUN_140b4a2e0 @ 140b4a2e0  [bytes=167 calls=3]
+              FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+                  FUN_14002afe0 @ 14002afe0  [bytes=33 calls=0]
+                  FUN_140b4a2e0 @ 140b4a2e0  (revisited)
+          FUN_14080c340 @ 14080c340  [bytes=336 calls=10]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1401899c0 @ 1401899c0  [bytes=118 calls=2]
+                  FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1404f8500 @ 1404f8500  [bytes=242 calls=5]
+                  FUN_14046aaf0 @ 14046aaf0  [bytes=109 calls=4]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_1400da570 @ 1400da570  [bytes=134 calls=2]
+                  FUN_140031e90 @ 140031e90  [bytes=16 calls=1]
+              FUN_14080c840 @ 14080c840  [bytes=168 calls=3]
+                  FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+          FUN_1408df620 @ 1408df620  [bytes=62 calls=2]
+              FUN_1408de300 @ 1408de300  [bytes=927 calls=29]
+                  GetWindowLongPtrW @ EXTERNAL:0000017a  [bytes=0 calls=0]
+                  SetWindowLongPtrW @ EXTERNAL:00000179  [bytes=0 calls=0]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  SetWindowPos @ EXTERNAL:00000186  [bytes=0 calls=0]
+                  FUN_1407ca230 @ 1407ca230  [bytes=378 calls=8]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_1407f6290 @ 1407f6290  [bytes=32 calls=0]
+                  FUN_1407f5cf0 @ 1407f5cf0  [bytes=621 calls=15]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  GetLastError @ 1407f71d0  [bytes=7 calls=0]
+                  FUN_1407f71e0 @ 1407f71e0  [bytes=43 calls=2]
+                  FUN_1407dc330 @ 1407dc330  [bytes=450 calls=17]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123dd0 @ 140123dd0  [bytes=383 calls=13]
+                  FUN_140b57420 @ 140b57420  (revisited)
+      FUN_1408ee9c0 @ 1408ee9c0  [bytes=24 calls=0]
+      FUN_140adf9c0 @ 140adf9c0  [bytes=690 calls=15]
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14012d3f0 @ 14012d3f0  (revisited)
+          FUN_140ad66e0 @ 140ad66e0  [bytes=370 calls=4]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140ad6e50 @ 140ad6e50  [bytes=155 calls=2]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1407d60b0 @ 1407d60b0  [bytes=312 calls=6]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1400316a0 @ 1400316a0  [bytes=132 calls=0]
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+          FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+              FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+          FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+              FUN_140b27794 @ 140b27794  [bytes=34 calls=2]
+                  FUN_140b274a4 @ 140b274a4  [bytes=71 calls=1]
+                  FUN_140b4a2e0 @ 140b4a2e0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140ae7380 @ 140ae7380  [bytes=241 calls=7]
+          FUN_14012d3f0 @ 14012d3f0  (revisited)
+          FUN_140adf7a0 @ 140adf7a0  [bytes=541 calls=20]
+              FUN_140aea820 @ 140aea820  [bytes=508 calls=13]
+                  FUN_140ad66e0 @ 140ad66e0  (revisited)
+                  FUN_140ba6790 @ 140ba6790  [bytes=952 calls=26]
+                  FUN_140ba3300 @ 140ba3300  [bytes=164 calls=7]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  FUN_140adb890 @ 140adb890  [bytes=4974 calls=169]
+                  FUN_140826990 @ 140826990  [bytes=40 calls=2]
+                  FUN_140828010 @ 140828010  [bytes=365 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140ba9f00 @ 140ba9f00  [bytes=43 calls=0]
+              FUN_140ada8b0 @ 140ada8b0  [bytes=2169 calls=62]
+                  FUN_1407cc2a0 @ 1407cc2a0  [bytes=22 calls=1]
+                  FUN_14012d3f0 @ 14012d3f0  (revisited)
+                  FUN_140ba9960 @ 140ba9960  [bytes=254 calls=5]
+                  FUN_1407cc130 @ 1407cc130  [bytes=106 calls=0]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae5850 @ 140ae5850  [bytes=190 calls=5]
+                  FUN_140ada8b0 @ 140ada8b0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140189640 @ 140189640  [bytes=42 calls=1]
+                  FUN_14002fe00 @ 14002fe00  [bytes=325 calls=7]
+              FUN_140ba35b0 @ 140ba35b0  [bytes=533 calls=11]
+                  FUN_140ba6050 @ 140ba6050  [bytes=1226 calls=23]
+                  FUN_140189670 @ 140189670  [bytes=23 calls=1]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  FUN_140816790 @ 140816790  [bytes=144 calls=2]
+                  FUN_1401ef830 @ 1401ef830  [bytes=119 calls=4]
+                  FUN_1407cbee0 @ 1407cbee0  [bytes=161 calls=1]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+              FUN_1402a20c0 @ 1402a20c0  [bytes=489 calls=19]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ae8a50 @ 140ae8a50  [bytes=262 calls=9]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae1f50 @ 140ae1f50  [bytes=836 calls=28]
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140ada170 @ 140ada170  [bytes=1839 calls=78]
+              FUN_1407cc2a0 @ 1407cc2a0  (revisited)
+              FUN_14012d3f0 @ 14012d3f0  (revisited)
+              FUN_140ba9960 @ 140ba9960  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140adf7a0 @ 140adf7a0  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140030400 @ 140030400  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_140191500 @ 140191500  [bytes=364 calls=13]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ae1f50 @ 140ae1f50  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140ada170 @ 140ada170  (revisited)
+              FUN_140ba91e0 @ 140ba91e0  [bytes=110 calls=1]
+                  FUN_140ba97e0 @ 140ba97e0  [bytes=266 calls=6]
+              FUN_140ae7850 @ 140ae7850  [bytes=1671 calls=58]
+                  FUN_1407cc130 @ 1407cc130  (revisited)
+                  FUN_140189640 @ 140189640  (revisited)
+                  FUN_14012d3f0 @ 14012d3f0  (revisited)
+                  FUN_140ba9960 @ 140ba9960  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae7850 @ 140ae7850  (revisited)
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140ba91e0 @ 140ba91e0  (revisited)
+                  FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1407cc2a0 @ 1407cc2a0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140ba9490 @ 140ba9490  [bytes=125 calls=3]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+              FUN_140ba9320 @ 140ba9320  [bytes=74 calls=5]
+                  FUN_140ba98f0 @ 140ba98f0  [bytes=108 calls=2]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_140c477e0 @ 140c477e0  [bytes=115 calls=2]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_1402a20c0 @ 1402a20c0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+      FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+      FUN_14080c340 @ 14080c340  (revisited)
+      FUN_1408c88a0 @ 1408c88a0  [bytes=297 calls=5]
+      FUN_1408d3540 @ 1408d3540  [bytes=396 calls=9]
+          FUN_1408c88a0 @ 1408c88a0  (revisited)
+          FUN_14080b7c0 @ 14080b7c0  [bytes=56 calls=0]
+          FUN_1408ca620 @ 1408ca620  [bytes=12 calls=1]
+              FUN_14080d870 @ 14080d870  [bytes=17 calls=1]
+          FUN_14080b3c0 @ 14080b3c0  [bytes=136 calls=3]
+              FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+      FUN_1408eedc0 @ 1408eedc0  [bytes=337 calls=15]
+          FUN_1409fa730 @ 1409fa730  [bytes=387 calls=8]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031e90 @ 140031e90  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+          FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14087b720 @ 14087b720  [bytes=1036 calls=37]
+              FUN_140850ec0 @ 140850ec0  [bytes=43 calls=0]
+              CreateEventW @ EXTERNAL:0000005c  [bytes=0 calls=0]
+              FUN_1407ca230 @ 1407ca230  (revisited)
+              GetCurrentThreadId @ 1407f0610  (revisited)
+              FUN_1407f6290 @ 1407f6290  (revisited)
+              FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+              FUN_14012ab60 @ 14012ab60  (revisited)
+              GetLastError @ 1407f71d0  (revisited)
+              FUN_1407f71e0 @ 1407f71e0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_1407dc500 @ 1407dc500  [bytes=590 calls=22]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407d6810 @ 1407d6810  (revisited)
+                  FUN_1407d2bc0 @ 1407d2bc0  [bytes=653 calls=23]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407f2e20 @ 1407f2e20  [bytes=88 calls=1]
+                  GetSystemTimeAsFileTime @ EXTERNAL:00000042  [bytes=0 calls=0]
+              FUN_1407f67c0 @ 1407f67c0  [bytes=517 calls=22]
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  FUN_1407f6fc0 @ 1407f6fc0  [bytes=525 calls=23]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  GetCurrentThreadId @ 1407f0610  (revisited)
+                  FUN_1407f5c70 @ 1407f5c70  [bytes=126 calls=4]
+                  EnterCriticalSection @ 1407f05f0  [bytes=7 calls=0]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407f4f20 @ 1407f4f20  [bytes=336 calls=7]
+                  FUN_1407f3490 @ 1407f3490  [bytes=749 calls=13]
+                  FUN_140124020 @ 140124020  [bytes=232 calls=8]
+                  FUN_140123f50 @ 140123f50  [bytes=195 calls=6]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407d0f60 @ 1407d0f60  [bytes=23 calls=0]
+                  LeaveCriticalSection @ 1407f0620  [bytes=7 calls=0]
+                  FUN_1407f60b0 @ 1407f60b0  [bytes=193 calls=4]
+                  FUN_1407f4730 @ 1407f4730  [bytes=2016 calls=65]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140123dd0 @ 140123dd0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1408b1c20 @ 1408b1c20  [bytes=126 calls=3]
+              FUN_1405fd840 @ 1405fd840  [bytes=412 calls=8]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1408b1f50 @ 1408b1f50  [bytes=246 calls=5]
+                  FUN_140b282b0 @ 140b282b0  [bytes=198 calls=0]
+                  FUN_1408caa00 @ 1408caa00  [bytes=75 calls=3]
+                  FUN_1405fd840 @ 1405fd840  (revisited)
+          FUN_140851220 @ 140851220  [bytes=261 calls=6]
+              FUN_140850e90 @ 140850e90  [bytes=16 calls=0]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_140851150 @ 140851150  [bytes=99 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_14087bb40 @ 14087bb40  [bytes=951 calls=37]
+              CloseHandle @ EXTERNAL:000000fa  [bytes=0 calls=0]
+              FUN_1407ca230 @ 1407ca230  (revisited)
+              GetCurrentThreadId @ 1407f0610  (revisited)
+              FUN_1407f6290 @ 1407f6290  (revisited)
+              FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+              FUN_14012ab60 @ 14012ab60  (revisited)
+              GetLastError @ 1407f71d0  (revisited)
+              FUN_1407f71e0 @ 1407f71e0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_1407dc500 @ 1407dc500  (revisited)
+              FUN_1407f2e20 @ 1407f2e20  (revisited)
+              FUN_1407f67c0 @ 1407f67c0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140123dd0 @ 140123dd0  (revisited)
+              FUN_140850f50 @ 140850f50  [bytes=17 calls=0]
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1409fa8c0 @ 1409fa8c0  [bytes=373 calls=8]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031e90 @ 140031e90  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+      FUN_14002b0d0 @ 14002b0d0  [bytes=95 calls=2]
+          FUN_1407d6810 @ 1407d6810  (revisited)
+          FUN_1407c93e0 @ 1407c93e0  [bytes=190 calls=3]
+              _realloc_base @ 140b56c98  [bytes=5 calls=0]
+      FUN_140b75a98 @ 140b75a98  [bytes=7 calls=1]
+          common_atof_l<> @ 140b75a24  [bytes=116 calls=4]
+              __doserrno @ 140b58068  [bytes=32 calls=1]
+                  FUN_140b8f94c @ 140b8f94c  [bytes=200 calls=11]
+              FUN_140b57400 @ 140b57400  [bytes=30 calls=1]
+                  FUN_140b57294 @ 140b57294  [bytes=155 calls=3]
+              _LocaleUpdate @ 140b56ca0  [bytes=155 calls=3]
+                  FUN_140b8f7d4 @ 140b8f7d4  [bytes=210 calls=12]
+                  __acrt_update_locale_info @ 140b8fb34  [bytes=49 calls=1]
+                  FUN_140b8fba0 @ 140b8fba0  [bytes=49 calls=1]
+              parse_floating_point<> @ 140b73868  [bytes=158 calls=5]
+                  __doserrno @ 140b58068  (revisited)
+                  FUN_140b57400 @ 140b57400  (revisited)
+                  FUN_140b739a8 @ 140b739a8  [bytes=1245 calls=16]
+                  parse_floating_point_write_result<double> @ 140b6bdd4  [bytes=478 calls=2]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+      FUN_140b67c00 @ 140b67c00  [bytes=176 calls=3]
+          FUN_140b580b8 @ 140b580b8  [bytes=736 calls=9]
+              __doserrno @ 140b58068  (revisited)
+              FUN_140b57400 @ 140b57400  (revisited)
+              FUN_140b57330 @ 140b57330  [bytes=206 calls=4]
+                  FUN_140b57078 @ 140b57078  [bytes=106 calls=3]
+                  _guard_dispatch_icall @ 140cc34b0  (revisited)
+                  FUN_140b570e4 @ 140b570e4  [bytes=76 calls=2]
+                  _invoke_watson @ 140b57450  [bytes=71 calls=4]
+              FUN_140b59580 @ 140b59580  [bytes=118 calls=3]
+                  FUN_140b57010 @ 140b57010  [bytes=102 calls=4]
+                  FUN_140b8fb68 @ 140b8fb68  [bytes=53 calls=1]
+                  FUN_140b8fbd4 @ 140b8fbd4  [bytes=53 calls=1]
+              FUN_140b595f8 @ 140b595f8  [bytes=118 calls=2]
+                  __pctype_func @ 140b8e138  [bytes=47 calls=2]
+                  _isctype_l @ 140b90564  [bytes=264 calls=3]
+          FUN_140b57010 @ 140b57010  (revisited)
+      FUN_1408ee310 @ 1408ee310  [bytes=83 calls=5]
+          FUN_140189e10 @ 140189e10  [bytes=12 calls=0]
+          FUN_1408c4a00 @ 1408c4a00  [bytes=455 calls=12]
+              FUN_1408ce180 @ 1408ce180  [bytes=42 calls=0]
+              IsIconic @ EXTERNAL:00000184  [bytes=0 calls=0]
+              FUN_1408caa00 @ 1408caa00  (revisited)
+              IsZoomed @ EXTERNAL:00000183  [bytes=0 calls=0]
+              BringWindowToTop @ EXTERNAL:000001a3  [bytes=0 calls=0]
+              ShowWindow @ EXTERNAL:0000018a  [bytes=0 calls=0]
+              FUN_1409b77c0 @ 1409b77c0  [bytes=335 calls=10]
+                  SendMessageW @ EXTERNAL:000001a7  [bytes=0 calls=0]
+                  FUN_1408e2410 @ 1408e2410  [bytes=218 calls=0]
+                  FUN_1408cf370 @ 1408cf370  [bytes=53 calls=1]
+                  FUN_1401898e0 @ 1401898e0  (revisited)
+                  ShowWindow @ EXTERNAL:0000018a  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_14080b7c0 @ 14080b7c0  (revisited)
+              FUN_14080b3c0 @ 14080b3c0  (revisited)
+          FUN_1408ee790 @ 1408ee790  [bytes=159 calls=5]
+              GetWindow @ EXTERNAL:00000143  [bytes=0 calls=0]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              DestroyWindow @ EXTERNAL:0000019f  [bytes=0 calls=0]
+          FUN_14018a4a0 @ 14018a4a0  [bytes=58 calls=2]
+              FUN_140030510 @ 140030510  [bytes=90 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1408bf8d0 @ 1408bf8d0  [bytes=112 calls=4]
+                  FUN_1408cd020 @ 1408cd020  [bytes=165 calls=6]
+                  FUN_14019c470 @ 14019c470  [bytes=159 calls=2]
+                  FUN_1408eefa0 @ 1408eefa0  [bytes=711 calls=17]
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140262ac0 @ 140262ac0
+  FUN_140262ac0 @ 140262ac0  [bytes=1135 calls=53]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140262f30 @ 140262f30
+  FUN_140262f30 @ 140262f30  [bytes=1135 calls=53]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140262130 @ 140262130
+  FUN_140262130 @ 140262130  [bytes=950 calls=41]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_1402624f0 @ 1402624f0
+  FUN_1402624f0 @ 1402624f0  [bytes=1474 calls=70]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140261b90 @ 140261b90
+  FUN_140261b90 @ 140261b90  [bytes=725 calls=29]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+      FUN_140030400 @ 140030400  (revisited)
+      FUN_140031c80 @ 140031c80  (revisited)
+      FUN_1407fb140 @ 1407fb140  (revisited)
+      thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+      FUN_1407f9a30 @ 1407f9a30  (revisited)
+      FUN_1407c9c60 @ 1407c9c60  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      FUN_1400303a0 @ 1400303a0  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140b57420 @ 140b57420  (revisited)
+
+>>> root FUN_1402a1170 @ 1402a1170
+  FUN_1402a1170 @ 1402a1170  [bytes=460 calls=19]
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+          FUN_140123150 @ 140123150  [bytes=203 calls=9]
+              FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407d6400 @ 1407d6400  [bytes=421 calls=17]
+                  FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  _malloc_base @ 140b57498  [bytes=5 calls=0]
+                  FUN_1407c8520 @ 1407c8520  [bytes=138 calls=3]
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+                  FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140851880 @ 140851880  [bytes=95 calls=5]
+                  FUN_1408514c0 @ 1408514c0  [bytes=955 calls=44]
+                  FUN_140b67b50 @ 140b67b50  [bytes=176 calls=3]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+              FUN_1407cfe70 @ 1407cfe70  [bytes=1454 calls=53]
+                  FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1401e61c0 @ 1401e61c0  [bytes=144 calls=2]
+                  FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1401e6260 @ 1401e6260  [bytes=120 calls=2]
+                  FUN_1400f1f10 @ 1400f1f10  [bytes=359 calls=7]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407d6990 @ 1407d6990  [bytes=108 calls=3]
+                  __acrt_iob_func @ 140b5a6d4  [bytes=17 calls=0]
+                  FUN_14084da50 @ 14084da50  [bytes=72 calls=1]
+                  FUN_14084dfd0 @ 14084dfd0  [bytes=375 calls=20]
+                  FUN_1407ce0d0 @ 1407ce0d0  [bytes=173 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  (revisited)
+                  FUN_1407cc670 @ 1407cc670  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  FUN_140b7354c @ 140b7354c  [bytes=85 calls=6]
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_14002b0d0 @ 14002b0d0  [bytes=95 calls=2]
+          FUN_1407d6810 @ 1407d6810  (revisited)
+          FUN_1407c93e0 @ 1407c93e0  [bytes=190 calls=3]
+              _realloc_base @ 140b56c98  [bytes=5 calls=0]
+      FUN_140b75a98 @ 140b75a98  [bytes=7 calls=1]
+          common_atof_l<> @ 140b75a24  [bytes=116 calls=4]
+              __doserrno @ 140b58068  [bytes=32 calls=1]
+                  FUN_140b8f94c @ 140b8f94c  [bytes=200 calls=11]
+              FUN_140b57400 @ 140b57400  [bytes=30 calls=1]
+                  FUN_140b57294 @ 140b57294  [bytes=155 calls=3]
+              _LocaleUpdate @ 140b56ca0  [bytes=155 calls=3]
+                  FUN_140b8f7d4 @ 140b8f7d4  [bytes=210 calls=12]
+                  __acrt_update_locale_info @ 140b8fb34  [bytes=49 calls=1]
+                  FUN_140b8fba0 @ 140b8fba0  [bytes=49 calls=1]
+              parse_floating_point<> @ 140b73868  [bytes=158 calls=5]
+                  __doserrno @ 140b58068  (revisited)
+                  FUN_140b57400 @ 140b57400  (revisited)
+                  FUN_140b739a8 @ 140b739a8  [bytes=1245 calls=16]
+                  parse_floating_point_write_result<double> @ 140b6bdd4  [bytes=478 calls=2]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      __security_check_cookie @ 140b2b0c0  (revisited)
+
+>>> root FUN_140260d60 @ 140260d60
+  FUN_140260d60 @ 140260d60  [bytes=3622 calls=145]
+      FUN_1408e8050 @ 1408e8050  [bytes=505 calls=11]
+          FUN_1408eef20 @ 1408eef20  [bytes=122 calls=2]
+              FUN_1408fdd20 @ 1408fdd20  [bytes=118 calls=2]
+                  FUN_1408c5370 @ 1408c5370  [bytes=712 calls=16]
+                  FUN_1408d82b0 @ 1408d82b0  [bytes=66 calls=0]
+              FUN_1409b45e0 @ 1409b45e0  [bytes=22 calls=0]
+          FUN_1408c23f0 @ 1408c23f0  [bytes=34 calls=0]
+          FUN_1408b7140 @ 1408b7140  [bytes=30 calls=0]
+          FUN_1401ab950 @ 1401ab950  [bytes=123 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  [bytes=397 calls=15]
+                  FUN_14012d3f0 @ 14012d3f0  [bytes=231 calls=5]
+                  FUN_140123150 @ 140123150  [bytes=203 calls=9]
+                  FUN_1407cc670 @ 1407cc670  [bytes=380 calls=12]
+                  FUN_140b56ffc @ 140b56ffc  [bytes=17 calls=1]
+                  FID_conflict:_Tidy_deallocate @ 14002ff50  [bytes=5 calls=0]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  [bytes=5 calls=0]
+                  __security_check_cookie @ 140b2b0c0  [bytes=30 calls=1]
+                  FUN_140b57420 @ 140b57420  [bytes=46 calls=2]
+          FUN_140b2b0f0 @ 140b2b0f0  [bytes=58 calls=4]
+              FUN_140b8e188 @ 140b8e188  [bytes=57 calls=2]
+                  _query_new_handler @ 140b8e1c4  [bytes=52 calls=2]
+                  _guard_dispatch_icall @ 140cc34b0  [bytes=6 calls=0]
+              _malloc_base @ 140b57498  [bytes=5 calls=0]
+              FUN_140b27730 @ 140b27730  [bytes=31 calls=2]
+                  FUN_140135450 @ 140135450  [bytes=33 calls=0]
+                  FUN_140b4a2e0 @ 140b4a2e0  [bytes=167 calls=3]
+              FUN_14002b010 @ 14002b010  [bytes=31 calls=2]
+                  FUN_14002afe0 @ 14002afe0  [bytes=33 calls=0]
+                  FUN_140b4a2e0 @ 140b4a2e0  (revisited)
+          FUN_14080c340 @ 14080c340  [bytes=336 calls=10]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1401899c0 @ 1401899c0  [bytes=118 calls=2]
+                  FUN_1407d0bd0 @ 1407d0bd0  [bytes=274 calls=14]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_1404f8500 @ 1404f8500  [bytes=242 calls=5]
+                  FUN_14046aaf0 @ 14046aaf0  [bytes=109 calls=4]
+                  FUN_140b4a5e0 @ 140b4a5e0  [bytes=1353 calls=0]
+                  FUN_1400da570 @ 1400da570  [bytes=134 calls=2]
+                  FUN_140031e90 @ 140031e90  [bytes=16 calls=1]
+              FUN_14080c840 @ 14080c840  [bytes=168 calls=3]
+                  FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+          FUN_1408df620 @ 1408df620  [bytes=62 calls=2]
+              FUN_1408de300 @ 1408de300  [bytes=927 calls=29]
+                  GetWindowLongPtrW @ EXTERNAL:0000017a  [bytes=0 calls=0]
+                  SetWindowLongPtrW @ EXTERNAL:00000179  [bytes=0 calls=0]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  SetWindowPos @ EXTERNAL:00000186  [bytes=0 calls=0]
+                  FUN_1407ca230 @ 1407ca230  [bytes=378 calls=8]
+                  GetCurrentThreadId @ 1407f0610  [bytes=7 calls=0]
+                  FUN_1407f6290 @ 1407f6290  [bytes=32 calls=0]
+                  FUN_1407f5cf0 @ 1407f5cf0  [bytes=621 calls=15]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  [bytes=96 calls=2]
+                  FUN_14012ab60 @ 14012ab60  [bytes=259 calls=5]
+                  GetLastError @ 1407f71d0  [bytes=7 calls=0]
+                  FUN_1407f71e0 @ 1407f71e0  [bytes=43 calls=2]
+                  FUN_1407dc330 @ 1407dc330  [bytes=450 calls=17]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140123dd0 @ 140123dd0  [bytes=383 calls=13]
+                  FUN_140b57420 @ 140b57420  (revisited)
+      FUN_1408ee9c0 @ 1408ee9c0  [bytes=24 calls=0]
+      FUN_140adf9c0 @ 140adf9c0  [bytes=690 calls=15]
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14012d3f0 @ 14012d3f0  (revisited)
+          FUN_140ad66e0 @ 140ad66e0  [bytes=370 calls=4]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140ad6e50 @ 140ad6e50  [bytes=155 calls=2]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_1407d60b0 @ 1407d60b0  [bytes=312 calls=6]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1400316a0 @ 1400316a0  [bytes=132 calls=0]
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+          FUN_1400308b0 @ 1400308b0  [bytes=37 calls=2]
+              FUN_140031c80 @ 140031c80  [bytes=86 calls=4]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+          FUN_14002b0b0 @ 14002b0b0  [bytes=16 calls=1]
+              FUN_140b27794 @ 140b27794  [bytes=34 calls=2]
+                  FUN_140b274a4 @ 140b274a4  [bytes=71 calls=1]
+                  FUN_140b4a2e0 @ 140b4a2e0  (revisited)
+      FUN_140123150 @ 140123150  (revisited)
+      FUN_140ae7380 @ 140ae7380  [bytes=241 calls=7]
+          FUN_14012d3f0 @ 14012d3f0  (revisited)
+          FUN_140adf7a0 @ 140adf7a0  [bytes=541 calls=20]
+              FUN_140aea820 @ 140aea820  [bytes=508 calls=13]
+                  FUN_140ad66e0 @ 140ad66e0  (revisited)
+                  FUN_140ba6790 @ 140ba6790  [bytes=952 calls=26]
+                  FUN_140ba3300 @ 140ba3300  [bytes=164 calls=7]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  FUN_140adb890 @ 140adb890  [bytes=4974 calls=169]
+                  FUN_140826990 @ 140826990  [bytes=40 calls=2]
+                  FUN_140828010 @ 140828010  [bytes=365 calls=6]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140ba9f00 @ 140ba9f00  [bytes=43 calls=0]
+              FUN_140ada8b0 @ 140ada8b0  [bytes=2169 calls=62]
+                  FUN_1407cc2a0 @ 1407cc2a0  [bytes=22 calls=1]
+                  FUN_14012d3f0 @ 14012d3f0  (revisited)
+                  FUN_140ba9960 @ 140ba9960  [bytes=254 calls=5]
+                  FUN_1407cc130 @ 1407cc130  [bytes=106 calls=0]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae5850 @ 140ae5850  [bytes=190 calls=5]
+                  FUN_140ada8b0 @ 140ada8b0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140189640 @ 140189640  [bytes=42 calls=1]
+                  FUN_14002fe00 @ 14002fe00  [bytes=325 calls=7]
+              FUN_140ba35b0 @ 140ba35b0  [bytes=533 calls=11]
+                  FUN_140ba6050 @ 140ba6050  [bytes=1226 calls=23]
+                  FUN_140189670 @ 140189670  [bytes=23 calls=1]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+                  FUN_140816790 @ 140816790  [bytes=144 calls=2]
+                  FUN_1401ef830 @ 1401ef830  [bytes=119 calls=4]
+                  FUN_1407cbee0 @ 1407cbee0  [bytes=161 calls=1]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  [bytes=108 calls=3]
+                  FUN_140b2b528 @ 140b2b528  [bytes=120 calls=2]
+                  atexit @ 140b2b468  [bytes=23 calls=1]
+                  _Init_thread_footer @ 140b2b4bc  [bytes=105 calls=2]
+              FUN_140030400 @ 140030400  [bytes=143 calls=2]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_14002b160 @ 14002b160  [bytes=252 calls=4]
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_14002b0b0 @ 14002b0b0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+              FUN_1402a20c0 @ 1402a20c0  [bytes=489 calls=19]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  [bytes=91 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  [bytes=14 calls=0]
+                  FUN_1407f9a30 @ 1407f9a30  [bytes=623 calls=22]
+                  FUN_1407c9c60 @ 1407c9c60  [bytes=113 calls=5]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ae8a50 @ 140ae8a50  [bytes=262 calls=9]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae1f50 @ 140ae1f50  [bytes=836 calls=28]
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_140123220 @ 140123220  [bytes=40 calls=3]
+                  FUN_1400303a0 @ 1400303a0  [bytes=91 calls=4]
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140ada170 @ 140ada170  [bytes=1839 calls=78]
+              FUN_1407cc2a0 @ 1407cc2a0  (revisited)
+              FUN_14012d3f0 @ 14012d3f0  (revisited)
+              FUN_140ba9960 @ 140ba9960  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140adf7a0 @ 140adf7a0  (revisited)
+              FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_140030400 @ 140030400  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_140191500 @ 140191500  [bytes=364 calls=13]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_140031c80 @ 140031c80  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140ae1f50 @ 140ae1f50  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140ada170 @ 140ada170  (revisited)
+              FUN_140ba91e0 @ 140ba91e0  [bytes=110 calls=1]
+                  FUN_140ba97e0 @ 140ba97e0  [bytes=266 calls=6]
+              FUN_140ae7850 @ 140ae7850  [bytes=1671 calls=58]
+                  FUN_1407cc130 @ 1407cc130  (revisited)
+                  FUN_140189640 @ 140189640  (revisited)
+                  FUN_14012d3f0 @ 14012d3f0  (revisited)
+                  FUN_140ba9960 @ 140ba9960  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140ae7850 @ 140ae7850  (revisited)
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140ba91e0 @ 140ba91e0  (revisited)
+                  FUN_1407d6810 @ 1407d6810  [bytes=108 calls=3]
+                  FUN_1407c9a20 @ 1407c9a20  [bytes=561 calls=25]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_1407cc2a0 @ 1407cc2a0  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140123150 @ 140123150  (revisited)
+              FUN_140ba9490 @ 140ba9490  [bytes=125 calls=3]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_14002b160 @ 14002b160  (revisited)
+              FUN_140ba9320 @ 140ba9320  [bytes=74 calls=5]
+                  FUN_140ba98f0 @ 140ba98f0  [bytes=108 calls=2]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+              FUN_140c477e0 @ 140c477e0  [bytes=115 calls=2]
+                  FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              FUN_1402a20c0 @ 1402a20c0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_140b56ffc @ 140b56ffc  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          __security_check_cookie @ 140b2b0c0  (revisited)
+          FUN_140b57420 @ 140b57420  (revisited)
+      FUN_140b56ffc @ 140b56ffc  (revisited)
+      FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+      FUN_140adb140 @ 140adb140  [bytes=56 calls=2]
+          FUN_140ad8590 @ 140ad8590  [bytes=2167 calls=127]
+              FUN_140aead40 @ 140aead40  [bytes=300 calls=5]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b84a50 @ 140b84a50  [bytes=116 calls=3]
+                  FUN_140b59940 @ 140b59940  [bytes=177 calls=3]
+                  FUN_1409c3800 @ 1409c3800  [bytes=1850 calls=52]
+                  FUN_1409c33d0 @ 1409c33d0  [bytes=445 calls=8]
+          FUN_140aead40 @ 140aead40  (revisited)
+      FUN_1408c7df0 @ 1408c7df0  [bytes=178 calls=2]
+          FUN_1408c7df0 @ 1408c7df0  (revisited)
+      FUN_1401898e0 @ 1401898e0  [bytes=98 calls=2]
+          FUN_1401898e0 @ 1401898e0  (revisited)
+      FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+      FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+      FUN_14080c340 @ 14080c340  (revisited)
+      FUN_1408eedc0 @ 1408eedc0  [bytes=337 calls=15]
+          FUN_1409fa730 @ 1409fa730  [bytes=387 calls=8]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031e90 @ 140031e90  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+          FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+          FUN_14087b720 @ 14087b720  [bytes=1036 calls=37]
+              FUN_140850ec0 @ 140850ec0  [bytes=43 calls=0]
+              CreateEventW @ EXTERNAL:0000005c  [bytes=0 calls=0]
+              FUN_1407ca230 @ 1407ca230  (revisited)
+              GetCurrentThreadId @ 1407f0610  (revisited)
+              FUN_1407f6290 @ 1407f6290  (revisited)
+              FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+              FUN_14012ab60 @ 14012ab60  (revisited)
+              GetLastError @ 1407f71d0  (revisited)
+              FUN_1407f71e0 @ 1407f71e0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_1407dc500 @ 1407dc500  [bytes=590 calls=22]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  FUN_1407fb140 @ 1407fb140  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407d6810 @ 1407d6810  (revisited)
+                  FUN_1407d2bc0 @ 1407d2bc0  [bytes=653 calls=23]
+                  FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FUN_1407f9a30 @ 1407f9a30  (revisited)
+                  FUN_1407fb1c0 @ 1407fb1c0  (revisited)
+                  FUN_1407c9c60 @ 1407c9c60  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1407f2e20 @ 1407f2e20  [bytes=88 calls=1]
+                  GetSystemTimeAsFileTime @ EXTERNAL:00000042  [bytes=0 calls=0]
+              FUN_1407f67c0 @ 1407f67c0  [bytes=517 calls=22]
+                  FUN_14012ab60 @ 14012ab60  (revisited)
+                  FUN_1407f6fc0 @ 1407f6fc0  [bytes=525 calls=23]
+                  FUN_140b56ffc @ 140b56ffc  (revisited)
+                  FID_conflict:_Tidy_deallocate @ 140030840  (revisited)
+                  FUN_1407d0b60 @ 1407d0b60  [bytes=9 calls=1]
+                  GetCurrentThreadId @ 1407f0610  (revisited)
+                  FUN_1407f5c70 @ 1407f5c70  [bytes=126 calls=4]
+                  EnterCriticalSection @ 1407f05f0  [bytes=7 calls=0]
+                  FUN_14002b160 @ 14002b160  (revisited)
+                  FUN_1407f4f20 @ 1407f4f20  [bytes=336 calls=7]
+                  FUN_1407f3490 @ 1407f3490  [bytes=749 calls=13]
+                  FUN_140124020 @ 140124020  [bytes=232 calls=8]
+                  FUN_140123f50 @ 140123f50  [bytes=195 calls=6]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_1407d0f60 @ 1407d0f60  [bytes=23 calls=0]
+                  LeaveCriticalSection @ 1407f0620  [bytes=7 calls=0]
+                  FUN_1407f60b0 @ 1407f60b0  [bytes=193 calls=4]
+                  FUN_1407f4730 @ 1407f4730  [bytes=2016 calls=65]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140123dd0 @ 140123dd0  (revisited)
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          FUN_1408b1c20 @ 1408b1c20  [bytes=126 calls=3]
+              FUN_1405fd840 @ 1405fd840  [bytes=412 calls=8]
+                  FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+                  FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_14002b010 @ 14002b010  (revisited)
+                  FUN_140031e90 @ 140031e90  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1408b1f50 @ 1408b1f50  [bytes=246 calls=5]
+                  FUN_140b282b0 @ 140b282b0  [bytes=198 calls=0]
+                  FUN_1408caa00 @ 1408caa00  [bytes=75 calls=3]
+                  FUN_1405fd840 @ 1405fd840  (revisited)
+          FUN_140851220 @ 140851220  [bytes=261 calls=6]
+              FUN_140850e90 @ 140850e90  [bytes=16 calls=0]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_140851150 @ 140851150  [bytes=99 calls=2]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+          FUN_14087bb40 @ 14087bb40  [bytes=951 calls=37]
+              CloseHandle @ EXTERNAL:000000fa  [bytes=0 calls=0]
+              FUN_1407ca230 @ 1407ca230  (revisited)
+              GetCurrentThreadId @ 1407f0610  (revisited)
+              FUN_1407f6290 @ 1407f6290  (revisited)
+              FUN_1407f5cf0 @ 1407f5cf0  (revisited)
+              FUN_140b56ffc @ 140b56ffc  (revisited)
+              FID_conflict:_Tidy_deallocate @ 14002ff50  (revisited)
+              FUN_14012ab60 @ 14012ab60  (revisited)
+              GetLastError @ 1407f71d0  (revisited)
+              FUN_1407f71e0 @ 1407f71e0  (revisited)
+              FUN_1407ca8c0 @ 1407ca8c0  (revisited)
+              FUN_14002b160 @ 14002b160  (revisited)
+              FUN_1407dc500 @ 1407dc500  (revisited)
+              FUN_1407f2e20 @ 1407f2e20  (revisited)
+              FUN_1407f67c0 @ 1407f67c0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140123220 @ 140123220  (revisited)
+              FUN_140123dd0 @ 140123dd0  (revisited)
+              FUN_140850f50 @ 140850f50  [bytes=17 calls=0]
+              __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+          thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+          FUN_1409fa8c0 @ 1409fa8c0  [bytes=373 calls=8]
+              FUN_140b2b0f0 @ 140b2b0f0  (revisited)
+              FUN_140b4a5e0 @ 140b4a5e0  (revisited)
+              thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+              FUN_140b57420 @ 140b57420  (revisited)
+              FUN_140031e90 @ 140031e90  (revisited)
+              FUN_14002b010 @ 14002b010  (revisited)
+      FUN_14002b0d0 @ 14002b0d0  [bytes=95 calls=2]
+          FUN_1407d6810 @ 1407d6810  (revisited)
+          FUN_1407c93e0 @ 1407c93e0  [bytes=190 calls=3]
+              _realloc_base @ 140b56c98  [bytes=5 calls=0]
+      FUN_140b75a98 @ 140b75a98  [bytes=7 calls=1]
+          common_atof_l<> @ 140b75a24  [bytes=116 calls=4]
+              __doserrno @ 140b58068  [bytes=32 calls=1]
+                  FUN_140b8f94c @ 140b8f94c  [bytes=200 calls=11]
+              FUN_140b57400 @ 140b57400  [bytes=30 calls=1]
+                  FUN_140b57294 @ 140b57294  [bytes=155 calls=3]
+              _LocaleUpdate @ 140b56ca0  [bytes=155 calls=3]
+                  FUN_140b8f7d4 @ 140b8f7d4  [bytes=210 calls=12]
+                  __acrt_update_locale_info @ 140b8fb34  [bytes=49 calls=1]
+                  FUN_140b8fba0 @ 140b8fba0  [bytes=49 calls=1]
+              parse_floating_point<> @ 140b73868  [bytes=158 calls=5]
+                  __doserrno @ 140b58068  (revisited)
+                  FUN_140b57400 @ 140b57400  (revisited)
+                  FUN_140b739a8 @ 140b739a8  [bytes=1245 calls=16]
+                  parse_floating_point_write_result<double> @ 140b6bdd4  [bytes=478 calls=2]
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+      FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+      FUN_140b67c00 @ 140b67c00  [bytes=176 calls=3]
+          FUN_140b580b8 @ 140b580b8  [bytes=736 calls=9]
+              __doserrno @ 140b58068  (revisited)
+              FUN_140b57400 @ 140b57400  (revisited)
+              FUN_140b57330 @ 140b57330  [bytes=206 calls=4]
+                  FUN_140b57078 @ 140b57078  [bytes=106 calls=3]
+                  _guard_dispatch_icall @ 140cc34b0  (revisited)
+                  FUN_140b570e4 @ 140b570e4  [bytes=76 calls=2]
+                  _invoke_watson @ 140b57450  [bytes=71 calls=4]
+              FUN_140b59580 @ 140b59580  [bytes=118 calls=3]
+                  FUN_140b57010 @ 140b57010  [bytes=102 calls=4]
+                  FUN_140b8fb68 @ 140b8fb68  [bytes=53 calls=1]
+                  FUN_140b8fbd4 @ 140b8fbd4  [bytes=53 calls=1]
+              FUN_140b595f8 @ 140b595f8  [bytes=118 calls=2]
+                  __pctype_func @ 140b8e138  [bytes=47 calls=2]
+                  _isctype_l @ 140b90564  [bytes=264 calls=3]
+          FUN_140b57010 @ 140b57010  (revisited)
+      FUN_1408ee310 @ 1408ee310  [bytes=83 calls=5]
+          FUN_140189e10 @ 140189e10  [bytes=12 calls=0]
+          FUN_1408c4a00 @ 1408c4a00  [bytes=455 calls=12]
+              FUN_1408ce180 @ 1408ce180  [bytes=42 calls=0]
+              IsIconic @ EXTERNAL:00000184  [bytes=0 calls=0]
+              FUN_1408caa00 @ 1408caa00  (revisited)
+              IsZoomed @ EXTERNAL:00000183  [bytes=0 calls=0]
+              BringWindowToTop @ EXTERNAL:000001a3  [bytes=0 calls=0]
+              ShowWindow @ EXTERNAL:0000018a  [bytes=0 calls=0]
+              FUN_1409b77c0 @ 1409b77c0  [bytes=335 calls=10]
+                  SendMessageW @ EXTERNAL:000001a7  [bytes=0 calls=0]
+                  FUN_1408e2410 @ 1408e2410  [bytes=218 calls=0]
+                  FUN_1408cf370 @ 1408cf370  [bytes=53 calls=1]
+                  FUN_1401898e0 @ 1401898e0  (revisited)
+                  ShowWindow @ EXTERNAL:0000018a  (revisited)
+                  __security_check_cookie @ 140b2b0c0  (revisited)
+              FUN_14080b7c0 @ 14080b7c0  [bytes=56 calls=0]
+              FUN_14080b3c0 @ 14080b3c0  [bytes=136 calls=3]
+                  FUN_1407d0bd0 @ 1407d0bd0  (revisited)
+          FUN_1408ee790 @ 1408ee790  [bytes=159 calls=5]
+              GetWindow @ EXTERNAL:00000143  [bytes=0 calls=0]
+              FUN_1407d0dd0 @ 1407d0dd0  (revisited)
+              DestroyWindow @ EXTERNAL:0000019f  [bytes=0 calls=0]
+          FUN_14018a4a0 @ 14018a4a0  [bytes=58 calls=2]
+              FUN_140030510 @ 140030510  [bytes=90 calls=2]
+                  thunk_FUN_140b2b5c0 @ 140b2b0e0  (revisited)
+                  FUN_140b57420 @ 140b57420  (revisited)
+              FUN_1408bf8d0 @ 1408bf8d0  [bytes=112 calls=4]
+                  FUN_1408cd020 @ 1408cd020  [bytes=165 calls=6]
+                  FUN_14019c470 @ 14019c470  [bytes=159 calls=2]
+                  FUN_1408eefa0 @ 1408eefa0  [bytes=711 calls=17]
+      __security_check_cookie @ 140b2b0c0  (revisited)

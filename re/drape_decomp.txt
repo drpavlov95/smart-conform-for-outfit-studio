@@ -1,0 +1,176 @@
+==== FUN_14012f1a0 @ 14012f1a0  (RVA 0x12f1a0) ====
+
+void FUN_14012f1a0(undefined8 param_1,undefined8 param_2,undefined8 param_3,undefined8 param_4,
+                  longlong param_5)
+
+{
+  float fVar1;
+  short sVar2;
+  undefined8 *puVar3;
+  undefined8 *puVar4;
+  longlong lVar5;
+  longlong *plVar6;
+  longlong *plVar7;
+  float fVar8;
+  byte *pbVar9;
+  byte *pbVar10;
+  char cVar11;
+  longlong *plVar12;
+  ulonglong uVar13;
+  longlong lVar14;
+  longlong lVar15;
+  byte *pbVar16;
+  undefined1 local_c8 [16];
+  undefined1 local_b8 [16];
+  undefined1 local_a8 [16];
+  undefined1 local_98 [16];
+  undefined1 local_88 [16];
+  byte *local_78;
+  byte *pbStack_70;
+  byte *local_68;
+  
+  cVar11 = FUN_14012f500();
+  if (cVar11 != '\0') {
+    local_78 = (byte *)0x0;
+    pbStack_70 = (byte *)0x0;
+    pbVar16 = (byte *)0x0;
+    local_68 = (byte *)0x0;
+    plVar12 = (longlong *)FUN_1401342d0(param_1,local_c8,param_2);
+    puVar3 = *(undefined8 **)(*plVar12 + 0x38);
+    fVar8 = DAT_140fca750;
+    pbVar9 = pbStack_70;
+    for (puVar4 = (undefined8 *)*puVar3; DAT_140fca750 = fVar8, pbVar10 = local_78,
+        pbStack_70 = pbVar9, puVar4 != puVar3; puVar4 = (undefined8 *)*puVar4) {
+      if (pbVar9 == pbVar16) {
+        FUN_140045600(&local_78,pbVar9);
+        pbVar16 = local_68;
+      }
+      else {
+        *(undefined2 *)pbVar9 = *(undefined2 *)(puVar4 + 2);
+        pbStack_70 = pbVar9 + 2;
+      }
+      fVar8 = DAT_140fca750;
+      pbVar9 = pbStack_70;
+    }
+    for (; pbVar10 != pbVar9; pbVar10 = pbVar10 + 2) {
+      plVar12 = (longlong *)FUN_1401342d0(param_1,local_c8,param_2);
+      lVar14 = *plVar12;
+      uVar13 = *(ulonglong *)(lVar14 + 0x60) &
+               (((ulonglong)*pbVar10 ^ 0xcbf29ce484222325) * 0x100000001b3 ^ (ulonglong)pbVar10[1])
+               * 0x100000001b3;
+      lVar15 = *(longlong *)(*(longlong *)(lVar14 + 0x48) + 8 + uVar13 * 0x10);
+      lVar5 = *(longlong *)(lVar14 + 0x38);
+      if (lVar15 == lVar5) {
+LAB_14012f2f2:
+        lVar15 = 0;
+      }
+      else {
+        sVar2 = *(short *)(lVar15 + 0x10);
+        while (*(short *)pbVar10 != sVar2) {
+          if (lVar15 == *(longlong *)(*(longlong *)(lVar14 + 0x48) + uVar13 * 0x10))
+          goto LAB_14012f2f2;
+          lVar15 = *(longlong *)(lVar15 + 8);
+          sVar2 = *(short *)(lVar15 + 0x10);
+        }
+      }
+      plVar12 = (longlong *)FUN_1401342d0(param_1,local_b8,param_2);
+      if (lVar15 == 0) {
+        lVar15 = lVar5;
+      }
+      if (lVar15 == *(longlong *)(*plVar12 + 0x38)) goto LAB_14012f4b2;
+      if (param_5 == 0) {
+LAB_14012f3f7:
+        plVar12 = (longlong *)FUN_1401342d0(param_1,local_88,param_2);
+        lVar14 = *plVar12;
+        uVar13 = *(ulonglong *)(lVar14 + 0x60) &
+                 (((ulonglong)*pbVar10 ^ 0xcbf29ce484222325) * 0x100000001b3 ^ (ulonglong)pbVar10[1]
+                 ) * 0x100000001b3;
+        lVar15 = *(longlong *)(lVar14 + 0x48);
+        plVar12 = *(longlong **)(lVar15 + 8 + uVar13 * 0x10);
+        plVar6 = *(longlong **)(lVar14 + 0x38);
+        if (plVar12 == plVar6) {
+LAB_14012f459:
+          plVar12 = (longlong *)0x0;
+        }
+        else {
+          sVar2 = (short)plVar12[2];
+          while (*(short *)pbVar10 != sVar2) {
+            if (plVar12 == *(longlong **)(lVar15 + uVar13 * 0x10)) goto LAB_14012f459;
+            plVar12 = (longlong *)plVar12[1];
+            sVar2 = (short)plVar12[2];
+          }
+        }
+        if (plVar12 != (longlong *)0x0) {
+          plVar7 = *(longlong **)(lVar15 + uVar13 * 0x10);
+          if (*(longlong **)(lVar15 + 8 + uVar13 * 0x10) == plVar12) {
+            if (plVar7 == plVar12) {
+              *(longlong **)(lVar15 + uVar13 * 0x10) = plVar6;
+              *(longlong **)(lVar15 + 8 + uVar13 * 0x10) = plVar6;
+            }
+            else {
+              *(longlong *)(lVar15 + 8 + uVar13 * 0x10) = plVar12[1];
+            }
+          }
+          else if (plVar7 == plVar12) {
+            *(longlong *)(lVar15 + uVar13 * 0x10) = *plVar12;
+          }
+          lVar15 = *plVar12;
+          *(longlong *)(lVar14 + 0x40) = *(longlong *)(lVar14 + 0x40) + -1;
+          *(longlong *)plVar12[1] = lVar15;
+          *(longlong *)(lVar15 + 8) = plVar12[1];
+          thunk_FUN_140b2b5c0(plVar12,0x20);
+        }
+      }
+      else {
+        uVar13 = *(ulonglong *)(param_5 + 0x30) &
+                 (((ulonglong)*pbVar10 ^ 0xcbf29ce484222325) * 0x100000001b3 ^ (ulonglong)pbVar10[1]
+                 ) * 0x100000001b3;
+        lVar14 = *(longlong *)(*(longlong *)(param_5 + 0x18) + 8 + uVar13 * 0x10);
+        lVar15 = *(longlong *)(param_5 + 8);
+        if (lVar14 == lVar15) {
+LAB_14012f381:
+          lVar14 = 0;
+        }
+        else {
+          sVar2 = *(short *)(lVar14 + 0x10);
+          while (*(short *)pbVar10 != sVar2) {
+            if (lVar14 == *(longlong *)(*(longlong *)(param_5 + 0x18) + uVar13 * 0x10))
+            goto LAB_14012f381;
+            lVar14 = *(longlong *)(lVar14 + 8);
+            sVar2 = *(short *)(lVar14 + 0x10);
+          }
+        }
+        if (lVar14 == 0) {
+          lVar14 = lVar15;
+        }
+        if (lVar14 == lVar15) goto LAB_14012f3f7;
+        fVar1 = *(float *)(lVar14 + 0x14);
+        if (fVar1 != fVar8) {
+          if (fVar1 == 0.0) goto LAB_14012f3f7;
+          plVar12 = (longlong *)FUN_1401342d0(param_1,local_a8,param_2);
+          plVar12 = (longlong *)FUN_1400f0fa0(*plVar12 + 0x30,local_98,pbVar10);
+          lVar14 = *plVar12;
+          *(float *)(lVar14 + 0x14) = fVar1 * *(float *)(lVar14 + 0x14);
+          *(float *)(lVar14 + 0x18) = fVar1 * *(float *)(lVar14 + 0x18);
+          *(float *)(lVar14 + 0x1c) = fVar1 * *(float *)(lVar14 + 0x1c);
+        }
+      }
+LAB_14012f4b2:
+    }
+    FUN_140043ed0(&local_78);
+  }
+  return;
+}
+
+
+---- ordered call targets ----
+  14012f1d2 -> FUN_14012f500 @ 14012f500  RVA 0x12f500  [bytes=192]
+  14012f1fd -> FUN_1401342d0 @ 1401342d0  RVA 0x1342d0  [bytes=666]
+  14012f239 -> FUN_140045600 @ 140045600  RVA 0x45600  [bytes=272]
+  14012f29b -> FUN_1401342d0 @ 1401342d0  RVA 0x1342d0  [bytes=666]
+  14012f2ff -> FUN_1401342d0 @ 1401342d0  RVA 0x1342d0  [bytes=666]
+  14012f3b2 -> FUN_1401342d0 @ 1401342d0  RVA 0x1342d0  [bytes=666]
+  14012f3c6 -> FUN_1400f0fa0 @ 1400f0fa0  RVA 0xf0fa0  [bytes=572]
+  14012f402 -> FUN_1401342d0 @ 1401342d0  RVA 0x1342d0  [bytes=666]
+  14012f4ad -> thunk_FUN_140b2b5c0 @ 140b2b0e0  RVA 0xb2b0e0  [bytes=5]
+  14012f4c4 -> FUN_140043ed0 @ 140043ed0  RVA 0x43ed0  [bytes=92]

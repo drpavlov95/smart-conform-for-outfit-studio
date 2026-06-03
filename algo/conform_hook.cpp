@@ -66,15 +66,17 @@ typedef void (*PfnGenResult)(
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
     bool axisX, bool axisY, bool axisZ);
 
-typedef void (*PfnZeroVert)(
-    void* self,
-    const std::string* shapeName,
-    const std::string* sliderName,
+// DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) — scales each diff
+// vertex by mask[vert]; erases verts with weight 0 or absent from mask.
+typedef void (*PfnDiffZeroVert)(
+    void* diffDataSets,
+    const std::string* set,
+    const std::string* target,
     void* vertSet,   // std::vector<uint16_t>*  (we pass nullptr)
     void* mask);     // std::unordered_map<uint16_t,float>*
 
-static PfnGenResult g_origGenResult = nullptr;
-static PfnZeroVert  g_zeroVertDiff   = nullptr;
+static PfnGenResult    g_origGenResult = nullptr;
+static PfnDiffZeroVert g_diffZeroVert  = nullptr;
 
 // ── Config from version.dll ────────────────────────────────────────────
 static HWND        g_osHwnd = nullptr;
@@ -210,7 +212,7 @@ static void Detour_GenResult(
                     transformResults, maxResults, noSqueeze, solidMode,
                     axisX, axisY, axisZ);
 
-    if (!g_enabled || !g_zeroVertDiff || !shapeName || !sliderName) return;
+    if (!g_enabled || !g_diffZeroVert || !self || !shapeName || !sliderName) return;
 
     std::lock_guard<std::mutex> lk(g_cacheMx);
 
@@ -221,8 +223,13 @@ static void Detour_GenResult(
     auto it = g_shapeMask.find(*shapeName);
     if (it == g_shapeMask.end() || it->second.empty()) return;  // body or unknown
 
-    // 2) Apply per-vertex cloth weight to the just-generated diff, in memory.
-    g_zeroVertDiff(self, shapeName, sliderName, nullptr, &it->second);
+    // 2) Scale the just-generated result diff per vertex, in memory, via the
+    //    engine's own DiffDataSets::ZeroVertDiff on morpher.resultDiffData.
+    //    Result is keyed by dataName = shapeName + sliderName; build it with our
+    //    own CRT (never receive a host-allocated std::string -> no /MT-/MD free).
+    std::string setName = *shapeName + *sliderName;
+    void* resultDiffData = reinterpret_cast<char*>(self) + drape_off::kResultDiffDataOffset;
+    g_diffZeroVert(resultDiffData, &setName, shapeName, nullptr, &it->second);
 }
 
 // ── Public API (called by version.dll after injection) ─────────────────
@@ -241,10 +248,11 @@ int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
     }
 
     uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    HLog("install: module base=0x%p", (void*)base);
+    HLog("install: module base=0x%p (expected imagebase 0x%llx)",
+         (void*)base, (unsigned long long)drape_off::kImageBase);
 
-    void* pGen  = reinterpret_cast<void*>(base + drape_off::kGenerateResultDiff);
-    g_zeroVertDiff = reinterpret_cast<PfnZeroVert>(base + drape_off::kZeroVertDiff);
+    void* pGen     = reinterpret_cast<void*>(base + drape_off::kGenerateResultDiff);
+    g_diffZeroVert = reinterpret_cast<PfnDiffZeroVert>(base + drape_off::kDiffSetsZeroVertDiff);
 
     if (MH_Initialize() != MH_OK) { HLog("install: MH_Initialize failed"); return -3; }
     if (MH_CreateHook(pGen, reinterpret_cast<void*>(&Detour_GenResult),
