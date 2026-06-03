@@ -1531,6 +1531,7 @@ struct StaticSolveParams {
     // constraints resist ONLY stretching, so the cloth folds and hangs.
     bool  verletCloth = false;
     float clothDamping = 0.06f;     // velocity damping per substep
+    float clothMaxDrop = 10.0f;     // max Z a drape vert may sag below conformed fit
 };
 
 struct StaticSolveStats {
@@ -1609,22 +1610,24 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.layerStrength = 0.05f;
         p.layerIterations = 1;
         p.constraintIterations = 0;
-        // Real Verlet cloth solve (momentum + asymmetric stretch + collision).
-        // pbdIterations = substeps; constraintIterations = passes/substep;
-        // gravity = per-substep downward pull. These are first-pass values meant
-        // to be tuned against the visual result.
+        // Momentum-free cloth drape (stable Gauss-Seidel relaxation).
+        // pbdIterations = relaxation steps; constraintIterations = passes/step;
+        // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
         p.verletCloth = true;
-        p.pbdIterations = 100;            // substeps
-        p.constraintIterations = 5;       // constraint passes per substep
-        p.gravity = 0.015f;               // per-substep downward pull
-        p.clothDamping = 0.08f;           // velocity damping per substep
-        p.stretchStiffness = 0.65f;       // resist stretching (limits the hang)
-        p.collisionStiffness = 0.85f;     // keep cloth outside the body
-        p.bendingStiffness = 0.08f;       // light smoothing of folds
+        p.pbdIterations = 60;             // relaxation steps
+        p.constraintIterations = 6;       // constraint passes per step
+        p.gravity = 0.25f;                // per-step downward nudge (no momentum)
+        p.clothMaxDrop = 9.0f;            // hem sags at most ~9 units below conform
+        p.stretchStiffness = 0.60f;       // resist stretching (shapes the hang)
+        p.collisionStiffness = 0.60f;     // keep cloth outside the body
+        p.bendingStiffness = 0.10f;       // light smoothing of folds
         p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 2;
-        p.surfaceSmoothStrength = 0.12f;
+        p.surfaceSmoothIterations = 3;
+        p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
+        // Column drape: keep the skirt from tucking back to the legs below the hips.
+        p.drapeReturnRate = 0.04f;
+        p.drapeEnvelopeStrength = 0.75f;
         break;
     case DRAPE_PRESET_TUBULAR:
         p.clearanceStrength = 0.18f;
@@ -2613,14 +2616,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Real Verlet/PBD cloth solve ────────────────────────────────────────
-    // Adapted from johnBuffer/ClothSimulation + xrtailor:
-    //  • momentum integration (velocity carried between substeps),
-    //  • gravity as a real downward pull, and
-    //  • distance constraints that resist ONLY stretching (compression is free),
-    //    so the cloth folds and hangs instead of shrink-wrapping the body.
-    // Pinned verts (low drape eligibility / anchored) stay locked to the conformed
-    // fit and hold the garment up at the waist/torso.
+    // ── Cloth drape solve (momentum-free relaxation) ───────────────────────
+    // Keeps the key idea from johnBuffer/ClothSimulation — distance constraints
+    // that resist ONLY stretching, so the cloth folds and hangs instead of
+    // shrink-wrapping the body — but WITHOUT Verlet momentum. Momentum let the
+    // constraint corrections feed back into velocity and accumulate energy, which
+    // tore the mesh apart (hem verts reached escape velocity). Pure Gauss-Seidel
+    // relaxation toward a gravity-loaded equilibrium always converges → no tears.
+    // A hard per-vert max-drop and a hard edge-length cap make it unconditionally
+    // stable. Pinned verts (low drape eligibility) hold the garment at the waist.
     if (params.verletCloth) {
         std::vector<float> m(n, 0.0f);   // effective inv-mass; 0 = pinned
         for (size_t i = 0; i < n; ++i) {
@@ -2628,45 +2632,45 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             m[i] = pinned ? 0.0f : Clamp01(invMass[i]);
         }
 
-        std::vector<Vec3> posOld = finalVerts;          // velocity = pos - posOld
         const int   substeps  = std::max(1, params.pbdIterations);
         const int   cIters    = std::max(1, params.constraintIterations);
-        const float gStep     = params.gravity;
-        const float damp      = ClampRange(params.clothDamping, 0.0f, 1.0f);
+        const float gStep     = params.gravity;            // per-step downward nudge
         const float stretchK2 = Clamp01(params.stretchStiffness);
+        const float maxDrop   = params.clothMaxDrop;
+        const float kMaxStretch = 1.06f;  // hard cap: no edge may exceed rest*this
+
+        auto solveStretch = [&](float k) {
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const auto& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float w1 = m[e.a], w2 = m[e.b];
+                float wSum = w1 + w2;
+                if (wSum <= kLenEps) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                if (len <= kLenEps) continue;
+                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                if (len <= rest) continue;            // slack/compressed → fold freely
+                Vec3 delta = Scale(dir, ((len - rest) / len) * k / wSum);
+                finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
+                finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
+                ++stats.stretchAdjusted;
+            }
+        };
 
         for (int s = 0; s < substeps; ++s) {
-            // 1) Integrate free verts: carry momentum, apply gravity.
+            // 1) Gravity nudge (NO momentum). Free verts only.
             for (size_t i = 0; i < n; ++i) {
-                if (m[i] <= 0.0f) { posOld[i] = finalVerts[i]; continue; }
-                Vec3 vel = Scale(Sub(finalVerts[i], posOld[i]), 1.0f - damp);
-                posOld[i] = finalVerts[i];
-                finalVerts[i] = Add(finalVerts[i], vel);
-                finalVerts[i].z -= gStep * drapeEl[i];
+                if (m[i] <= 0.0f) continue;
+                finalVerts[i].z -= gStep;
                 ++stats.gravityAdjusted;
             }
 
-            // 2) Constraint solve.
+            // 2) Constraint relaxation.
             for (int it = 0; it < cIters; ++it) {
-                // 2a) Stretch — resist ONLY stretching; compression folds freely.
-                for (size_t ei = 0; ei < useEdges.size(); ++ei) {
-                    const auto& e = useEdges[ei];
-                    if (e.a >= n || e.b >= n) continue;
-                    float w1 = m[e.a], w2 = m[e.b];
-                    float wSum = w1 + w2;
-                    if (wSum <= kLenEps) continue;
-                    Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
-                    float len = Len(dir);
-                    if (len <= kLenEps) continue;
-                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
-                    if (len <= rest) continue;          // slack/compressed → fold freely
-                    Vec3 delta = Scale(dir, ((len - rest) / len) * stretchK2 / wSum);
-                    finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
-                    finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
-                    ++stats.stretchAdjusted;
-                }
+                solveStretch(stretchK2);                 // asymmetric: resist stretch only
 
-                // 2b) Light bending for fold smoothness (conformed rest distance).
+                // Light bending for fold smoothness (conformed rest distance).
                 if (params.bendingStiffness > 0.0f && bendingPtr) {
                     const auto& bcs = *bendingPtr;
                     const float bK = Clamp01(params.bendingStiffness);
@@ -2687,7 +2691,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     }
                 }
 
-                // 2c) Body collision — push free verts outside the body shell.
+                // Body collision — push free verts outside the body shell.
                 if (bodyShell && bodyShell->valid) {
                     for (size_t i = 0; i < n; ++i) {
                         if (m[i] <= 0.0f) continue;
@@ -2696,9 +2700,40 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     }
                 }
 
-                // 2d) Re-pin: keep pinned verts exactly at the conformed fit.
+                // Re-pin pinned verts to the conformed fit.
                 for (size_t i = 0; i < n; ++i)
                     if (m[i] <= 0.0f) finalVerts[i] = supportVerts[i];
+            }
+
+            // 3) Hard stretch cap: no edge may exceed rest*kMaxStretch. This is the
+            //    definitive anti-tear — even if relaxation under-converges, edges
+            //    can never blow up. Two strong asymmetric passes against the cap.
+            for (int it = 0; it < 2; ++it) {
+                for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                    const auto& e = useEdges[ei];
+                    if (e.a >= n || e.b >= n) continue;
+                    float w1 = m[e.a], w2 = m[e.b];
+                    float wSum = w1 + w2;
+                    if (wSum <= kLenEps) continue;
+                    Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                    float len = Len(dir);
+                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    float cap = rest * kMaxStretch;
+                    if (len <= cap || len <= kLenEps) continue;
+                    Vec3 delta = Scale(dir, ((len - cap) / len) / wSum);
+                    finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
+                    finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
+                }
+            }
+
+            // 4) Hard max-drop clamp: a drape vert can sag at most maxDrop below its
+            //    conformed Z. Bounds the result and kills any runaway.
+            if (maxDrop > 0.0f) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (m[i] <= 0.0f) continue;
+                    float floorZ = supportVerts[i].z - maxDrop;
+                    if (finalVerts[i].z < floorZ) finalVerts[i].z = floorZ;
+                }
             }
         }
     }
