@@ -1201,6 +1201,7 @@ static void RebuildCacheLocked() {
         g_shapeVerts[name]   = std::move(outVerts);
         g_shapeEdges[name]   = std::move(edges);
         g_shapeBending[name] = std::move(bending);
+        HLog("cache: shape '%s' created %zu bending constraints", name.c_str(), g_shapeBending[name].size());
         g_shapeMask[name]    = std::move(mask);
         ++built;
         HLog("cache: shape '%s' weights min=%.3f max=%.3f avg=%.3f full=%d partial=%d zero=%d edges=%zu boneVerts=%d avgTorsoBone=%.3f avgLimbBone=%.3f geomPreset='%s'",
@@ -1592,14 +1593,17 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.layerStrength = 0.05f;
         p.layerIterations = 1;
         p.constraintIterations = 0;
-        p.stretchStiffness = 0.20f;
-        p.surfaceSmoothIterations = 4;
-        p.surfaceSmoothStrength = 0.22f;
-        p.pbdIterations = 80;
+        // Sane values. Key invariant: collision MUST be able to beat gravity, or
+        // the cloth sinks into the body. Rest lengths are taken from the conformed
+        // garment (supportVerts), so stretch/bending do NOT fight body growth.
+        p.stretchStiffness = 0.45f;
+        p.surfaceSmoothIterations = 2;
+        p.surfaceSmoothStrength = 0.15f;
+        p.pbdIterations = 40;
         p.gravity = 0.35f;
         p.anchorStiffness = 0.50f;
-        p.collisionStiffness = 0.22f;
-        p.bendingStiffness  = 0.35f;  // resist cross-edge folding → smooth cloth
+        p.collisionStiffness = 0.70f;  // > gravity so cloth rests ON the body
+        p.bendingStiffness  = 0.20f;
         p.bendingIterations = 2;
         break;
     case DRAPE_PRESET_TUBULAR:
@@ -2370,6 +2374,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // Low-follow (far from body) in lower half → partial drape
         float distDrape = Clamp01((1.0f - follow[i]) * 0.55f);
         drapeEl[i] = std::max(boneDrape, distDrape * (1.0f - armSuppression));
+        
+        // For loose draped physics, FORCE minimum drapeEl on all non-arm verts:
+        // Without this, high-follow (anchored) verts get drapeEl=0 and cloth doesn't simulate.
+        // Physics drape needs to move the cloth, so even "anchored to vanilla" verts 
+        // must participate in gravity/stretch to form cloth folds.
+        if (params.physicsDrape && drapeEl[i] < 0.25f && armInfl < 0.4f) {
+            drapeEl[i] = 0.40f;  // Force eligible for gravity/stretch
+        }
     }
 
     // Count eligible and tally stats
@@ -2541,6 +2553,27 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         supportRestLen[ei] = l > kLenEps ? l : e.restLength;
     }
 
+    // Support rest lengths for bending constraints (conformed garment distances).
+    // Same rationale as supportRestLen: bending must not pull the cloth back to
+    // its slim base shape when the body grows.
+    const std::vector<BendingConstraint>* bendingPtr = nullptr;
+    std::vector<float> supportBendRestLen;
+    {
+        auto bendingIt = g_shapeBending.find(shapeName);
+        if (bendingIt != g_shapeBending.end() && !bendingIt->second.empty()) {
+            bendingPtr = &bendingIt->second;
+            const auto& bcs = *bendingPtr;
+            supportBendRestLen.resize(bcs.size(), 0.0f);
+            for (size_t bi = 0; bi < bcs.size(); ++bi) {
+                const auto& bc = bcs[bi];
+                if (bc.c >= n || bc.d >= n) { supportBendRestLen[bi] = bc.restLength; continue; }
+                Vec3 d = Sub(supportVerts[bc.c], supportVerts[bc.d]);
+                float l = Len(d);
+                supportBendRestLen[bi] = l > kLenEps ? l : bc.restLength;
+            }
+        }
+    }
+
     // ── Physics drape: initial body-push ─────────────────────────────────
     // Starting from base mesh (slim body), push all verts outside the morphed
     // body BEFORE the PBD loop. This establishes the cloth's initial position
@@ -2586,9 +2619,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 if (len <= kLenEps)
                     continue;
 
-                // physicsDrape: use BASE rest lengths (fabric's designed size).
-                // Correction mode: use SUPPORT rest lengths (don't fight vanilla conform).
-                float restLen = (!params.physicsDrape && ei < supportRestLen.size())
+                // Use SUPPORT rest lengths (conformed garment edge length) in BOTH
+                // modes. The conformed garment already fits the morphed body, so
+                // stretch holds the cloth at that fitted size instead of fighting
+                // body growth back toward the slim base mesh (which crumples it).
+                float restLen = (ei < supportRestLen.size())
                     ? supportRestLen[ei] : e.restLength;
                 Vec3 delta = Scale(dir, ((len - restLen) / len) * stretchStep / wSum);
                 if (w1 > 0.0f)
@@ -2606,6 +2641,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 // Scale body collision by slider-source influence: body changes near
                 // the belly only push belly area verts, not distant skirt hem verts.
                 float eff = (i < effectiveInfluence.size()) ? effectiveInfluence[i] : 1.0f;
+                // In physics drape, collision is the ONLY force holding the cloth on
+                // the body against gravity. It must stay active for every slider, even
+                // ones with low slider-source influence — otherwise the cloth sinks in.
+                if (params.physicsDrape) eff = std::max(eff, 0.60f);
                 if (collideVertex(i, collisionStep * freeMass * eff))
                     ++stats.bodyAdjusted;
                 ++stats.bodySamples;
@@ -2623,37 +2662,38 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
 
         // Bending constraints: resist folding along shared edges to create smooth cloth surface.
-        if (params.bendingStiffness > 0.0f && params.bendingIterations > 0) {
-            auto bendingIt = g_shapeBending.find(shapeName);
-            if (bendingIt != g_shapeBending.end() && !bendingIt->second.empty()) {
-                const auto& bendingConstraints = bendingIt->second;
-                const float bendingK = Clamp01(params.bendingStiffness);
-                const float bendingStep = 1.0f - std::pow(1.0f - bendingK, 1.0f / (float)(params.bendingIterations));
+        if (params.bendingStiffness > 0.0f && params.bendingIterations > 0 && bendingPtr) {
+            const auto& bendingConstraints = *bendingPtr;
+            const float bendingK = Clamp01(params.bendingStiffness);
+            const float bendingStep = 1.0f - std::pow(1.0f - bendingK, 1.0f / (float)(params.bendingIterations));
 
-                for (int bIter = 0; bIter < params.bendingIterations; ++bIter) {
-                    for (const auto& bc : bendingConstraints) {
-                        if (bc.c >= n || bc.d >= n)
-                            continue;
+            for (int bIter = 0; bIter < params.bendingIterations; ++bIter) {
+                for (size_t bi = 0; bi < bendingConstraints.size(); ++bi) {
+                    const auto& bc = bendingConstraints[bi];
+                    if (bc.c >= n || bc.d >= n)
+                        continue;
 
-                        float wc = bc.c < invMass.size() ? Clamp01(invMass[bc.c]) : 1.0f;
-                        float wd = bc.d < invMass.size() ? Clamp01(invMass[bc.d]) : 1.0f;
-                        float wSum = wc + wd;
-                        if (wSum <= kLenEps)
-                            continue;
+                    float wc = bc.c < invMass.size() ? Clamp01(invMass[bc.c]) : 1.0f;
+                    float wd = bc.d < invMass.size() ? Clamp01(invMass[bc.d]) : 1.0f;
+                    float wSum = wc + wd;
+                    if (wSum <= kLenEps)
+                        continue;
 
-                        Vec3 dir = Sub(finalVerts[bc.c], finalVerts[bc.d]);
-                        float len = Len(dir);
-                        if (len <= kLenEps)
-                            continue;
+                    Vec3 dir = Sub(finalVerts[bc.c], finalVerts[bc.d]);
+                    float len = Len(dir);
+                    if (len <= kLenEps)
+                        continue;
 
-                        Vec3 delta = Scale(dir, ((len - bc.restLength) / len) * bendingStep / wSum);
-                        if (wc > 0.0f)
-                            finalVerts[bc.c] = Sub(finalVerts[bc.c], Scale(delta, wc));
-                        if (wd > 0.0f)
-                            finalVerts[bc.d] = Add(finalVerts[bc.d], Scale(delta, wd));
+                    // Conformed rest distance (fits morphed body), not slim base.
+                    float bRest = (bi < supportBendRestLen.size())
+                        ? supportBendRestLen[bi] : bc.restLength;
+                    Vec3 delta = Scale(dir, ((len - bRest) / len) * bendingStep / wSum);
+                    if (wc > 0.0f)
+                        finalVerts[bc.c] = Sub(finalVerts[bc.c], Scale(delta, wc));
+                    if (wd > 0.0f)
+                        finalVerts[bc.d] = Add(finalVerts[bc.d], Scale(delta, wd));
 
-                        ++stats.bendingAdjusted;
-                    }
+                    ++stats.bendingAdjusted;
                 }
             }
         }
