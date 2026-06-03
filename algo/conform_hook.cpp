@@ -2860,7 +2860,7 @@ static void Detour_GenResult(
                     size_t edgeCount = edges ? edges->size() : 0;
                     HLog("detour: STATIC_CLOTH shape='%s' slider='%s' preset='%s' phys=%d "
                          "raw=%zu written=%d body=%d/%d envelope=%d "
-                         "stretch=%d gravity=%d anchor=%d smooth=%d "
+                         "stretch=%d bending=%d gravity=%d anchor=%d smooth=%d "
                          "drapeEl=%d anchored=%d "
                          "infl_direct=%d infl_prop=%d infl_zero=%d edges=%zu",
                          shapeName->c_str(), sliderName->c_str(), PresetName(preset),
@@ -2868,6 +2868,7 @@ static void Detour_GenResult(
                          stats.rawDiffVerts, stats.written,
                          stats.bodyAdjusted, stats.bodySamples,
                          stats.envelopeAdjusted, stats.stretchAdjusted,
+                         stats.bendingAdjusted,
                          stats.gravityAdjusted, stats.anchorAdjusted, stats.smoothAdjusted,
                          stats.drapeEligibleVerts, stats.anchoredVerts,
                          stats.influenceDirectVerts, stats.influencePropagVerts,
