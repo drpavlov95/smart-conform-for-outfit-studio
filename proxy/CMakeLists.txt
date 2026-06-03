@@ -35,10 +35,16 @@ target_link_libraries(drape_proxy PRIVATE
     kernel32 user32 shell32 comctl32 comdlg32
 )
 
-# Copy version.dll to OutfitStudio directory after build
+# Copy version.dll to BOTH mod folders that may shadow each other in the MO2 VFS.
+# `|| true` so a locked file (OutfitStudio open) doesn't fail the build.
 add_custom_command(TARGET drape_proxy POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
         "$<TARGET_FILE:drape_proxy>"
         "E:/Wabbajack/InstallPacks/mods/BodySlide and Outfit Studio/CalienteTools/BodySlide/version.dll"
-    COMMENT "Deploying version.dll to OutfitStudio..."
+        || ${CMAKE_COMMAND} -E true
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:drape_proxy>"
+        "E:/Wabbajack/InstallPacks/mods/Drape - Cloth Aware Conform/CalienteTools/BodySlide/version.dll"
+        || ${CMAKE_COMMAND} -E true
+    COMMENT "Deploying version.dll to both OutfitStudio mod folders..."
 )
