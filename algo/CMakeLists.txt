@@ -4,8 +4,17 @@ project(drape_algo CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(BS_ROOT "E:/SkyrimDev/BodySlide-and-Outfit-Studio")
+set(BS_ROOT "E:/SkyrimDev/BodySlide-and-Outfit-Studio" CACHE PATH
+    "Path to a BodySlide and Outfit Studio source tree used for nifly/DiffData sources")
 set(MPP_DIR "${BS_ROOT}/mppatcher")
+
+if (NOT EXISTS "${BS_ROOT}/src/components/DiffData.cpp")
+    message(FATAL_ERROR "BS_ROOT does not look like a BodySlide source tree: ${BS_ROOT}")
+endif()
+
+if (NOT EXISTS "${MPP_DIR}/stubs/Config_stub.cpp")
+    message(FATAL_ERROR "mppatcher stubs not found under BS_ROOT: ${MPP_DIR}")
+endif()
 
 set(NIFLY_SRCS
     "${BS_ROOT}/lib/nifly/src/Animation.cpp"

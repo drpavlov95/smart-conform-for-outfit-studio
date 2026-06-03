@@ -76,6 +76,25 @@ typedef int (*PfnDrapeConform)(
     void*        logCtx
 );
 
+typedef enum {
+    DRAPE_PRESET_AUTO = 0,
+    DRAPE_PRESET_SKIN_TIGHT = 1,
+    DRAPE_PRESET_FITTED_CLOTH = 2,
+    DRAPE_PRESET_LOOSE_DRAPED = 3,
+    DRAPE_PRESET_TUBULAR = 4,
+    DRAPE_PRESET_FLEXIBLE_ARMOR = 5,
+    DRAPE_PRESET_RIGID_ARMOR = 6,
+    DRAPE_PRESET_BELT = 7,
+    DRAPE_PRESET_RIGID_ACCESSORY = 8
+} DrapeShapePreset;
+
+// In-memory hook preset API. These are resolved directly with GetProcAddress
+// by version.dll; they are intentionally kept as plain C functions.
+typedef int (*PfnDrapeGetCurrentShapes)(char* outUtf8, int outSize);
+typedef int (*PfnDrapeClearShapePresets)();
+typedef int (*PfnDrapeSetShapePreset)(const char* shapeNameUtf8, int preset);
+typedef void (*PfnDrapeSetHookEnabled)(int enabled);
+
 // ── Versioned API struct ───────────────────────────────────────────────
 
 typedef struct {

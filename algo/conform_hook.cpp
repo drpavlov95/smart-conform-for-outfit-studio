@@ -421,9 +421,11 @@ static float BoneProfileFollowWeight(int preset,
 
     switch (NormalizePreset(preset)) {
     case DRAPE_PRESET_LOOSE_DRAPED:
-        // Draped cloth should stay anchored at waist/torso, but lower limb
-        // weights should not make a dress chase each leg like pants.
-        w = std::max(w * (1.0f - 0.55f * limb), anchor * 0.85f);
+        // Draped cloth: reduce follow weight by limb influence so lower body
+        // verts become loose (small follow weight). Physics will then position
+        // them. NO forced minimum here — let limbs reduce w to near-zero.
+        // (The anchorStiffness parameter later applies waist-anchoring to tight verts.)
+        w = w * (1.0f - 0.55f * limb);
         break;
     case DRAPE_PRESET_TUBULAR:
         // Pants/sleeves need enough limb follow to avoid clipping, while still

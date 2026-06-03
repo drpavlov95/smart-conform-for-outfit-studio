@@ -21,7 +21,20 @@
  *         const std::string& target, std::vector<uint16_t>* vertSet,
  *         std::unordered_map<uint16_t,float>* mask)
  *
- *   Layout: morpher = OutfitProject+0x4d8; resultDiffData = morpher+0x80.
+ *   DiffDataSets::GetDiffSet @ RVA 0x137a70
+ *     TargetDataDiffs* GetDiffSet(DiffDataSets* this,
+ *         const std::string& targetDataName)
+ *
+ *   Automorph::GetRawResultDiff @ RVA 0x130b90
+ *     void GetRawResultDiff(const std::string& shapeName,
+ *         const std::string& sliderName, TargetDataDiffs& outDiff)
+ *
+ *   Automorph::SetResultDiff @ RVA 0x1312a0
+ *     void SetResultDiff(const std::string& shapeName,
+ *         const std::string& sliderName, const TargetDataDiffs& diff)
+ *
+ *   Layout: morpher = OutfitProject+0x4d8; srcDiffData* = morpher+0x78;
+ *     resultDiffData = morpher+0x80.
  *     In the GenerateResultDiff detour, `self` IS the morpher (Automorph*), so
  *     resultDiffData = (char*)self + kResultDiffDataOffset.
  *
@@ -41,10 +54,18 @@ constexpr uintptr_t kImageBase             = 0x140000000ull;  // for sanity logg
 
 constexpr uintptr_t kGenerateResultDiff    = 0x1314f0;  // hook target
 constexpr uintptr_t kDiffSetsZeroVertDiff  = 0x12f1a0;  // call to scale the result
+constexpr uintptr_t kDiffSetsGetDiffSet    = 0x137a70;  // source/ref diff readback
+constexpr uintptr_t kAutomorphGetRawResultDiff = 0x130b90; // host-safe readback
+constexpr uintptr_t kAutomorphSetResultDiff    = 0x1312a0; // host-safe writeback
+constexpr uintptr_t kSrcDiffDataPtrOffset  = 0x78;      // DiffDataSets* within Automorph
 constexpr uintptr_t kResultDiffDataOffset  = 0x80;      // within Automorph (morpher)
 
 constexpr bool Configured() {
-    return kGenerateResultDiff != 0 && kDiffSetsZeroVertDiff != 0;
+    return kGenerateResultDiff != 0 &&
+           kDiffSetsZeroVertDiff != 0 &&
+           kDiffSetsGetDiffSet != 0 &&
+           kAutomorphGetRawResultDiff != 0 &&
+           kAutomorphSetResultDiff != 0;
 }
 
 } // namespace drape_off

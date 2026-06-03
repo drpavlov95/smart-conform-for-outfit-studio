@@ -91,7 +91,10 @@ float DrapeConformer::weightForDistance(float d) const {
     if (d >= lD) return 0.0f;
     float t = (d - tD) / (lD - tD);
     float s = t * t * (3.0f - 2.0f * t);   // smoothstep
-    return 1.0f - s;
+    float w = 1.0f - s;
+    if (std::isfinite(m_opts.falloffPower) && m_opts.falloffPower > 0.0f)
+        w = std::pow(w, m_opts.falloffPower);
+    return w;
 }
 
 // ── Core: per-outfit-vertex weight via BVH point-to-triangle distance ──

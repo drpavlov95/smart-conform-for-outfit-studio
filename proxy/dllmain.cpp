@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <string>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdarg>
 
@@ -13,8 +14,11 @@ UINT           g_conformAllId  = 0;        // WM_COMMAND ID for "Conform All"
 
 // Toggles the in-memory cloth-aware hook (drape-algo.dll export). Enabled only
 // for the duration of a Smart Conform, so the vanilla Conform All stays vanilla.
-typedef void (*PfnSetHookEnabled)(int);
-static PfnSetHookEnabled g_setHookEnabled = nullptr;
+static std::atomic<PfnDrapeSetHookEnabled> g_setHookEnabled{nullptr};
+static std::atomic<PfnDrapeGetCurrentShapes> g_getCurrentShapes{nullptr};
+static std::atomic<PfnDrapeClearShapePresets> g_clearShapePresets{nullptr};
+static std::atomic<PfnDrapeSetShapePreset> g_setShapePreset{nullptr};
+static std::atomic_bool g_hookReady{false};
 
 // ── Debug logging (pure Win32, safe in DllMain context) ───────────────
 // Writes to %TEMP%\drape_debug.log so it works regardless of MO2 VFS.
@@ -82,18 +86,41 @@ static HWND FindOsWindow() {
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
         DbgLog("Smart Conform All clicked");
-        if (g_setHookEnabled && g_conformAllId) {
+        PfnDrapeSetHookEnabled setHookEnabled = g_setHookEnabled.load(std::memory_order_acquire);
+        DrapeHookApi api;
+        api.setHookEnabled = setHookEnabled;
+        api.getCurrentShapes = g_getCurrentShapes.load(std::memory_order_acquire);
+        api.clearShapePresets = g_clearShapePresets.load(std::memory_order_acquire);
+        api.setShapePreset = g_setShapePreset.load(std::memory_order_acquire);
+
+        if (g_hookReady.load(std::memory_order_acquire) && setHookEnabled &&
+            api.getCurrentShapes && api.clearShapePresets && api.setShapePreset &&
+            g_conformAllId) {
+            if (!ShowDrapePresetDialog(hw, api)) {
+                DbgLog("Smart Conform All canceled in preset dialog");
+                return 0;
+            }
+
             // Enable the cloth-aware hook ONLY for this conform, run the engine's
             // own Conform All synchronously, then disable it again. The vanilla
             // Conform All menu item is unaffected.
-            g_setHookEnabled(1);
+            struct ScopedHookEnable {
+                PfnDrapeSetHookEnabled fn;
+                explicit ScopedHookEnable(PfnDrapeSetHookEnabled f) : fn(f) { fn(1); }
+                ~ScopedHookEnable() { fn(0); }
+            } hookScope(setHookEnabled);
+
             SendMessageA(hw, WM_COMMAND, MAKEWPARAM(g_conformAllId, 0), 0);
-            g_setHookEnabled(0);
             DbgLog("Smart Conform All done");
         } else {
-            DbgLog("Smart Conform unavailable (hook=%p conformAllId=%u)",
-                   (void*)g_setHookEnabled, g_conformAllId);
-            ShowDrapeDialog(hw, ExeDir());  // fallback to the disk dialog
+            DbgLog("Smart Conform unavailable (ready=%d hook=%p conformAllId=%u)",
+                   g_hookReady.load(std::memory_order_relaxed) ? 1 : 0,
+                   (void*)setHookEnabled, g_conformAllId);
+            MessageBoxA(hw,
+                        "Drape hook was not installed for this OutfitStudio build.\n\n"
+                        "See %TEMP%\\drape_debug.log for details.",
+                        "Drape Smart Conform",
+                        MB_OK | MB_ICONWARNING);
         }
         return 0;
     }
@@ -190,12 +217,34 @@ static DWORD WINAPI InjectThread(LPVOID) {
             typedef int (*PfnInstall)(void*, const char*, float, float);
             auto pInstall = reinterpret_cast<PfnInstall>(
                 GetProcAddress(hAlgo, "DrapeInstallConformHook"));
-            g_setHookEnabled = reinterpret_cast<PfnSetHookEnabled>(
+            auto pSetHookEnabled = reinterpret_cast<PfnDrapeSetHookEnabled>(
                 GetProcAddress(hAlgo, "DrapeSetHookEnabled"));
+            auto pGetCurrentShapes = reinterpret_cast<PfnDrapeGetCurrentShapes>(
+                GetProcAddress(hAlgo, "DrapeGetCurrentShapes"));
+            auto pClearShapePresets = reinterpret_cast<PfnDrapeClearShapePresets>(
+                GetProcAddress(hAlgo, "DrapeClearShapePresets"));
+            auto pSetShapePreset = reinterpret_cast<PfnDrapeSetShapePreset>(
+                GetProcAddress(hAlgo, "DrapeSetShapePreset"));
             if (pInstall) {
-                int rc = pInstall(hw, ExeDir().c_str(), 2.0f, 20.0f);
-                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p",
-                       rc, (void*)g_setHookEnabled);
+                int rc = pInstall(hw, ExeDir().c_str(), 0.5f, 8.0f);
+                if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
+                    pClearShapePresets && pSetShapePreset) {
+                    g_setHookEnabled.store(pSetHookEnabled, std::memory_order_release);
+                    g_getCurrentShapes.store(pGetCurrentShapes, std::memory_order_release);
+                    g_clearShapePresets.store(pClearShapePresets, std::memory_order_release);
+                    g_setShapePreset.store(pSetShapePreset, std::memory_order_release);
+                    g_hookReady.store(true, std::memory_order_release);
+                } else {
+                    g_setHookEnabled.store(nullptr, std::memory_order_release);
+                    g_getCurrentShapes.store(nullptr, std::memory_order_release);
+                    g_clearShapePresets.store(nullptr, std::memory_order_release);
+                    g_setShapePreset.store(nullptr, std::memory_order_release);
+                    g_hookReady.store(false, std::memory_order_release);
+                }
+                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p getShapes=%p clearPresets=%p setPreset=%p ready=%d",
+                       rc, (void*)pSetHookEnabled, (void*)pGetCurrentShapes,
+                       (void*)pClearShapePresets, (void*)pSetShapePreset,
+                       g_hookReady.load(std::memory_order_relaxed) ? 1 : 0);
             } else {
                 DbgLog("InjectThread: DrapeInstallConformHook not found");
             }

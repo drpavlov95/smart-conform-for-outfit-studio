@@ -572,6 +572,265 @@ struct DlgBuilder {
     }
 };
 
+enum : UINT {
+    IDC_PRESET_LIST = 2001,
+    IDC_PRESET_COMBO = 2002,
+    IDC_PRESET_STATUS = 2003,
+    COL_PRESET_SHAPE = 0,
+    COL_PRESET_VALUE = 1,
+};
+
+struct PresetRow {
+    std::string shape;
+    int preset = DRAPE_PRESET_AUTO;
+};
+
+struct PresetDlgData {
+    DrapeHookApi api{};
+    HWND lv = nullptr;
+    HWND combo = nullptr;
+    HWND status = nullptr;
+    std::vector<PresetRow> rows;
+};
+
+static const char* PresetLabel(int preset) {
+    switch (preset) {
+    case DRAPE_PRESET_SKIN_TIGHT: return "Skin-tight";
+    case DRAPE_PRESET_FITTED_CLOTH: return "Fitted Cloth";
+    case DRAPE_PRESET_LOOSE_DRAPED: return "Loose Draped";
+    case DRAPE_PRESET_TUBULAR: return "Tubular";
+    case DRAPE_PRESET_FLEXIBLE_ARMOR: return "Flexible Armor";
+    case DRAPE_PRESET_RIGID_ARMOR: return "Rigid Armor";
+    case DRAPE_PRESET_BELT: return "Belt / Waist Item";
+    case DRAPE_PRESET_RIGID_ACCESSORY: return "Rigid Accessory";
+    default: return "Auto";
+    }
+}
+
+static int PresetFromComboIndex(int idx) {
+    static const int kPresets[] = {
+        DRAPE_PRESET_AUTO,
+        DRAPE_PRESET_SKIN_TIGHT,
+        DRAPE_PRESET_FITTED_CLOTH,
+        DRAPE_PRESET_LOOSE_DRAPED,
+        DRAPE_PRESET_TUBULAR,
+        DRAPE_PRESET_FLEXIBLE_ARMOR,
+        DRAPE_PRESET_RIGID_ARMOR,
+        DRAPE_PRESET_BELT,
+        DRAPE_PRESET_RIGID_ACCESSORY,
+    };
+    if (idx < 0 || idx >= (int)std::size(kPresets))
+        return DRAPE_PRESET_AUTO;
+    return kPresets[idx];
+}
+
+static int ComboIndexForPreset(int preset) {
+    for (int i = 0; i < 9; ++i)
+        if (PresetFromComboIndex(i) == preset)
+            return i;
+    return 0;
+}
+
+static bool NameContains(const std::string& lowerName, const char* token) {
+    return lowerName.find(token) != std::string::npos;
+}
+
+static int GuessPresetForShapeUi(const std::string& shape) {
+    std::string n = toLower(shape);
+    if (NameContains(n, "belt") || NameContains(n, "waist") ||
+        NameContains(n, "girdle") || NameContains(n, "corset"))
+        return DRAPE_PRESET_BELT;
+    if (NameContains(n, "buckle") || NameContains(n, "medallion") ||
+        NameContains(n, "pendant") || NameContains(n, "amulet") ||
+        NameContains(n, "pouch") || NameContains(n, "bag") ||
+        NameContains(n, "deco") || NameContains(n, "dec"))
+        return DRAPE_PRESET_RIGID_ACCESSORY;
+    if (NameContains(n, "skirt") || NameContains(n, "dress") ||
+        NameContains(n, "robe") || NameContains(n, "tunic") ||
+        NameContains(n, "fur") || NameContains(n, "cloak"))
+        return DRAPE_PRESET_LOOSE_DRAPED;
+    if (NameContains(n, "pants") || NameContains(n, "sleeve") ||
+        NameContains(n, "glove") || NameContains(n, "boot") ||
+        NameContains(n, "arm") || NameContains(n, "leg"))
+        return DRAPE_PRESET_TUBULAR;
+    if (NameContains(n, "pauldron") || NameContains(n, "shoulder") ||
+        NameContains(n, "plate"))
+        return DRAPE_PRESET_RIGID_ARMOR;
+    if (NameContains(n, "mail") || NameContains(n, "leather"))
+        return DRAPE_PRESET_FLEXIBLE_ARMOR;
+    if (NameContains(n, "cloth"))
+        return DRAPE_PRESET_FITTED_CLOTH;
+    return DRAPE_PRESET_AUTO;
+}
+
+static void PopulatePresetCombo(HWND combo) {
+    for (int i = 0; i < 9; ++i) {
+        int preset = PresetFromComboIndex(i);
+        SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)PresetLabel(preset));
+    }
+}
+
+static void PopulatePresetRows(HWND lv, std::vector<PresetRow>& rows) {
+    ListView_DeleteAllItems(lv);
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        LVITEMA item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = i;
+        item.pszText = const_cast<char*>(rows[i].shape.c_str());
+        ListView_InsertItem(lv, &item);
+        ListView_SetItemText(lv, i, COL_PRESET_VALUE,
+                             const_cast<char*>(PresetLabel(rows[i].preset)));
+    }
+}
+
+static int SelectedPresetRow(HWND lv) {
+    return ListView_GetNextItem(lv, -1, LVNI_SELECTED);
+}
+
+static void UpdatePresetStatus(PresetDlgData* d) {
+    if (!d || !d->status) return;
+    std::string s = std::to_string(d->rows.size()) +
+        " mesh(es). Select a row and choose its behavior preset.";
+    SetWindowTextA(d->status, s.c_str());
+}
+
+static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* d = reinterpret_cast<PresetDlgData*>(GetWindowLongPtrA(dlg, GWLP_USERDATA));
+
+    switch (msg) {
+    case WM_INITDIALOG: {
+        d = reinterpret_cast<PresetDlgData*>(lp);
+        SetWindowLongPtrA(dlg, GWLP_USERDATA, lp);
+        SetWindowTextA(dlg, "Drape Smart Conform");
+
+        d->lv = GetDlgItem(dlg, IDC_PRESET_LIST);
+        d->combo = GetDlgItem(dlg, IDC_PRESET_COMBO);
+        d->status = GetDlgItem(dlg, IDC_PRESET_STATUS);
+
+        ListView_SetExtendedListViewStyle(d->lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        LVCOLUMNA c0{LVCF_TEXT | LVCF_WIDTH, 0, 280, const_cast<char*>("Mesh")};
+        LVCOLUMNA c1{LVCF_TEXT | LVCF_WIDTH, 0, 160, const_cast<char*>("Preset")};
+        ListView_InsertColumn(d->lv, COL_PRESET_SHAPE, &c0);
+        ListView_InsertColumn(d->lv, COL_PRESET_VALUE, &c1);
+        PopulatePresetCombo(d->combo);
+
+        std::array<char, 65536> buf{};
+        int count = d->api.getCurrentShapes ? d->api.getCurrentShapes(buf.data(), (int)buf.size()) : -1;
+        std::istringstream ss(buf.data());
+        std::string line;
+        while (std::getline(ss, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+                line.pop_back();
+            if (line.empty()) continue;
+            PresetRow row;
+            row.shape = line;
+            row.preset = GuessPresetForShapeUi(line);
+            d->rows.push_back(std::move(row));
+        }
+
+        PopulatePresetRows(d->lv, d->rows);
+        UpdatePresetStatus(d);
+
+        if (count <= 0 || d->rows.empty()) {
+            SetWindowTextA(d->status,
+                           "No meshes found. Check %TEMP%\\drape_debug.log.");
+            EnableWindow(GetDlgItem(dlg, IDOK), FALSE);
+        } else {
+            ListView_SetItemState(d->lv, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+            SendMessageA(d->combo, CB_SETCURSEL, ComboIndexForPreset(d->rows[0].preset), 0);
+        }
+        return TRUE;
+    }
+
+    case WM_NOTIFY: {
+        auto* nm = reinterpret_cast<NMHDR*>(lp);
+        if (nm && nm->idFrom == IDC_PRESET_LIST && nm->code == LVN_ITEMCHANGED && d) {
+            auto* item = reinterpret_cast<NMLISTVIEW*>(lp);
+            if ((item->uChanged & LVIF_STATE) &&
+                (item->uNewState & LVIS_SELECTED) &&
+                item->iItem >= 0 && item->iItem < (int)d->rows.size()) {
+                SendMessageA(d->combo, CB_SETCURSEL,
+                             ComboIndexForPreset(d->rows[item->iItem].preset), 0);
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        WORD id = LOWORD(wp);
+        WORD code = HIWORD(wp);
+        if (id == IDC_PRESET_COMBO && code == CBN_SELCHANGE && d) {
+            int row = SelectedPresetRow(d->lv);
+            if (row >= 0 && row < (int)d->rows.size()) {
+                int comboIndex = (int)SendMessageA(d->combo, CB_GETCURSEL, 0, 0);
+                d->rows[row].preset = PresetFromComboIndex(comboIndex);
+                ListView_SetItemText(d->lv, row, COL_PRESET_VALUE,
+                                     const_cast<char*>(PresetLabel(d->rows[row].preset)));
+            }
+            return TRUE;
+        }
+
+        if (id == IDOK && d) {
+            if (d->api.clearShapePresets)
+                d->api.clearShapePresets();
+            for (const auto& row : d->rows) {
+                if (d->api.setShapePreset)
+                    d->api.setShapePreset(row.shape.c_str(), row.preset);
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+
+        if (id == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    }
+
+    return FALSE;
+}
+
+bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
+    InitCommonControlsEx(&icc);
+
+    DlgBuilder b;
+    const WORD nControls = 8;
+    b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT |
+         WS_CAPTION | WS_SYSMENU | WS_POPUP);
+    b.dw(0); b.w(nControls);
+    b.w(0); b.w(0); b.w(470); b.w(292);
+    b.w(0); b.w(0); b.str(L"Drape Smart Conform");
+    b.w(9); b.str(L"Segoe UI");
+
+    b.control(SS_LEFT, 8, 8, 446, 18, 0, L"STATIC",
+              L"Choose how each mesh should behave during Smart Conform.");
+    b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
+              8, 28, 454, 190, IDC_PRESET_LIST, L"SysListView32", L"");
+    b.control(SS_LEFT, 8, 226, 108, 10, 0, L"STATIC", L"Selected mesh preset:");
+    b.control(CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+              120, 224, 170, 120, IDC_PRESET_COMBO, L"COMBOBOX", L"");
+    b.control(SS_LEFT, 8, 246, 454, 12, IDC_PRESET_STATUS, L"STATIC", L"");
+    b.control(BS_DEFPUSHBUTTON | WS_TABSTOP,
+              280, 266, 92, 16, IDOK, L"BUTTON", L"Conform");
+    b.control(BS_PUSHBUTTON | WS_TABSTOP,
+              382, 266, 72, 16, IDCANCEL, L"BUTTON", L"Cancel");
+    b.control(SS_LEFT, 8, 266, 250, 16, 0, L"STATIC",
+              L"Belts preserve waist follow; accessories resist deformation.");
+
+    PresetDlgData data;
+    data.api = api;
+    INT_PTR rc = DialogBoxIndirectParamW(
+        GetModuleHandleW(nullptr),
+        reinterpret_cast<LPCDLGTEMPLATEW>(b.data.data()),
+        parent, PresetDlgProc,
+        reinterpret_cast<LPARAM>(&data));
+    return rc == IDOK;
+}
+
 void ShowDrapeDialog(HWND parent, const std::string& bsDir) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);

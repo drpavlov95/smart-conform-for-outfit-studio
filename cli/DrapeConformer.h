@@ -33,8 +33,13 @@ using TriList     = std::vector<std::array<uint16_t,3>>;
 // `rigid` flag), never a measurement.
 
 struct DrapeOptions {
-    float tightDistance = 2.0f;   // game units; full movement at/below this
-    float looseDistance = 20.0f;  // zero movement at/above this
+    float tightDistance = 0.5f;   // game units; full movement at/below this
+    float looseDistance = 8.0f;   // zero movement at/above this
+    float falloffPower = 2.0f;    // >1 makes loose cloth visibly less conforming
+    float envelopeStrength = 1.0f; // loose cloth keeps outward protrusions below
+    float minEnvelopeStrength = 0.35f;
+    int constraintIterations = 2;
+    float stretchStiffness = 0.35f;
 };
 
 // ── Result per shape (preview / reporting) ─────────────────────────────
