@@ -1613,12 +1613,15 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // Momentum-free cloth drape (stable Gauss-Seidel relaxation).
         // pbdIterations = relaxation steps; constraintIterations = passes/step;
         // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
+        // The monotonic radial envelope (run last) is the dominant shaper for
+        // loose. The Verlet here is only a gentle settle — kept weak so it doesn't
+        // melt the hem with uneven vertical sag.
         p.verletCloth = true;
-        p.pbdIterations = 80;             // relaxation steps
+        p.pbdIterations = 50;             // relaxation steps
         p.constraintIterations = 5;       // constraint passes per step
-        p.gravity = 0.30f;                // per-step downward nudge (no momentum)
-        p.clothMaxDrop = 12.0f;           // visible hang, but no melted over-sag
-        p.stretchStiffness = 0.45f;       // enough structure to keep the hem crisp
+        p.gravity = 0.12f;                // gentle settle (envelope does the shape)
+        p.clothMaxDrop = 6.0f;            // small clean drop, no melt
+        p.stretchStiffness = 0.60f;       // stiffer → keeps structure, less melt
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
         p.bodyClearance = 0.85f;          // sit the cloth off the body (hides clipping)
         p.bendingStiffness = 0.08f;       // light: smooths folds without melting
@@ -1983,10 +1986,13 @@ static void ApplyClothDrapeEnvelopePass(
     int radialBins,
     float returnRatePerUnitZ,
     float strength,
-    StaticSolveStats& stats)
+    StaticSolveStats& stats,
+    bool ignoreInfluence = false)
 {
     size_t n = finalVerts.size();
-    if (n == 0 || radialBins <= 0 || returnRatePerUnitZ <= 0.0f || strength <= 0.0f)
+    // returnRate == 0 is valid: pure monotonic envelope (radius never decreases
+    // going down) — the hardcoded "loose" rule. Only negative is invalid.
+    if (n == 0 || radialBins <= 0 || returnRatePerUnitZ < 0.0f || strength <= 0.0f)
         return;
 
     struct ClothPt { uint16_t idx; float z, r, dirX, dirY; };
@@ -1995,7 +2001,12 @@ static void ApplyClothDrapeEnvelopePass(
 
     for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
         float eff = (i < effectiveInfluence.size()) ? effectiveInfluence[i] : 1.0f;
-        if (drapeEl[i] < 0.15f || eff < 0.05f) continue;
+        // ignoreInfluence: enforce the monotonic radial rule on EVERY drape vert,
+        // not just ones the active slider changed. Slider-source influence must not
+        // gate the loose-cloth envelope, or the rule fails exactly in the recessed
+        // areas (under-belly, groin) where the body changed little.
+        if (drapeEl[i] < 0.15f) continue;
+        if (!ignoreInfluence && eff < 0.05f) continue;
 
         float dirX = 0.0f, dirY = 0.0f, r = 0.0f;
         if (!RadialDir(finalVerts[i], dirX, dirY, r)) continue;
@@ -2021,7 +2032,7 @@ static void ApplyClothDrapeEnvelopePass(
 
             // Push vert outward if below envelope floor
             if (p.r < curFloor - 0.01f) {
-                float eff    = (p.idx < effectiveInfluence.size())
+                float eff    = (!ignoreInfluence && p.idx < effectiveInfluence.size())
                                ? effectiveInfluence[p.idx] : 1.0f;
                 float newR   = p.r + (curFloor - p.r) * strength * eff;
                 finalVerts[p.idx].x = g_refCenterX + p.dirX * newR;
@@ -3058,12 +3069,17 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // monotonic outward envelope per angular sector (radius never decreases going
     // down). Run LAST and several times so neither smoothing nor collision can pull
     // the vertical drops back into the body's concavities.
-    if (params.verletCloth && params.drapeReturnRate > 0.0f) {
-        for (int ep = 0; ep < 6; ++ep)
+    if (params.verletCloth) {
+        // returnRate = 0 → strict monotonic: once the cloth is out at a protrusion
+        // it never moves back toward the center; it hangs vertical until a wider
+        // protrusion (or collision) pushes it out again. ignoreInfluence so the
+        // rule holds on every drape vert. Several passes to converge per bin.
+        for (int ep = 0; ep < 8; ++ep)
             ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
                                         params.drapeEnvelopeBins,
-                                        params.drapeReturnRate,
-                                        params.drapeEnvelopeStrength, stats);
+                                        0.0f,
+                                        params.drapeEnvelopeStrength, stats,
+                                        /*ignoreInfluence=*/true);
     }
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
