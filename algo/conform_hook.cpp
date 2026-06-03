@@ -2632,6 +2632,45 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             m[i] = pinned ? 0.0f : Clamp01(invMass[i]);
         }
 
+        // ── Seam welding ───────────────────────────────────────────────────
+        // Game meshes split vertices at UV/material seams: two (or more) verts
+        // share a 3D position but have different indices and NO edge between them.
+        // Vanilla conform moves them identically; our physics moves each one based
+        // on its own edge fan, so they drift apart → visible slits with the body
+        // poking through, and detached hem-trim flapping. Group verts that are
+        // coincident in the base mesh and force them to move as one each pass.
+        std::unordered_map<uint64_t, std::vector<uint32_t>> coincidence;
+        coincidence.reserve(n);
+        auto quantKey = [](const Vec3& p) -> uint64_t {
+            auto q = [](float v) -> uint64_t {
+                return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+            };
+            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+        };
+        for (size_t i = 0; i < n; ++i)
+            coincidence[quantKey(baseVerts[i])].push_back((uint32_t)i);
+        std::vector<std::vector<uint32_t>> weldGroups;
+        for (auto& kv : coincidence)
+            if (kv.second.size() > 1) weldGroups.push_back(std::move(kv.second));
+
+        auto weldSeams = [&]() {
+            for (auto& g : weldGroups) {
+                // If any member is pinned, the whole seam stays at the conformed
+                // fit; otherwise move all members to their average position.
+                int pinned = -1;
+                for (uint32_t vi : g) if (m[vi] <= 0.0f) { pinned = (int)vi; break; }
+                if (pinned >= 0) {
+                    Vec3 p = supportVerts[pinned];
+                    for (uint32_t vi : g) finalVerts[vi] = p;
+                } else {
+                    Vec3 avg{0.0f, 0.0f, 0.0f};
+                    for (uint32_t vi : g) avg = Add(avg, finalVerts[vi]);
+                    avg = Scale(avg, 1.0f / (float)g.size());
+                    for (uint32_t vi : g) finalVerts[vi] = avg;
+                }
+            }
+        };
+
         const int   substeps  = std::max(1, params.pbdIterations);
         const int   cIters    = std::max(1, params.constraintIterations);
         const float gStep     = params.gravity;            // per-step downward nudge
@@ -2703,6 +2742,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 // Re-pin pinned verts to the conformed fit.
                 for (size_t i = 0; i < n; ++i)
                     if (m[i] <= 0.0f) finalVerts[i] = supportVerts[i];
+
+                // Weld seams so coincident (duplicate) verts never split.
+                weldSeams();
             }
 
             // 3) Hard stretch cap: no edge may exceed rest*kMaxStretch. This is the
@@ -2735,6 +2777,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     if (finalVerts[i].z < floorZ) finalVerts[i].z = floorZ;
                 }
             }
+
+            // Final weld after the hard caps so seams end the step closed.
+            weldSeams();
         }
     }
 
@@ -2960,6 +3005,38 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
         HLog("detour: DIAG_WRITE_TEST shape='%s' slider='%s' dropped=%d verts by %.1f",
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
+    }
+
+    // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
+    // drape envelope, layer order) move coincident verts independently and can
+    // re-open seams the solver welded. Close them once more before writing.
+    if (params.verletCloth) {
+        std::unordered_map<uint64_t, std::vector<uint32_t>> coin;
+        coin.reserve(n);
+        auto qk = [](const Vec3& p) -> uint64_t {
+            auto q = [](float v) -> uint64_t {
+                return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+            };
+            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+        };
+        for (size_t i = 0; i < n; ++i)
+            coin[qk(baseVerts[i])].push_back((uint32_t)i);
+        for (auto& kv : coin) {
+            auto& g = kv.second;
+            if (g.size() < 2) continue;
+            int pinned = -1;
+            for (uint32_t vi : g)
+                if (invMass[vi] <= 0.0f || drapeEl[vi] < 0.20f) { pinned = (int)vi; break; }
+            if (pinned >= 0) {
+                Vec3 p = supportVerts[pinned];
+                for (uint32_t vi : g) finalVerts[vi] = p;
+            } else {
+                Vec3 a{0.0f, 0.0f, 0.0f};
+                for (uint32_t vi : g) a = Add(a, finalVerts[vi]);
+                a = Scale(a, 1.0f / (float)g.size());
+                for (uint32_t vi : g) finalVerts[vi] = a;
+            }
+        }
     }
 
     // Write only non-zero diffs (matches BodySlide convention).
