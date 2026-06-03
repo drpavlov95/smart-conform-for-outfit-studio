@@ -34,3 +34,11 @@ target_compile_definitions(drape_proxy PRIVATE
 target_link_libraries(drape_proxy PRIVATE
     kernel32 user32 shell32 comctl32 comdlg32
 )
+
+# Copy version.dll to OutfitStudio directory after build
+add_custom_command(TARGET drape_proxy POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:drape_proxy>"
+        "E:/Wabbajack/InstallPacks/mods/BodySlide and Outfit Studio/CalienteTools/BodySlide/version.dll"
+    COMMENT "Deploying version.dll to OutfitStudio..."
+)

@@ -95,3 +95,11 @@ target_compile_definitions(drape_algo PRIVATE
 target_link_libraries(drape_algo PRIVATE
     kernel32 user32 shell32 comctl32 opengl32
 )
+
+# Copy drape-algo.dll to OutfitStudio directory after build
+add_custom_command(TARGET drape_algo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:drape_algo>"
+        "E:/Wabbajack/InstallPacks/mods/BodySlide and Outfit Studio/CalienteTools/BodySlide/drape-algo.dll"
+    COMMENT "Deploying drape-algo.dll to OutfitStudio..."
+)
