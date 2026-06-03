@@ -3,3 +3,4 @@ dist/*.dll
 dist/*.exe
 *.user
 .vs/
+reference/

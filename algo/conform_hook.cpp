@@ -183,6 +183,16 @@ static float g_refMaxZ = 0.0f;
 // host Automorph methods with confirmed RVAs.
 static constexpr bool kEnableDirectDiffRewrite = false;
 
+// ── WRITE-PATH DIAGNOSTIC ──────────────────────────────────────────────
+// When true, ApplyStaticClothPass ignores the physics result and instead writes
+// an UNMISTAKABLE deformation (drape-eligible verts shoved 15 units down). If the
+// outfit visibly drops/stretches in OutfitStudio after Smart Conform, the
+// SetResultDiff write path works and the problem is the algorithm. If nothing
+// moves, the write path is dead and that is the real root cause.
+// MUST be false for normal use.
+static constexpr bool kDiagWritePathTest = false;
+static constexpr float kDiagDropZ = 15.0f;
+
 // ── Compact project resolver (title -> .osp -> NIF) ────────────────────
 
 static std::string ProjFromTitle() {
@@ -1515,6 +1525,12 @@ struct StaticSolveParams {
     // 0 = disabled (stretch only → chain-mail look). ~0.001 = soft cloth.
     float bendingStiffness = 0.0f;
     int   bendingIterations = 1;    // extra bending passes per PBD iteration
+    // Real Verlet cloth solve (physicsDrape only). pbdIterations is reused as the
+    // substep count; constraintIterations as the per-substep constraint passes.
+    // gravity is the per-substep downward pull (Skyrim units). Distance
+    // constraints resist ONLY stretching, so the cloth folds and hangs.
+    bool  verletCloth = false;
+    float clothDamping = 0.06f;     // velocity damping per substep
 };
 
 struct StaticSolveStats {
@@ -1593,18 +1609,22 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.layerStrength = 0.05f;
         p.layerIterations = 1;
         p.constraintIterations = 0;
-        // Sane values. Key invariant: collision MUST be able to beat gravity, or
-        // the cloth sinks into the body. Rest lengths are taken from the conformed
-        // garment (supportVerts), so stretch/bending do NOT fight body growth.
-        p.stretchStiffness = 0.45f;
+        // Real Verlet cloth solve (momentum + asymmetric stretch + collision).
+        // pbdIterations = substeps; constraintIterations = passes/substep;
+        // gravity = per-substep downward pull. These are first-pass values meant
+        // to be tuned against the visual result.
+        p.verletCloth = true;
+        p.pbdIterations = 100;            // substeps
+        p.constraintIterations = 5;       // constraint passes per substep
+        p.gravity = 0.015f;               // per-substep downward pull
+        p.clothDamping = 0.08f;           // velocity damping per substep
+        p.stretchStiffness = 0.65f;       // resist stretching (limits the hang)
+        p.collisionStiffness = 0.85f;     // keep cloth outside the body
+        p.bendingStiffness = 0.08f;       // light smoothing of folds
+        p.bendingIterations = 1;
         p.surfaceSmoothIterations = 2;
-        p.surfaceSmoothStrength = 0.15f;
-        p.pbdIterations = 40;
-        p.gravity = 0.35f;
+        p.surfaceSmoothStrength = 0.12f;
         p.anchorStiffness = 0.50f;
-        p.collisionStiffness = 0.70f;  // > gravity so cloth rests ON the body
-        p.bendingStiffness  = 0.20f;
-        p.bendingIterations = 2;
         break;
     case DRAPE_PRESET_TUBULAR:
         p.clearanceStrength = 0.18f;
@@ -2296,7 +2316,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         follow[i] = f;
 
         supportVerts[i] = Add(baseVerts[i], raw);
-        finalVerts[i]   = params.physicsDrape ? baseVerts[i] : supportVerts[i];
+        // Start from the conformed fit (supportVerts) in all modes. The Verlet
+        // cloth solve then hangs the drape region down from this fitted start —
+        // matching the diagnostic drop that looked correct. Starting from the slim
+        // base mesh forced an unstable re-inflate that fought the body.
+        finalVerts[i]   = supportVerts[i];
 
         float loose    = 1.0f - f;
         float mobility = ClampRange(0.08f + loose * 0.92f, 0.0f, 1.0f);
@@ -2579,7 +2603,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // body BEFORE the PBD loop. This establishes the cloth's initial position
     // on the morphed body surface, after which gravity + stretch + envelope
     // refine the drape. Run at high stiffness for fast convergence.
-    if (params.physicsDrape && bodyShell && bodyShell->valid &&
+    if (params.physicsDrape && !params.verletCloth && bodyShell && bodyShell->valid &&
         params.physicsDrapeInitPushPasses > 0) {
         for (int push = 0; push < params.physicsDrapeInitPushPasses; ++push) {
             for (size_t i = 0; i < n; ++i) {
@@ -2589,6 +2613,97 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // ── Real Verlet/PBD cloth solve ────────────────────────────────────────
+    // Adapted from johnBuffer/ClothSimulation + xrtailor:
+    //  • momentum integration (velocity carried between substeps),
+    //  • gravity as a real downward pull, and
+    //  • distance constraints that resist ONLY stretching (compression is free),
+    //    so the cloth folds and hangs instead of shrink-wrapping the body.
+    // Pinned verts (low drape eligibility / anchored) stay locked to the conformed
+    // fit and hold the garment up at the waist/torso.
+    if (params.verletCloth) {
+        std::vector<float> m(n, 0.0f);   // effective inv-mass; 0 = pinned
+        for (size_t i = 0; i < n; ++i) {
+            bool pinned = (invMass[i] <= 0.0f) || (drapeEl[i] < 0.20f);
+            m[i] = pinned ? 0.0f : Clamp01(invMass[i]);
+        }
+
+        std::vector<Vec3> posOld = finalVerts;          // velocity = pos - posOld
+        const int   substeps  = std::max(1, params.pbdIterations);
+        const int   cIters    = std::max(1, params.constraintIterations);
+        const float gStep     = params.gravity;
+        const float damp      = ClampRange(params.clothDamping, 0.0f, 1.0f);
+        const float stretchK2 = Clamp01(params.stretchStiffness);
+
+        for (int s = 0; s < substeps; ++s) {
+            // 1) Integrate free verts: carry momentum, apply gravity.
+            for (size_t i = 0; i < n; ++i) {
+                if (m[i] <= 0.0f) { posOld[i] = finalVerts[i]; continue; }
+                Vec3 vel = Scale(Sub(finalVerts[i], posOld[i]), 1.0f - damp);
+                posOld[i] = finalVerts[i];
+                finalVerts[i] = Add(finalVerts[i], vel);
+                finalVerts[i].z -= gStep * drapeEl[i];
+                ++stats.gravityAdjusted;
+            }
+
+            // 2) Constraint solve.
+            for (int it = 0; it < cIters; ++it) {
+                // 2a) Stretch — resist ONLY stretching; compression folds freely.
+                for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                    const auto& e = useEdges[ei];
+                    if (e.a >= n || e.b >= n) continue;
+                    float w1 = m[e.a], w2 = m[e.b];
+                    float wSum = w1 + w2;
+                    if (wSum <= kLenEps) continue;
+                    Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                    float len = Len(dir);
+                    if (len <= kLenEps) continue;
+                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    if (len <= rest) continue;          // slack/compressed → fold freely
+                    Vec3 delta = Scale(dir, ((len - rest) / len) * stretchK2 / wSum);
+                    finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
+                    finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
+                    ++stats.stretchAdjusted;
+                }
+
+                // 2b) Light bending for fold smoothness (conformed rest distance).
+                if (params.bendingStiffness > 0.0f && bendingPtr) {
+                    const auto& bcs = *bendingPtr;
+                    const float bK = Clamp01(params.bendingStiffness);
+                    for (size_t bi = 0; bi < bcs.size(); ++bi) {
+                        const auto& bc = bcs[bi];
+                        if (bc.c >= n || bc.d >= n) continue;
+                        float w1 = m[bc.c], w2 = m[bc.d];
+                        float wSum = w1 + w2;
+                        if (wSum <= kLenEps) continue;
+                        Vec3 dir = Sub(finalVerts[bc.c], finalVerts[bc.d]);
+                        float len = Len(dir);
+                        if (len <= kLenEps) continue;
+                        float bRest = (bi < supportBendRestLen.size()) ? supportBendRestLen[bi] : bc.restLength;
+                        Vec3 delta = Scale(dir, ((len - bRest) / len) * bK / wSum);
+                        finalVerts[bc.c] = Sub(finalVerts[bc.c], Scale(delta, w1));
+                        finalVerts[bc.d] = Add(finalVerts[bc.d], Scale(delta, w2));
+                        ++stats.bendingAdjusted;
+                    }
+                }
+
+                // 2c) Body collision — push free verts outside the body shell.
+                if (bodyShell && bodyShell->valid) {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (m[i] <= 0.0f) continue;
+                        if (collideVertex(i, params.collisionStiffness)) ++stats.bodyAdjusted;
+                        ++stats.bodySamples;
+                    }
+                }
+
+                // 2d) Re-pin: keep pinned verts exactly at the conformed fit.
+                for (size_t i = 0; i < n; ++i)
+                    if (m[i] <= 0.0f) finalVerts[i] = supportVerts[i];
+            }
+        }
+    }
+
+    if (!params.verletCloth)
     for (int iter = 0; iter < iterations; ++iter) {
         if (params.gravity > 0.0f) {
             for (size_t i = 0; i < n; ++i) {
@@ -2747,7 +2862,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     }
 
     ApplyLayerOrderPass(finalVerts, baseVerts, useEdges, invMass, params, stats);
-    ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
+    // Skip the symmetric edge-relax in Verlet mode: it would pull edges back to
+    // rest in both directions and flatten the folds/hang the Verlet solve created.
+    if (!params.verletCloth)
+        ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
 
     // Slider-source influence blend (CORRECTION MODE ONLY).
     // In physicsDrape mode, physics determines cloth position — no blend-back.
@@ -2787,6 +2905,26 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 finalVerts[i] = Add(baseVerts[i], Scale(finalDiffV, scale));
             }
         }
+    }
+
+    // ── WRITE-PATH DIAGNOSTIC ──────────────────────────────────────────────
+    // Overrides the physics result with a brutal, obvious deformation so we can
+    // visually confirm whether our SetResultDiff write actually reaches the mesh.
+    if (kDiagWritePathTest) {
+        int moved = 0;
+        for (size_t i = 0; i < n; ++i) {
+            // Shove drape-eligible verts straight down. Keep anchored/upper verts
+            // at vanilla conform so the boundary stretch is obvious.
+            if (drapeEl[i] > 0.25f) {
+                finalVerts[i] = supportVerts[i];
+                finalVerts[i].z -= kDiagDropZ;
+                ++moved;
+            } else {
+                finalVerts[i] = supportVerts[i];
+            }
+        }
+        HLog("detour: DIAG_WRITE_TEST shape='%s' slider='%s' dropped=%d verts by %.1f",
+             shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
     }
 
     // Write only non-zero diffs (matches BodySlide convention).
