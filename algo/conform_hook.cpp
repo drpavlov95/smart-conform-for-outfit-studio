@@ -1626,10 +1626,13 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
         p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
-        // Column drape: low return rate + strong envelope = the skirt hangs as a
-        // straight column from the hips instead of tucking back to the legs.
-        p.drapeReturnRate = 0.02f;
-        p.drapeEnvelopeStrength = 0.90f;
+        // Gravity drape envelope (the soft-cloth rule): going down, the cloth
+        // radius is monotonic — it only moves OUT where the body bulges and never
+        // tucks back in where the body recedes (under-belly, waist, groin); it
+        // hangs vertical there. returnRate≈0 = perpendicular fall.
+        p.drapeReturnRate = 0.005f;
+        p.drapeEnvelopeStrength = 1.0f;
+        p.drapeEnvelopeBins = 96;
         break;
     case DRAPE_PRESET_TUBULAR:
         p.clearanceStrength = 0.18f;
@@ -2939,14 +2942,13 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
     // Cloth drape envelope: prevent cloth from returning to body faster than
     // drapeReturnRate per unit Z after a protrusion (belly, hips, etc.).
-    // Run several passes in Verlet mode to build a clean, straight column.
-    if (params.drapeReturnRate > 0.0f) {
-        int envPasses = params.verletCloth ? 4 : 1;
-        for (int ep = 0; ep < envPasses; ++ep)
-            ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
-                                        params.drapeEnvelopeBins,
-                                        params.drapeReturnRate,
-                                        params.drapeEnvelopeStrength, stats);
+    // In Verlet mode this runs LATER (after smoothing) as the dominant pass, so
+    // the vertical drops survive; here it only runs for the legacy correction path.
+    if (params.drapeReturnRate > 0.0f && !params.verletCloth) {
+        ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
+                                    params.drapeEnvelopeBins,
+                                    params.drapeReturnRate,
+                                    params.drapeEnvelopeStrength, stats);
     }
 
     ApplyLayerOrderPass(finalVerts, baseVerts, useEdges, invMass, params, stats);
@@ -3045,6 +3047,23 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.22f));
             }
         }
+    }
+
+    // ── Gravity drape envelope (verletCloth, DOMINANT, LAST) ───────────────
+    // The soft-cloth rule the user specified: going DOWN the body, the cloth only
+    // moves OUTWARD where the body bulges (breast, belly, butt). Where the body
+    // recedes (under-breast, waist, under-belly, groin) the cloth does NOT tuck
+    // back in with it — it hangs straight down (vertical / perpendicular) from the
+    // last protrusion until a wider body part pushes it out again. That is a
+    // monotonic outward envelope per angular sector (radius never decreases going
+    // down). Run LAST and several times so neither smoothing nor collision can pull
+    // the vertical drops back into the body's concavities.
+    if (params.verletCloth && params.drapeReturnRate > 0.0f) {
+        for (int ep = 0; ep < 6; ++ep)
+            ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
+                                        params.drapeEnvelopeBins,
+                                        params.drapeReturnRate,
+                                        params.drapeEnvelopeStrength, stats);
     }
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
