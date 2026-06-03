@@ -2048,6 +2048,96 @@ static void ApplyClothDrapeEnvelopePass(
     }
 }
 
+// ── Body-shell monotonic drape envelope (the hardcoded LOOSE rule) ──────────
+// Implements the user's rule using the dense, smooth BODY SHELL instead of the
+// sparse cloth verts: going DOWN, the cloth radius per angular sector can never
+// fall below the maximum body radius seen from the top of the drape region down
+// to that height (+ clearance). So the cloth bulges out at protrusions (breast,
+// belly, butt) and hangs straight down (vertical) across the recessed parts
+// (under-belly, waist, groin) — it never tucks back toward the center. Because
+// the body shell is dense (48×96) and smooth, this is smooth and acts on EVERY
+// drape vert regardless of how few cloth verts fall in a bin (the flaw that made
+// the cloth-vert envelope weak and jagged).
+static void ApplyBodyEnvelopeDrapePass(
+    std::vector<Vec3>& finalVerts,
+    const std::vector<float>& drapeEl,
+    const BodyShell& shell,
+    float clearance,
+    float strength,
+    StaticSolveStats& stats)
+{
+    if (!shell.valid || shell.morphR.empty()) return;
+    const size_t n = finalVerts.size();
+    const int RB = shell.radialBins;
+    const int ZB = shell.zBins;
+    if (RB <= 0 || ZB <= 0) return;
+
+    auto zBinOf = [&](float z) {
+        int zb = static_cast<int>((z - shell.minZ) * shell.invDz);
+        return std::max(0, std::min(ZB - 1, zb));
+    };
+
+    // Top of the drape region: the highest Z among drape verts. The monotonic
+    // running max starts here so the skirt envelope is seeded by the waist/belt
+    // width, not the bust above it.
+    int drapeTopZb = 0;
+    bool any = false;
+    for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
+        if (drapeEl[i] < 0.20f) continue;
+        drapeTopZb = std::max(drapeTopZb, zBinOf(finalVerts[i].z));
+        any = true;
+    }
+    if (!any) return;
+
+    // Per angular bin: running max of body radius from drapeTopZb downward.
+    std::vector<float> envR((size_t)RB * ZB, -1.0f);
+    for (int rb = 0; rb < RB; ++rb) {
+        float runMax = -1.0f;
+        for (int zb = drapeTopZb; zb >= 0; --zb) {
+            float r = shell.morphR[(size_t)zb * RB + rb];
+            if (r > runMax) runMax = r;
+            envR[(size_t)zb * RB + rb] = runMax;
+        }
+    }
+
+    // Light angular smoothing (wrap-around) to avoid per-bin facets.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<float> tmp = envR;
+        for (int zb = 0; zb <= drapeTopZb; ++zb) {
+            for (int rb = 0; rb < RB; ++rb) {
+                int rbm = (rb - 1 + RB) % RB, rbp = (rb + 1) % RB;
+                float a = envR[(size_t)zb * RB + rbm];
+                float b = envR[(size_t)zb * RB + rb];
+                float c = envR[(size_t)zb * RB + rbp];
+                float sum = 0.0f; int cnt = 0;
+                if (a >= 0.0f) { sum += a; ++cnt; }
+                if (b >= 0.0f) { sum += b; ++cnt; }
+                if (c >= 0.0f) { sum += c; ++cnt; }
+                if (cnt > 0) tmp[(size_t)zb * RB + rb] = sum / (float)cnt;
+            }
+        }
+        envR = std::move(tmp);
+    }
+
+    // Project each drape vert outward to its envelope radius + clearance.
+    for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
+        if (drapeEl[i] < 0.20f) continue;
+        float dirX = 0.0f, dirY = 0.0f, r = 0.0f;
+        if (!RadialDir(finalVerts[i], dirX, dirY, r)) continue;
+        int rb = RadialBin(dirX, dirY, RB);
+        int zb = zBinOf(finalVerts[i].z);
+        float target = envR[(size_t)zb * RB + rb];
+        if (target < 0.0f) continue;
+        target += clearance;
+        if (r < target - 0.01f) {
+            float newR = r + (target - r) * strength;
+            finalVerts[i].x = g_refCenterX + dirX * newR;
+            finalVerts[i].y = g_refCenterY + dirY * newR;
+            ++stats.envelopeAdjusted;
+        }
+    }
+}
+
 struct BodyColumnPoint {
     uint16_t idx = 0;
     float z = 0.0f;
@@ -3038,48 +3128,35 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.collisionAdjusted;
     }
 
-    // Smoothing sweep LAST (verletCloth): the radial body shell (48 bins) leaves
-    // faceting that reads as jagged. A few Laplacian passes over the drape verts
-    // even out the surface. Runs AFTER collision so it removes the collision
-    // facets; the 0.70 body clearance absorbs the slight inward pull without
-    // letting the cloth clip back into the body.
-    if (params.verletCloth && !useEdges.empty()) {
-        for (int it = 0; it < 3; ++it) {
-            std::vector<Vec3> sum(n, Vec3{});
-            std::vector<int> cnt(n, 0);
-            for (const auto& e : useEdges) {
-                if (e.a >= n || e.b >= n) continue;
-                sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
-                sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+    // ── Finishing: interleave SMOOTH + monotonic ENVELOPE (verletCloth) ────
+    // The hardcoded LOOSE rule (ApplyBodyEnvelopeDrapePass) enforces the radial
+    // envelope; Laplacian smoothing evens out the low-poly facets. Done alone,
+    // smoothing-then-envelope leaves jaggies (envelope moves some verts, not
+    // others, with no smooth after) and envelope-then-smoothing undoes the rule.
+    // Interleaving converges to a surface that is BOTH smooth AND obeys the rule,
+    // because the envelope only ever pushes outward (re-imposing the rule each
+    // round) and the smooth removes the facets the projection leaves.
+    if (params.verletCloth && bodyShell && bodyShell->valid) {
+        for (int it = 0; it < 5; ++it) {
+            // Laplacian smooth over drape verts.
+            if (!useEdges.empty()) {
+                std::vector<Vec3> sum(n, Vec3{});
+                std::vector<int> cnt(n, 0);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                    sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
+                    Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.35f));
+                }
             }
-            for (size_t i = 0; i < n; ++i) {
-                if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
-                Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
-                finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.22f));
-            }
+            // Re-impose the monotonic radial rule (pushes outward only).
+            ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
+                                       params.bodyClearance, 1.0f, stats);
         }
-    }
-
-    // ── Gravity drape envelope (verletCloth, DOMINANT, LAST) ───────────────
-    // The soft-cloth rule the user specified: going DOWN the body, the cloth only
-    // moves OUTWARD where the body bulges (breast, belly, butt). Where the body
-    // recedes (under-breast, waist, under-belly, groin) the cloth does NOT tuck
-    // back in with it — it hangs straight down (vertical / perpendicular) from the
-    // last protrusion until a wider body part pushes it out again. That is a
-    // monotonic outward envelope per angular sector (radius never decreases going
-    // down). Run LAST and several times so neither smoothing nor collision can pull
-    // the vertical drops back into the body's concavities.
-    if (params.verletCloth) {
-        // returnRate = 0 → strict monotonic: once the cloth is out at a protrusion
-        // it never moves back toward the center; it hangs vertical until a wider
-        // protrusion (or collision) pushes it out again. ignoreInfluence so the
-        // rule holds on every drape vert. Several passes to converge per bin.
-        for (int ep = 0; ep < 8; ++ep)
-            ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
-                                        params.drapeEnvelopeBins,
-                                        0.0f,
-                                        params.drapeEnvelopeStrength, stats,
-                                        /*ignoreInfluence=*/true);
     }
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
