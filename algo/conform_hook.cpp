@@ -1617,18 +1617,19 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.pbdIterations = 60;             // relaxation steps
         p.constraintIterations = 6;       // constraint passes per step
         p.gravity = 0.25f;                // per-step downward nudge (no momentum)
-        p.clothMaxDrop = 11.0f;           // hem sags at most ~11 units below conform
+        p.clothMaxDrop = 14.0f;           // longer hang (sag up to ~14 below conform)
         p.stretchStiffness = 0.60f;       // resist stretching (shapes the hang)
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
         p.bodyClearance = 0.70f;          // sit the cloth off the body (hides clipping)
         p.bendingStiffness = 0.10f;       // light smoothing of folds
         p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 4;
-        p.surfaceSmoothStrength = 0.15f;
+        p.surfaceSmoothIterations = 6;    // smoother skirt surface
+        p.surfaceSmoothStrength = 0.18f;
         p.anchorStiffness = 0.50f;
-        // Column drape: keep the skirt from tucking back to the legs below the hips.
-        p.drapeReturnRate = 0.04f;
-        p.drapeEnvelopeStrength = 0.75f;
+        // Column drape: low return rate + strong envelope = the skirt hangs as a
+        // straight column from the hips instead of tucking back to the legs.
+        p.drapeReturnRate = 0.02f;
+        p.drapeEnvelopeStrength = 0.90f;
         break;
     case DRAPE_PRESET_TUBULAR:
         p.clearanceStrength = 0.18f;
@@ -2935,11 +2936,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
     // Cloth drape envelope: prevent cloth from returning to body faster than
     // drapeReturnRate per unit Z after a protrusion (belly, hips, etc.).
+    // Run several passes in Verlet mode to build a clean, straight column.
     if (params.drapeReturnRate > 0.0f) {
-        ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
-                                    params.drapeEnvelopeBins,
-                                    params.drapeReturnRate,
-                                    params.drapeEnvelopeStrength, stats);
+        int envPasses = params.verletCloth ? 4 : 1;
+        for (int ep = 0; ep < envPasses; ++ep)
+            ApplyClothDrapeEnvelopePass(finalVerts, drapeEl, effectiveInfluence,
+                                        params.drapeEnvelopeBins,
+                                        params.drapeReturnRate,
+                                        params.drapeEnvelopeStrength, stats);
     }
 
     ApplyLayerOrderPass(finalVerts, baseVerts, useEdges, invMass, params, stats);
@@ -3006,6 +3010,27 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
         HLog("detour: DIAG_WRITE_TEST shape='%s' slider='%s' dropped=%d verts by %.1f",
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
+    }
+
+    // Smoothing sweep (verletCloth): the radial body shell (48 bins) and the
+    // envelope leave faceting on the skirt. A few Laplacian passes over the drape
+    // verts even out the surface for a smoother hang. Done BEFORE the final
+    // collision so any vert nudged inward gets pushed back out.
+    if (params.verletCloth && !useEdges.empty()) {
+        for (int it = 0; it < 4; ++it) {
+            std::vector<Vec3> sum(n, Vec3{});
+            std::vector<int> cnt(n, 0);
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+            }
+            for (size_t i = 0; i < n; ++i) {
+                if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
+                Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
+            }
+        }
     }
 
     // Final body-collision sweep (verletCloth): the post-PBD passes can leave
