@@ -36,9 +36,20 @@ set(BS_SRCS
     "${MPP_DIR}/stubs/Log_stub.cpp"
 )
 
+set(MINHOOK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/minhook")
+set(MINHOOK_SRCS
+    "${MINHOOK_DIR}/src/buffer.c"
+    "${MINHOOK_DIR}/src/hook.c"
+    "${MINHOOK_DIR}/src/trampoline.c"
+    "${MINHOOK_DIR}/src/hde/hde32.c"
+    "${MINHOOK_DIR}/src/hde/hde64.c"
+)
+
 add_library(drape_algo SHARED
     algo.cpp
+    conform_hook.cpp
     ../cli/DrapeConformer.cpp
+    ${MINHOOK_SRCS}
     ${NIFLY_SRCS}
     ${BS_SRCS}
 )
@@ -63,6 +74,7 @@ target_include_directories(drape_algo PRIVATE
     "${BS_ROOT}/lib/gli/glm"
     "${CMAKE_CURRENT_SOURCE_DIR}/../cli"
     "${CMAKE_CURRENT_SOURCE_DIR}/../proxy"
+    "${MINHOOK_DIR}/include"
 )
 
 target_compile_definitions(drape_algo PRIVATE

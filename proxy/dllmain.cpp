@@ -163,6 +163,27 @@ static DWORD WINAPI InjectThread(LPVOID) {
         SetWindowLongPtrA(hw, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DrapeWndProc)));
     DbgLog("InjectThread: subclassed WndProc, oldProc=0x%p", (void*)g_oldProc);
 
+    // Install the in-memory "Smart Conform" hook: load the heavy DLL (its nifly
+    // static initializers run now, after OutfitStudio is up, so no startup crash)
+    // and let it hook Automorph::GenerateResultDiff.
+    {
+        std::string algoPath = ExeDir() + "drape-algo.dll";
+        HMODULE hAlgo = LoadLibraryA(algoPath.c_str());
+        if (hAlgo) {
+            typedef int (*PfnInstall)(void*, const char*, float, float);
+            auto pInstall = reinterpret_cast<PfnInstall>(
+                GetProcAddress(hAlgo, "DrapeInstallConformHook"));
+            if (pInstall) {
+                int rc = pInstall(hw, ExeDir().c_str(), 2.0f, 20.0f);
+                DbgLog("InjectThread: DrapeInstallConformHook rc=%d", rc);
+            } else {
+                DbgLog("InjectThread: DrapeInstallConformHook not found");
+            }
+        } else {
+            DbgLog("InjectThread: failed to load drape-algo.dll for hook");
+        }
+    }
+
     // Retry injection up to 20 times (menu bar may not be ready immediately)
     for (int attempt = 0; attempt < 20; ++attempt) {
         if (TryInjectMenu(hw)) {
