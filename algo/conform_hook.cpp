@@ -2865,6 +2865,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     //   SLEEVE — arm dominant                         → very small
     //   ACCESSORY — small island, unclear weights     → small (rigid trim)
     std::vector<float> vertClearance(n, params.bodyClearance);
+    // Island classification surfaced to the rigid-island pass: per-vert island id
+    // and a per-island "is a rigid plate/accessory" flag (geometry-detected, so it
+    // fires even inside a Loose Draped mesh that has a merged medallion/buckle).
+    std::vector<int>     islandIdOut;
+    std::vector<uint8_t> islandRigidOut;
     if (params.verletCloth) {
         // Build adjacency from useEdges.
         std::vector<std::vector<uint32_t>> adj2(n);
@@ -2920,39 +2925,89 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             }
         }
 
+        // ── Geometric descriptors per island (validated in the Python prototype:
+        //    bbox flatness + extents discriminate plates/chains from drape far
+        //    better than SDF/raycast, which collapse on thin shell garments). ──
+        std::vector<Vec3> islMin((size_t)numIslands, Vec3{ 1e30f, 1e30f, 1e30f});
+        std::vector<Vec3> islMax((size_t)numIslands, Vec3{-1e30f,-1e30f,-1e30f});
+        std::vector<int>  islandSize(numIslands, 0);
+        for (size_t i = 0; i < n; ++i) {
+            int id = islandId[i];
+            if (id < 0 || id >= numIslands) continue;
+            islMin[(size_t)id] = VMin(islMin[(size_t)id], baseVerts[i]);
+            islMax[(size_t)id] = VMax(islMax[(size_t)id], baseVerts[i]);
+            ++islandSize[(size_t)id];
+        }
+        // Mesh diagonal to normalize extents (scale-independent thresholds).
+        float meshDiag = 1.0f;
+        {
+            Vec3 gmin{ 1e30f, 1e30f, 1e30f}, gmax{-1e30f,-1e30f,-1e30f};
+            for (size_t i = 0; i < n; ++i) { gmin = VMin(gmin, baseVerts[i]); gmax = VMax(gmax, baseVerts[i]); }
+            meshDiag = std::max(1e-3f, Len(Sub(gmax, gmin)));
+        }
+
         // Classify each island and assign clearance.
         const float kSkirtClear     = params.bodyClearance;  // full drape gap
         const float kBeltClear      = 0.12f;                 // fitted, stays close
         const float kAccessoryClear = 0.08f;                 // rigid trim, near-zero
 
         std::vector<float> islandClear((size_t)numIslands, kSkirtClear);
-        const int kSmallIsland = 30;   // islands with fewer verts → accessory
-        std::vector<int> islandSize(numIslands, 0);
-        for (int id : islandId) if (id >= 0) ++islandSize[(size_t)id];
+        // islandRigid[id]: this island is a rigid plate/accessory → translate only,
+        // no drape, used later by the rigid-island pass even under Loose Draped.
+        std::vector<uint8_t> islandRigid((size_t)numIslands, 0);
+        const int kSmallIsland = 120;  // verts; below this + flat → accessory
 
         for (int id = 0; id < numIslands; ++id) {
             const auto& ip = iprof[(size_t)id];
-            float skirtnss = ip.pelvis * ip.leg;
-            float beltnss  = ip.pelvis * ip.torso * (1.0f - ip.leg);
+            Vec3 ext = Scale(Sub(islMax[(size_t)id], islMin[(size_t)id]), 1.0f / meshDiag);
+            float e[3] = { std::fabs(ext.x), std::fabs(ext.y), std::fabs(ext.z) };
+            std::sort(e, e + 3);                       // e[0]<=e[1]<=e[2]
+            float maxExt   = e[2];
+            float flatness = e[0] / std::max(e[2], 1e-6f);  // min/max axis ratio
+            float zspan    = std::fabs(ext.z);
+
+            float skirtnss  = ip.pelvis * ip.leg;
+            float beltnss   = ip.pelvis * ip.torso * (1.0f - ip.leg);
             float sleevenss = ip.arm;
-            float total = skirtnss + beltnss + sleevenss;
 
-            // Small island with unclear weights → treat as rigid accessory.
-            if (islandSize[(size_t)id] < kSmallIsland || total < 0.02f) {
+            // 1) Flat plate / trim / small accessory → RIGID (translate, keep shape).
+            //    Geometry alone is decisive here (medallion, buckle, belt plate,
+            //    chain link). flatness<0.20 = strongly anisotropic (a thin slab).
+            if ((islandSize[(size_t)id] < kSmallIsland && flatness < 0.30f) ||
+                (flatness < 0.18f && maxExt < 0.45f) ||
+                maxExt < 0.10f) {
+                islandClear[(size_t)id] = kAccessoryClear;
+                islandRigid[(size_t)id] = 1;
+                continue;
+            }
+
+            // 2) Sleeve / arm-dominant tube → fitted, not drape.
+            if (sleevenss > skirtnss && sleevenss > beltnss && sleevenss > 0.15f) {
                 islandClear[(size_t)id] = kAccessoryClear;
                 continue;
             }
 
-            // Sleeve/arm → very fitted.
-            if (sleevenss > skirtnss && sleevenss > beltnss) {
-                islandClear[(size_t)id] = kAccessoryClear;
-                continue;
+            // 3) Tall + voluminous + pelvis/leg → skirt drape (full clearance).
+            // 4) Waist band (pelvis+torso, low leg) → belt (small clearance).
+            float total = skirtnss + beltnss;
+            if (total < 0.02f) {
+                // No clear bone signal: fall back to geometry. Tall & not flat → drape.
+                islandClear[(size_t)id] =
+                    (zspan > 0.30f && flatness > 0.22f) ? kSkirtClear : kBeltClear;
+            } else {
+                float skirtFrac = skirtnss / (total + 1.0e-4f);
+                islandClear[(size_t)id] = kBeltClear + skirtFrac * (kSkirtClear - kBeltClear);
             }
-
-            // Belt vs skirt: blend by skirt fraction.
-            float skirtFrac = skirtnss / (skirtnss + beltnss + 1.0e-4f);
-            islandClear[(size_t)id] = kBeltClear + skirtFrac * (kSkirtClear - kBeltClear);
         }
+
+        // Surface island classification to the rigid-island pass below.
+        islandRigidOut.assign(islandRigid.begin(), islandRigid.end());
+        islandIdOut.assign(islandId.begin(), islandId.end());
+
+        int rigidIslands = 0;
+        for (uint8_t r : islandRigid) if (r) ++rigidIslands;
+        HLog("detour: islands shape='%s' total=%d rigid=%d (geometry: flatness+size+extents)",
+             shapeName.c_str(), numIslands, rigidIslands);
 
         // Apply island clearance per vert; anchored verts floor at 0.10.
         for (size_t i = 0; i < n; ++i) {
@@ -3718,55 +3773,77 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Rigid-island pass (Rigid Accessory / Rigid Armor) ────────────────────
+    // ── Rigid-island pass ────────────────────────────────────────────────────
     // A medallion, buckle or plate should TRANSLATE with the morphing body but
     // keep its own shape — vanilla conform deforms it vertex-by-vertex (the
-    // medallion bulges with the breast under it). Detect connected components and
-    // replace each island's per-vertex motion with a single rigid translation:
-    // the average (supportVert - baseVert) over the island. Shape is preserved
-    // exactly; the piece just rides the body.
+    // medallion bulges with the breast under it). Replace each rigid island's
+    // per-vertex motion with a single rigid translation: the average
+    // (supportVert - baseVert) over the island. Shape is preserved exactly.
+    //
+    // Two triggers:
+    //   (a) Whole-mesh Rigid preset → every island is rigid.
+    //   (b) Loose/Fitted mesh with geometry-detected rigid islands (islandRigidOut)
+    //       → only those islands (the merged medallion/buckle) are rigidified; the
+    //       skirt/sleeves keep their cloth solve. This is the "merged accessory"
+    //       case the prototype validated.
     int normPreset = NormalizePreset(preset);
-    if (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
-        normPreset == DRAPE_PRESET_RIGID_ARMOR) {
-        std::vector<std::vector<uint32_t>> adjR(n);
-        for (const auto& e : useEdges) {
-            if (e.a < n && e.b < n) {
-                adjR[e.a].push_back(e.b);
-                adjR[e.b].push_back(e.a);
+    bool wholeMeshRigid = (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
+                           normPreset == DRAPE_PRESET_RIGID_ARMOR);
+    bool haveMergedRigid = false;
+    for (uint8_t r : islandRigidOut) if (r) { haveMergedRigid = true; break; }
+
+    if (wholeMeshRigid || haveMergedRigid) {
+        // Reuse the island labels from the clearance pass when available; otherwise
+        // (whole-mesh rigid path, which skipped that pass) build them here.
+        std::vector<int> island;
+        int nIsl = 0;
+        if (!islandIdOut.empty() && islandIdOut.size() == n) {
+            island = islandIdOut;
+            for (int id : island) nIsl = std::max(nIsl, id + 1);
+        } else {
+            island.assign(n, -1);
+            std::vector<std::vector<uint32_t>> adjR(n);
+            for (const auto& e : useEdges)
+                if (e.a < n && e.b < n) { adjR[e.a].push_back(e.b); adjR[e.b].push_back(e.a); }
+            for (size_t s = 0; s < n; ++s) {
+                if (island[s] >= 0) continue;
+                std::vector<uint32_t> q{(uint32_t)s};
+                island[s] = nIsl;
+                for (size_t qi = 0; qi < q.size(); ++qi)
+                    for (uint32_t nb : adjR[q[qi]])
+                        if (island[nb] < 0) { island[nb] = nIsl; q.push_back(nb); }
+                ++nIsl;
             }
         }
-        std::vector<int> island(n, -1);
-        int nIsl = 0;
-        for (size_t s = 0; s < n; ++s) {
-            if (island[s] >= 0) continue;
-            std::vector<uint32_t> q{(uint32_t)s};
-            island[s] = nIsl;
-            for (size_t qi = 0; qi < q.size(); ++qi)
-                for (uint32_t nb : adjR[q[qi]])
-                    if (island[nb] < 0) { island[nb] = nIsl; q.push_back(nb); }
-            ++nIsl;
-        }
-        // Average conform translation per island (over verts the slider touched).
+
+        auto islandIsRigid = [&](int id) -> bool {
+            if (wholeMeshRigid) return true;
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+
         std::vector<Vec3> islandShift((size_t)nIsl, Vec3{0,0,0});
         std::vector<int>  islandCount((size_t)nIsl, 0);
         for (size_t i = 0; i < n; ++i) {
-            // Only verts that vanilla actually moved contribute to the rigid shift.
-            Vec3 raw = DiffAt(rawDiff, (uint16_t)i);
-            if (Len2(raw) < 1.0e-8f) continue;
             int id = island[i];
+            if (id < 0 || !islandIsRigid(id)) continue;
+            Vec3 raw = DiffAt(rawDiff, (uint16_t)i);
+            if (Len2(raw) < 1.0e-8f) continue;   // only conform-touched verts
             islandShift[(size_t)id] = Add(islandShift[(size_t)id], Sub(supportVerts[i], baseVerts[i]));
             ++islandCount[(size_t)id];
         }
         for (int id = 0; id < nIsl; ++id)
             if (islandCount[(size_t)id] > 0)
                 islandShift[(size_t)id] = Scale(islandShift[(size_t)id], 1.0f / (float)islandCount[(size_t)id]);
-        // Apply the rigid shift: base position + island translation (shape kept).
+
+        int rigidVerts = 0;
         for (size_t i = 0; i < n; ++i) {
             int id = island[i];
-            if (islandCount[(size_t)id] > 0)
-                finalVerts[i] = Add(baseVerts[i], islandShift[(size_t)id]);
+            if (id >= 0 && islandIsRigid(id) && islandCount[(size_t)id] > 0) {
+                finalVerts[i] = Add(baseVerts[i], islandShift[(size_t)id]);  // shape kept
+                ++rigidVerts;
+            }
         }
-        stats.collisionAdjusted += nIsl;  // reuse a counter to surface island count
+        stats.collisionAdjusted += rigidVerts;
     }
 
     // Write only non-zero diffs (matches BodySlide convention).
