@@ -3022,14 +3022,37 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         HLog("detour: islands shape='%s' total=%d rigid=%d (geometry: flatness+size+extents)",
              shapeName.c_str(), numIslands, rigidIslands);
 
-        // Apply island clearance per vert; anchored verts floor at 0.10.
+        // Per-vertex clearance from BONE WEIGHTS (this is the version that worked
+        // well visually). The island pass above is used ONLY to detect rigid plates
+        // for the rigid-island translate; it must NOT reshape the skirt/belt/sleeve
+        // clearance, which is driven per-vertex here. Rigid islands get a tight
+        // clearance so they sit close while the rigid pass translates them.
         for (size_t i = 0; i < n; ++i) {
             int id = islandId[i];
-            float ic = (id >= 0 && id < numIslands) ? islandClear[(size_t)id] : kSkirtClear;
-            if (drapeEl[i] < 0.20f)
-                vertClearance[i] = std::min(ic, 0.10f);
-            else
-                vertClearance[i] = ic;
+            bool rigid = (id >= 0 && id < numIslands) && islandRigid[(size_t)id];
+            if (rigid) {
+                vertClearance[i] = kAccessoryClear;
+                continue;
+            }
+            if (drapeEl[i] < 0.20f) {
+                vertClearance[i] = 0.10f;   // anchored: just avoid clips
+                continue;
+            }
+            // Drape-eligible: blend skirt (pelvis+leg) vs belt (pelvis+torso,no leg).
+            float legW = 0.0f, torsoW = 0.0f, pelvisW = 0.0f;
+            if (profiles && i < profiles->size()) {
+                const auto& bp = (*profiles)[i];
+                legW = Clamp01(bp.leg); torsoW = Clamp01(bp.torso); pelvisW = Clamp01(bp.pelvis);
+            }
+            float skirtnss = pelvisW * legW;
+            float beltnss  = pelvisW * torsoW * (1.0f - legW);
+            float tot = skirtnss + beltnss;
+            if (tot < 0.01f)
+                vertClearance[i] = params.bodyClearance * drapeEl[i];
+            else {
+                float skirtFrac = skirtnss / tot;
+                vertClearance[i] = kBeltClear + skirtFrac * (params.bodyClearance - kBeltClear);
+            }
         }
     }
 
