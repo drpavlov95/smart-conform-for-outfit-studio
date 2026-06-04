@@ -2850,39 +2850,118 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         if (drapeEl[i] > 0.25f) ++stats.drapeEligibleVerts;
     }
 
-    // ── Per-vertex clearance ──────────────────────────────────────────────
-    // Different regions of a mesh need different clearance from the body:
-    //   • Skirt/hem (pelvis + leg-dominant): full bodyClearance (cloth hangs free)
-    //   • Belt/waist item (pelvis + spine, no leg): small clearance (stays fitted)
-    //   • Rigid appendage / trim on the same mesh: near-zero clearance
-    // Without this, the BVH pushes belt-region verts as far out as skirt verts,
-    // creating the "strange waist" artifact when both are in the same mesh.
+    // ── Per-island clearance (connected-component classification) ───────────
+    // Problem: belt and skirt can be SEPARATE ISLANDS in the same mesh. Per-
+    // vertex bone weights are ambiguous (both can have high pelvis weight), but
+    // the AGGREGATE over an island is unambiguous: the belt island wraps the
+    // waist (pelvis + spine, low leg), the skirt island hangs from the pelvis
+    // to the thighs (pelvis + leg). Detect connected components from edges,
+    // classify each island by its aggregate bone profile, then assign clearance.
+    //
+    // Island classification:
+    //   SKIRT  — pelvis + leg dominant                → full bodyClearance
+    //   BELT   — pelvis + torso, leg low              → small clearance (fitted)
+    //   BODICE — torso dominant                       → very small (anchored)
+    //   SLEEVE — arm dominant                         → very small
+    //   ACCESSORY — small island, unclear weights     → small (rigid trim)
     std::vector<float> vertClearance(n, params.bodyClearance);
-    if (params.verletCloth && profiles) {
-        for (size_t i = 0; i < n; ++i) {
-            if (drapeEl[i] < 0.20f) {
-                vertClearance[i] = 0.10f;  // anchored verts: just enough to avoid clips
+    if (params.verletCloth) {
+        // Build adjacency from useEdges.
+        std::vector<std::vector<uint32_t>> adj2(n);
+        for (const auto& e : useEdges) {
+            if (e.a < n && e.b < n) {
+                adj2[e.a].push_back(e.b);
+                adj2[e.b].push_back(e.a);
+            }
+        }
+
+        // BFS to label each vert with its island id.
+        std::vector<int> islandId(n, -1);
+        int numIslands = 0;
+        for (size_t start = 0; start < n; ++start) {
+            if (islandId[start] >= 0) continue;
+            std::vector<uint32_t> q;
+            q.push_back((uint32_t)start);
+            islandId[start] = numIslands;
+            for (size_t qi = 0; qi < q.size(); ++qi) {
+                for (uint32_t nb : adj2[q[qi]]) {
+                    if (islandId[nb] < 0) {
+                        islandId[nb] = numIslands;
+                        q.push_back(nb);
+                    }
+                }
+            }
+            ++numIslands;
+        }
+
+        // Aggregate bone weight profile per island.
+        struct IslandProfile {
+            float pelvis = 0.0f, leg = 0.0f, torso = 0.0f, arm = 0.0f;
+            int   count  = 0;
+        };
+        std::vector<IslandProfile> iprof((size_t)numIslands);
+        if (profiles) {
+            for (size_t i = 0; i < n; ++i) {
+                int id = islandId[i];
+                if (id < 0 || id >= numIslands) continue;
+                const auto& bp = (*profiles)[i];
+                auto& ip = iprof[(size_t)id];
+                ip.pelvis += Clamp01(bp.pelvis);
+                ip.leg    += Clamp01(bp.leg);
+                ip.torso  += Clamp01(bp.torso);
+                ip.arm    += Clamp01(bp.arm + bp.handFoot);
+                ++ip.count;
+            }
+        }
+        for (auto& ip : iprof) {
+            if (ip.count > 0) {
+                float inv = 1.0f / (float)ip.count;
+                ip.pelvis *= inv; ip.leg *= inv; ip.torso *= inv; ip.arm *= inv;
+            }
+        }
+
+        // Classify each island and assign clearance.
+        const float kSkirtClear     = params.bodyClearance;  // full drape gap
+        const float kBeltClear      = 0.12f;                 // fitted, stays close
+        const float kAccessoryClear = 0.08f;                 // rigid trim, near-zero
+
+        std::vector<float> islandClear((size_t)numIslands, kSkirtClear);
+        const int kSmallIsland = 30;   // islands with fewer verts → accessory
+        std::vector<int> islandSize(numIslands, 0);
+        for (int id : islandId) if (id >= 0) ++islandSize[(size_t)id];
+
+        for (int id = 0; id < numIslands; ++id) {
+            const auto& ip = iprof[(size_t)id];
+            float skirtnss = ip.pelvis * ip.leg;
+            float beltnss  = ip.pelvis * ip.torso * (1.0f - ip.leg);
+            float sleevenss = ip.arm;
+            float total = skirtnss + beltnss + sleevenss;
+
+            // Small island with unclear weights → treat as rigid accessory.
+            if (islandSize[(size_t)id] < kSmallIsland || total < 0.02f) {
+                islandClear[(size_t)id] = kAccessoryClear;
                 continue;
             }
-            const auto& bp = (*profiles)[i];
-            float legW    = Clamp01(bp.leg);
-            float torsoW  = Clamp01(bp.torso);
-            float pelvisW = Clamp01(bp.pelvis);
 
-            // skirtnness: pelvis + leg → loose skirt
-            float skirtnss = pelvisW * legW;
-            // beltnss: pelvis + torso but NOT leg → belt / waist region
-            float beltnss  = pelvisW * torsoW * (1.0f - legW);
-
-            float total = skirtnss + beltnss;
-            if (total < 0.01f) {
-                // No clear signal: use a modest clearance, defer to drapeEl.
-                vertClearance[i] = params.bodyClearance * drapeEl[i];
-            } else {
-                // Blend: skirt = full clearance, belt = small clearance (0.12)
-                float skirtFrac = skirtnss / total;
-                vertClearance[i] = 0.12f + skirtFrac * (params.bodyClearance - 0.12f);
+            // Sleeve/arm → very fitted.
+            if (sleevenss > skirtnss && sleevenss > beltnss) {
+                islandClear[(size_t)id] = kAccessoryClear;
+                continue;
             }
+
+            // Belt vs skirt: blend by skirt fraction.
+            float skirtFrac = skirtnss / (skirtnss + beltnss + 1.0e-4f);
+            islandClear[(size_t)id] = kBeltClear + skirtFrac * (kSkirtClear - kBeltClear);
+        }
+
+        // Apply island clearance per vert; anchored verts floor at 0.10.
+        for (size_t i = 0; i < n; ++i) {
+            int id = islandId[i];
+            float ic = (id >= 0 && id < numIslands) ? islandClear[(size_t)id] : kSkirtClear;
+            if (drapeEl[i] < 0.20f)
+                vertClearance[i] = std::min(ic, 0.10f);
+            else
+                vertClearance[i] = ic;
         }
     }
 
