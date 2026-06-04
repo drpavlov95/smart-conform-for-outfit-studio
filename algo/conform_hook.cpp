@@ -3019,8 +3019,21 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
         int rigidIslands = 0;
         for (uint8_t r : islandRigid) if (r) ++rigidIslands;
-        HLog("detour: islands shape='%s' total=%d rigid=%d (geometry: flatness+size+extents)",
-             shapeName.c_str(), numIslands, rigidIslands);
+        HLog("detour: islands shape='%s' total=%d rigid=%d meshDiag=%.2f",
+             shapeName.c_str(), numIslands, rigidIslands, meshDiag);
+        // Per-island debug (only first 20 islands to keep log short).
+        for (int dbgId = 0; dbgId < std::min(numIslands, 20); ++dbgId) {
+            Vec3 ext = Scale(Sub(islMax[(size_t)dbgId], islMin[(size_t)dbgId]), 1.0f / meshDiag);
+            float e[3] = { std::fabs(ext.x), std::fabs(ext.y), std::fabs(ext.z) };
+            std::sort(e, e + 3);
+            float flatness = e[0] / std::max(e[2], 1e-6f);
+            float maxExt   = e[2];
+            const auto& ip = iprof[(size_t)dbgId];
+            float drapeW = ip.pelvis + ip.leg;
+            HLog("  isl#%d verts=%d flat=%.3f maxExt=%.3f drapeW=%.3f cls=%s",
+                 dbgId, islandSize[(size_t)dbgId], flatness, maxExt, drapeW,
+                 islandRigid[(size_t)dbgId] ? "RIGID" : "drape");
+        }
 
         // Per-vertex clearance from BONE WEIGHTS (this is the version that worked
         // well visually). The island pass above is used ONLY to detect rigid plates
