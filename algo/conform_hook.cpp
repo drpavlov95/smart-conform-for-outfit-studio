@@ -2963,12 +2963,18 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // Fast collision (radial shell) — used inside the Verlet substep loop where
-    // we call it ~50×5×n times. The shell is O(1) and good enough to keep verts
-    // out of the body during relaxation; the BVH pass afterwards corrects to real
-    // geometry. If no shell, this is a no-op (BVH will fix in the finish pass).
-    auto collideVertexFast = [&](size_t i, float stiffness) -> bool {
-        if (stiffness <= 0.0f || !bodyShell || !bodyShell->valid) return false;
+    // Body collision. Primary: 3D BVH (closest point on real morphed surface, push
+    // out along real normal). Falls back to radial shell when no BVH available.
+    auto collideVertex = [&](size_t i, float stiffness) -> bool {
+        if (stiffness <= 0.0f) return false;
+        if (bodyBVH && bodyBVH->valid) {
+            Vec3 target = finalVerts[i];
+            if (!BVHCollideVertex(*bodyBVH, target, params.bodyClearance))
+                return false;
+            finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
+            return true;
+        }
+        if (!bodyShell || !bodyShell->valid) return false;
         float baseBodyR = 0.0f, morphBodyR = 0.0f;
         if (!SampleBodyShell(*bodyShell, baseVerts[i], baseBodyR, morphBodyR))
             return false;
@@ -2981,22 +2987,6 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         float preservedGap = std::min(baseGap * params.bodyGapPreserve, params.bodyGapCap);
         float targetR = morphBodyR + params.bodyClearance + preservedGap;
         return MoveRadiallyOut(finalVerts[i], dirX, dirY, targetR, stiffness);
-    };
-
-    // Precise collision (BVH) — used in the finishing pass only (called ~6×n
-    // times total). Closest point on the real morphed-body surface, push out
-    // along the real normal. Handles belly, hips, sides, bust, and limbs without
-    // a central-axis approximation. Falls back to radial shell if no BVH.
-    auto collideVertex = [&](size_t i, float stiffness) -> bool {
-        if (stiffness <= 0.0f) return false;
-        if (bodyBVH && bodyBVH->valid) {
-            Vec3 target = finalVerts[i];
-            if (!BVHCollideVertex(*bodyBVH, target, params.bodyClearance))
-                return false;
-            finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
-            return true;
-        }
-        return collideVertexFast(i, stiffness);
     };
 
     const int iterations = std::max(1, params.pbdIterations);
@@ -3172,11 +3162,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     }
                 }
 
-                // Body collision (fast radial shell) during relaxation.
-                // The BVH finishing pass corrects to real geometry afterwards.
+                // Body collision (BVH primary). Runs every substep to keep verts
+                // on the real body surface throughout relaxation.
                 for (size_t i = 0; i < n; ++i) {
                     if (m[i] <= 0.0f) continue;
-                    if (collideVertexFast(i, params.collisionStiffness)) ++stats.bodyAdjusted;
+                    if (collideVertex(i, params.collisionStiffness)) ++stats.bodyAdjusted;
                     ++stats.bodySamples;
                 }
 
@@ -3457,7 +3447,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
-        for (int it = 0; it < 4; ++it) {
+        for (int it = 0; it < 6; ++it) {
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3478,11 +3468,48 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.collisionAdjusted;
         }
 
-        // Anti-tuck rule (TODO): after BVH, enforce that dist-to-body never
-        // decreases going down (loose cloth doesn't return inward). Attempted via
-        // cp+nrm*floor but that over-extrapolates normals across height → verts fly.
-        // Need to use vert-to-body direction (not surface normal) for large floors.
-        // Deferred — BVH alone is already a major improvement.
+        // ── Loose anti-tuck rule (BVH-based) ─────────────────────────────────
+        // Going DOWN the garment, dist-to-body can only INCREASE (new contact)
+        // or hold steady (vertical fall), never decrease abruptly (tuck-in).
+        // Per angular bin: running max of dist-to-body; verts below the floor are
+        // pushed back out along the direction (vert→body) inverted — NOT along the
+        // body face normal, which over-extrapolates at large distances.
+        if (params.drapeReturnRate >= 0.0f) {
+            struct DVert { size_t i; float z, dist; Vec3 cp, awayDir; };
+            const int AB = 48;
+            std::vector<DVert> dv2;
+            dv2.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                if (drapeEl[i] < 0.20f) continue;
+                Vec3 cp{0,0,0}; Vec3 nrm{0,0,1}; float d2 = 0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                float dist = std::sqrt(d2);
+                Vec3 toVert = Sub(finalVerts[i], cp);
+                float tl = Len(toVert);
+                // Direction FROM body surface TOWARD vert — stable at any distance,
+                // unlike the face normal which diverges when extrapolated far away.
+                Vec3 awayDir = (tl > 1.0e-5f) ? Scale(toVert, 1.0f / tl) : nrm;
+                dv2.push_back({i, finalVerts[i].z, dist, cp, awayDir});
+            }
+            std::sort(dv2.begin(), dv2.end(),
+                      [](const DVert& a, const DVert& b) { return a.z > b.z; });
+            std::vector<float> floorDist(AB, -1.0f);
+            std::vector<float> lastZ(AB, 1e30f);
+            for (auto& dv : dv2) {
+                float dirX = 0.0f, dirY = 0.0f, r = 0.0f;
+                if (!RadialDir(finalVerts[dv.i], dirX, dirY, r)) continue;
+                int ab = RadialBin(dirX, dirY, AB);
+                float dz = std::max(0.0f, lastZ[ab] - dv.z);
+                float floor = (floorDist[ab] < 0.0f) ? dv.dist
+                              : std::max(0.0f, floorDist[ab] - params.drapeReturnRate * dz);
+                if (dv.dist < floor - 0.01f) {
+                    finalVerts[dv.i] = Add(dv.cp, Scale(dv.awayDir, floor));
+                    ++stats.envelopeAdjusted;
+                }
+                floorDist[ab] = std::max(floor, dv.dist);
+                lastZ[ab] = dv.z;
+            }
+        }
     } else if (params.verletCloth && bodyShell && bodyShell->valid) {
         // Fallback: radial-shell two-sided envelope (no BVH available).
         for (int it = 0; it < 6; ++it) {
