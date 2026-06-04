@@ -2850,6 +2850,42 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         if (drapeEl[i] > 0.25f) ++stats.drapeEligibleVerts;
     }
 
+    // ── Per-vertex clearance ──────────────────────────────────────────────
+    // Different regions of a mesh need different clearance from the body:
+    //   • Skirt/hem (pelvis + leg-dominant): full bodyClearance (cloth hangs free)
+    //   • Belt/waist item (pelvis + spine, no leg): small clearance (stays fitted)
+    //   • Rigid appendage / trim on the same mesh: near-zero clearance
+    // Without this, the BVH pushes belt-region verts as far out as skirt verts,
+    // creating the "strange waist" artifact when both are in the same mesh.
+    std::vector<float> vertClearance(n, params.bodyClearance);
+    if (params.verletCloth && profiles) {
+        for (size_t i = 0; i < n; ++i) {
+            if (drapeEl[i] < 0.20f) {
+                vertClearance[i] = 0.10f;  // anchored verts: just enough to avoid clips
+                continue;
+            }
+            const auto& bp = (*profiles)[i];
+            float legW    = Clamp01(bp.leg);
+            float torsoW  = Clamp01(bp.torso);
+            float pelvisW = Clamp01(bp.pelvis);
+
+            // skirtnness: pelvis + leg → loose skirt
+            float skirtnss = pelvisW * legW;
+            // beltnss: pelvis + torso but NOT leg → belt / waist region
+            float beltnss  = pelvisW * torsoW * (1.0f - legW);
+
+            float total = skirtnss + beltnss;
+            if (total < 0.01f) {
+                // No clear signal: use a modest clearance, defer to drapeEl.
+                vertClearance[i] = params.bodyClearance * drapeEl[i];
+            } else {
+                // Blend: skirt = full clearance, belt = small clearance (0.12)
+                float skirtFrac = skirtnss / total;
+                vertClearance[i] = 0.12f + skirtFrac * (params.bodyClearance - 0.12f);
+            }
+        }
+    }
+
     // Boost anchor for non-drape (upper body / sleeve) verts.
     for (size_t i = 0; i < n; ++i) {
         if (drapeEl[i] < 0.20f) {
@@ -2975,11 +3011,16 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
     // Body collision. Primary: 3D BVH (closest point on real morphed surface, push
     // out along real normal). Falls back to radial shell when no BVH available.
+    // Body collision using per-vertex clearance: skirt verts get full
+    // bodyClearance (cloth hangs free), belt/waist verts get a small clearance
+    // (stays fitted), so both can live in the same mesh without the belt being
+    // pushed out as far as the skirt.
     auto collideVertex = [&](size_t i, float stiffness) -> bool {
         if (stiffness <= 0.0f) return false;
+        float vc = vertClearance[i];
         if (bodyBVH && bodyBVH->valid) {
             Vec3 target = finalVerts[i];
-            if (!BVHCollideVertex(*bodyBVH, target, params.bodyClearance))
+            if (!BVHCollideVertex(*bodyBVH, target, vc))
                 return false;
             finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
             return true;
@@ -2995,7 +3036,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
         float baseGap = std::max(0.0f, RadialRadius(baseVerts[i]) - baseBodyR);
         float preservedGap = std::min(baseGap * params.bodyGapPreserve, params.bodyGapCap);
-        float targetR = morphBodyR + params.bodyClearance + preservedGap;
+        float targetR = morphBodyR + vc + preservedGap;
         return MoveRadiallyOut(finalVerts[i], dirX, dirY, targetR, stiffness);
     };
 
@@ -3589,7 +3630,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
         for (size_t i = 0; i < n; ++i) {
             Vec3 target = finalVerts[i];
-            if (BVHCollideVertex(*bodyBVH, target, 0.15f))
+            // Use per-vert clearance; belt verts use their small clearance,
+            // skirt verts use their full clearance. Floor at 0.10 to catch
+            // any genuine penetration even for fully-anchored verts.
+            float ac = std::max(0.10f, vertClearance[i] * 0.5f);
+            if (BVHCollideVertex(*bodyBVH, target, ac))
                 finalVerts[i] = target;
         }
     }
