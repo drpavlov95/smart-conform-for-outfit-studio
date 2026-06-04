@@ -3229,17 +3229,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     //  2. The loop ENDS with the envelope, so the smooth monotonic surface is the
     //     final radial state, not the faceted collide.
     if (params.verletCloth && bodyShell && bodyShell->valid) {
-        // Prebuild vertex adjacency once for the hanging-chain pass.
-        std::vector<std::vector<uint32_t>> adj(n);
-        for (const auto& e : useEdges) {
-            if (e.a >= n || e.b >= n) continue;
-            adj[e.a].push_back(e.b);
-            adj[e.b].push_back(e.a);
-        }
-
         for (int it = 0; it < 6; ++it) {
             // Laplacian smooth (Z + tangential mostly; radial gets re-set by the
-            // chain right after, so a stronger 0.30 is safe here).
+            // envelope right after, so a stronger 0.30 is safe here).
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3254,13 +3246,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
                 }
             }
-            // Hanging-chain: propagate contact radius DOWN the cloth so the skirt
-            // hangs from the protrusion above it (incl. the belly carried by the
-            // anchored bodice) and falls vertical below it. Replaces the body-shell
-            // envelope, which was blind to protrusions above the drape region.
-            // Runs LAST each round so the chained surface is the final radial state.
-            ApplyHangingChainPass(finalVerts, drapeEl, adj, bodyShell,
-                                  params.bodyClearance, params.drapeReturnRate, stats);
+            // Two-sided body-shell envelope: radius := monotonic envelope (de-jags
+            // + collides + obeys the loose rule). The hanging-chain via radial
+            // propagation was tried here but propagated the widest-above radius down
+            // without geometric validity → a horizontal saucer at the waist. That
+            // belly-overhang case needs true 3D (BVH) collision; keep the coherent
+            // envelope until then.
+            ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
+                                       params.bodyClearance, 1.0f,
+                                       params.drapeReturnRate, /*twoSided=*/true, stats);
         }
     }
 
