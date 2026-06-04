@@ -2093,14 +2093,12 @@ static void ApplyBodyEnvelopeDrapePass(
     }
     if (!any) return;
 
-    // CRITICAL: seed the running max ABOVE the belt. On a heavy body the belly
-    // (and bust) overhang the belt and project further out than the waist; the
-    // loose cloth must hang from THAT protrusion and fall vertical below it, not
-    // tuck back in under the overhang. Seeding only from the skirt top (belt)
-    // makes the envelope blind to the belly above it → the skirt follows the body
-    // inward below the belly ("volta pra trás"). Extend the seed up by ~18% of
-    // the body height so the belly/lower-bust protrusion is captured.
-    int seedTopZb = std::min(ZB - 1, drapeTopZb + (int)(0.18f * (float)ZB));
+    // Seed the running max at the top of the drape region (belt/waist). Seeding
+    // higher (to capture the belly overhang) was tried but on a heavy body it
+    // forced the whole skirt to the belly/hip width down to the hem → a stiff
+    // wide bell. The belly-overhang problem needs a different fix (per-contact
+    // vertical drop, not a global radius floor), so keep the seed at the belt.
+    int seedTopZb = drapeTopZb;
 
     // Per angular bin: envelope scans DOWN from seedTopZb (above the belly).
     // envelopeR = max(bodyR, prev_envelopeR - returnRate * dzPerBin).
