@@ -3825,10 +3825,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     int normPreset = NormalizePreset(preset);
     bool wholeMeshRigid = (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
                            normPreset == DRAPE_PRESET_RIGID_ARMOR);
-    bool haveMergedRigid = false;
-    for (uint8_t r : islandRigidOut) if (r) { haveMergedRigid = true; break; }
+    // haveMergedRigid: geometry-detected rigid plates inside a Loose/Fitted mesh
+    // (merged medallion case). Disabled for now — causes arm shrinkage regression
+    // when the island BFS labelling doesn't perfectly match the rigid pass's view.
+    // Re-enable once per-island logging confirms correct island identification.
+    // bool haveMergedRigid = false;
+    // for (uint8_t r : islandRigidOut) if (r) { haveMergedRigid = true; break; }
 
-    if (wholeMeshRigid || haveMergedRigid) {
+    if (wholeMeshRigid) {
         // Reuse the island labels from the clearance pass when available; otherwise
         // (whole-mesh rigid path, which skipped that pass) build them here.
         std::vector<int> island;
