@@ -2167,6 +2167,73 @@ static void ApplyBodyEnvelopeDrapePass(
     }
 }
 
+// ── Hanging-chain pass (user spec item 5) ──────────────────────────────────
+// Instead of reading the body shell only at each vertex's own Z (which is blind
+// to a protrusion ABOVE the drape region, e.g. a belly that overhangs the belt),
+// propagate the contact radius DOWN through the cloth's own edge graph:
+//   process verts top→bottom; each drape vert's radius is at least the radius of
+//   the connected vert ABOVE it (minus a tiny per-Z taper) and at least the body
+//   radius at its position. Anchored verts (drapeEl<0.2) are NOT moved — they are
+//   the seeds/contacts (the bodice carries the belly/bust radius into the chain).
+// Effect: once a vert is pushed out by a contact, everything hanging below it in
+// the same cloth column stays out and falls vertical — it never returns inward
+// unless a new (wider) contact appears. Two-sided projection also de-jags.
+static void ApplyHangingChainPass(
+    std::vector<Vec3>& finalVerts,
+    const std::vector<float>& drapeEl,
+    const std::vector<std::vector<uint32_t>>& adj,  // prebuilt vert adjacency
+    const BodyShell* shell,
+    float clearance,
+    float returnRate,
+    StaticSolveStats& stats)
+{
+    const size_t n = finalVerts.size();
+    std::vector<float> radius(n, -1.0f), dirx(n, 0.0f), diry(n, 0.0f), zpos(n, 0.0f);
+    for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
+        float dx = 0.0f, dy = 0.0f, r = 0.0f;
+        if (RadialDir(finalVerts[i], dx, dy, r)) { radius[i] = r; dirx[i] = dx; diry[i] = dy; }
+        zpos[i] = finalVerts[i].z;
+    }
+
+    std::vector<uint32_t> order;
+    order.reserve(n);
+    for (size_t i = 0; i < n && i <= 0xFFFF; ++i)
+        if (radius[i] >= 0.0f) order.push_back((uint32_t)i);
+    std::sort(order.begin(), order.end(),
+              [&](uint32_t a, uint32_t b) { return zpos[a] > zpos[b]; });
+
+    for (uint32_t idx : order) {
+        if (drapeEl[idx] < 0.20f) continue;  // anchored: seed only, never moved
+
+        // Highest radius among edge-neighbours ABOVE this vert (chain parent).
+        float maxAbove = -1.0f;
+        for (uint32_t j : adj[idx]) {
+            if (j >= n || radius[j] < 0.0f) continue;
+            if (zpos[j] > zpos[idx]) {
+                float cand = radius[j] - returnRate * (zpos[j] - zpos[idx]);
+                if (cand > maxAbove) maxAbove = cand;
+            }
+        }
+
+        float target = maxAbove;
+        if (shell && shell->valid) {
+            float baseR = 0.0f, morphR = 0.0f;
+            if (SampleBodyShell(*shell, finalVerts[idx], baseR, morphR)) {
+                float bodyTarget = morphR + clearance;
+                if (bodyTarget > target) target = bodyTarget;
+            }
+        }
+        if (target <= 0.0f) continue;
+
+        if (std::fabs(radius[idx] - target) > 0.01f) {
+            finalVerts[idx].x = g_refCenterX + dirx[idx] * target;
+            finalVerts[idx].y = g_refCenterY + diry[idx] * target;
+            radius[idx] = target;   // propagate to verts below in this pass
+            ++stats.envelopeAdjusted;
+        }
+    }
+}
+
 struct BodyColumnPoint {
     uint16_t idx = 0;
     float z = 0.0f;
@@ -3162,9 +3229,17 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     //  2. The loop ENDS with the envelope, so the smooth monotonic surface is the
     //     final radial state, not the faceted collide.
     if (params.verletCloth && bodyShell && bodyShell->valid) {
+        // Prebuild vertex adjacency once for the hanging-chain pass.
+        std::vector<std::vector<uint32_t>> adj(n);
+        for (const auto& e : useEdges) {
+            if (e.a >= n || e.b >= n) continue;
+            adj[e.a].push_back(e.b);
+            adj[e.b].push_back(e.a);
+        }
+
         for (int it = 0; it < 6; ++it) {
             // Laplacian smooth (Z + tangential mostly; radial gets re-set by the
-            // envelope right after, so a stronger 0.30 is safe here).
+            // chain right after, so a stronger 0.30 is safe here).
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3179,11 +3254,13 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
                 }
             }
-            // Two-sided envelope: radius := monotonic envelope (de-jags + collides
-            // + obeys the loose rule). Runs LAST so it is the final radial state.
-            ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
-                                       params.bodyClearance, 1.0f,
-                                       params.drapeReturnRate, /*twoSided=*/true, stats);
+            // Hanging-chain: propagate contact radius DOWN the cloth so the skirt
+            // hangs from the protrusion above it (incl. the belly carried by the
+            // anchored bodice) and falls vertical below it. Replaces the body-shell
+            // envelope, which was blind to protrusions above the drape region.
+            // Runs LAST each round so the chained surface is the final radial state.
+            ApplyHangingChainPass(finalVerts, drapeEl, adj, bodyShell,
+                                  params.bodyClearance, params.drapeReturnRate, stats);
         }
     }
 
