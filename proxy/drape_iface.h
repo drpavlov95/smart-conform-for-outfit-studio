@@ -95,6 +95,10 @@ typedef int (*PfnDrapeClearShapePresets)();
 typedef int (*PfnDrapeSetShapePreset)(const char* shapeNameUtf8, int preset);
 typedef void (*PfnDrapeSetHookEnabled)(int enabled);
 
+// Processing intensity: 0=Low (fewer passes, faster), 1=Medium (default),
+// 2=High (extra passes, slower, better result on complex morphs).
+typedef void (*PfnDrapeSetProcessingIntensity)(int level);
+
 // ── Versioned API struct ───────────────────────────────────────────────
 
 typedef struct {

@@ -118,6 +118,8 @@ static DrapeOptions g_opts;        // tight/loose distances
 // UNCHANGED. version.dll flips this on only for the duration of a Smart Conform.
 static std::atomic_bool g_enabled{false};
 static std::atomic_bool g_hookInstalled{false};
+// 0=Low (fewer passes, faster), 1=Medium (default), 2=High (extra passes).
+static std::atomic_int  g_processingIntensity{1};
 
 struct EdgeConstraint {
     uint16_t a = 0;
@@ -1843,27 +1845,35 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // loose. The Verlet here is only a gentle settle — kept weak so it doesn't
         // melt the hem with uneven vertical sag.
         p.verletCloth = true;
-        p.pbdIterations = 50;             // relaxation steps
-        p.constraintIterations = 5;       // constraint passes per step
-        p.gravity = 0.12f;                // gentle settle (envelope does the shape)
-        p.clothMaxDrop = 6.0f;            // small clean drop, no melt
-        p.stretchStiffness = 0.60f;       // stiffer → keeps structure, less melt
-        p.collisionStiffness = 0.85f;     // keep cloth outside the body
-        // bodyClearance: how far off the real body surface the cloth sits.
-        // BVH pushes each vert to exactly this distance from the nearest surface.
-        // 0.65 eliminates the small side clips without visibly gapping the cloth.
+        p.collisionStiffness = 0.85f;
         p.bodyClearance = 0.65f;
-        p.bendingStiffness = 0.08f;       // light: smooths folds without melting
+        p.bendingStiffness = 0.08f;
         p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
+        p.surfaceSmoothIterations = 3;
         p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
-        // Body-shell envelope returnRate: how fast the cloth can taper inward
-        // below a protrusion (belly/butt). 0 = strict vertical column.
-        // 0.01-0.02 = natural loose cloth taper below the belly.
         p.drapeReturnRate = 0.012f;
         p.drapeEnvelopeStrength = 1.0f;
         p.drapeEnvelopeBins = 96;
+        p.gravity = 0.12f;
+        p.clothMaxDrop = 6.0f;
+        p.stretchStiffness = 0.60f;
+        // Processing intensity: Low=faster/fewer passes, Medium=default,
+        // High=extra iterations for difficult extreme morphs.
+        switch (g_processingIntensity.load(std::memory_order_relaxed)) {
+        case 0: // Low
+            p.pbdIterations       = 25;
+            p.constraintIterations = 3;
+            break;
+        default: // Medium (1)
+            p.pbdIterations       = 50;
+            p.constraintIterations = 5;
+            break;
+        case 2: // High
+            p.pbdIterations       = 90;
+            p.constraintIterations = 7;
+            break;
+        }
         break;
     case DRAPE_PRESET_TUBULAR:
         p.clearanceStrength = 0.18f;
@@ -3447,7 +3457,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
-        for (int it = 0; it < 9; ++it) {   // more passes = smoother hem
+        // Finishing rounds scale with intensity: Low=5, Medium=9, High=14.
+        static const int kFinishRounds[] = {5, 9, 14};
+        int intensity = g_processingIntensity.load(std::memory_order_relaxed);
+        int finishRounds = kFinishRounds[intensity > 2 ? 1 : intensity];
+        for (int it = 0; it < finishRounds; ++it) {
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3895,4 +3909,12 @@ int DrapeSetShapePreset(const char* shapeNameUtf8, int preset) {
     g_appliedShapesLogged.clear();
     HLog("preset-ui: shape '%s' preset='%s'", shapeNameUtf8, PresetName(normalized));
     return 0;
+}
+
+extern "C" __declspec(dllexport)
+void DrapeSetProcessingIntensity(int level) {
+    int clamped = (level < 0) ? 0 : (level > 2) ? 2 : level;
+    g_processingIntensity.store(clamped, std::memory_order_relaxed);
+    static const char* kLabels[] = {"Low", "Medium", "High"};
+    HLog("preset-ui: processing intensity set to %s (%d)", kLabels[clamped], clamped);
 }

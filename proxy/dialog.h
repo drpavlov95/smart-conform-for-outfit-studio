@@ -8,6 +8,7 @@ struct DrapeHookApi {
     PfnDrapeGetCurrentShapes getCurrentShapes = nullptr;
     PfnDrapeClearShapePresets clearShapePresets = nullptr;
     PfnDrapeSetShapePreset setShapePreset = nullptr;
+    PfnDrapeSetProcessingIntensity setProcessingIntensity = nullptr;
 };
 
 // Show the Drape Conform dialog as a modal window owned by `parent`.

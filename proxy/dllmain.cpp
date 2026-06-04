@@ -18,6 +18,7 @@ static std::atomic<PfnDrapeSetHookEnabled> g_setHookEnabled{nullptr};
 static std::atomic<PfnDrapeGetCurrentShapes> g_getCurrentShapes{nullptr};
 static std::atomic<PfnDrapeClearShapePresets> g_clearShapePresets{nullptr};
 static std::atomic<PfnDrapeSetShapePreset> g_setShapePreset{nullptr};
+static std::atomic<PfnDrapeSetProcessingIntensity> g_setProcessingIntensity{nullptr};
 static std::atomic_bool g_hookReady{false};
 
 // ── Debug logging (pure Win32, safe in DllMain context) ───────────────
@@ -92,6 +93,7 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         api.getCurrentShapes = g_getCurrentShapes.load(std::memory_order_acquire);
         api.clearShapePresets = g_clearShapePresets.load(std::memory_order_acquire);
         api.setShapePreset = g_setShapePreset.load(std::memory_order_acquire);
+        api.setProcessingIntensity = g_setProcessingIntensity.load(std::memory_order_acquire);
 
         if (g_hookReady.load(std::memory_order_acquire) && setHookEnabled &&
             api.getCurrentShapes && api.clearShapePresets && api.setShapePreset &&
@@ -225,6 +227,8 @@ static DWORD WINAPI InjectThread(LPVOID) {
                 GetProcAddress(hAlgo, "DrapeClearShapePresets"));
             auto pSetShapePreset = reinterpret_cast<PfnDrapeSetShapePreset>(
                 GetProcAddress(hAlgo, "DrapeSetShapePreset"));
+            auto pSetIntensity = reinterpret_cast<PfnDrapeSetProcessingIntensity>(
+                GetProcAddress(hAlgo, "DrapeSetProcessingIntensity"));
             if (pInstall) {
                 int rc = pInstall(hw, ExeDir().c_str(), 0.5f, 8.0f);
                 if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
@@ -233,12 +237,14 @@ static DWORD WINAPI InjectThread(LPVOID) {
                     g_getCurrentShapes.store(pGetCurrentShapes, std::memory_order_release);
                     g_clearShapePresets.store(pClearShapePresets, std::memory_order_release);
                     g_setShapePreset.store(pSetShapePreset, std::memory_order_release);
+                    g_setProcessingIntensity.store(pSetIntensity, std::memory_order_release);
                     g_hookReady.store(true, std::memory_order_release);
                 } else {
                     g_setHookEnabled.store(nullptr, std::memory_order_release);
                     g_getCurrentShapes.store(nullptr, std::memory_order_release);
                     g_clearShapePresets.store(nullptr, std::memory_order_release);
                     g_setShapePreset.store(nullptr, std::memory_order_release);
+                    g_setProcessingIntensity.store(nullptr, std::memory_order_release);
                     g_hookReady.store(false, std::memory_order_release);
                 }
                 DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p getShapes=%p clearPresets=%p setPreset=%p ready=%d",

@@ -573,11 +573,15 @@ struct DlgBuilder {
 };
 
 enum : UINT {
-    IDC_PRESET_LIST = 2001,
-    IDC_PRESET_COMBO = 2002,
+    IDC_PRESET_LIST   = 2001,
+    IDC_PRESET_COMBO  = 2002,
     IDC_PRESET_STATUS = 2003,
-    COL_PRESET_SHAPE = 0,
-    COL_PRESET_VALUE = 1,
+    IDC_INT_LOW       = 2004,
+    IDC_INT_MED       = 2005,
+    IDC_INT_HIGH      = 2006,
+    IDC_AUTO_DETECT   = 2007,
+    COL_PRESET_SHAPE  = 0,
+    COL_PRESET_VALUE  = 1,
 };
 
 struct PresetRow {
@@ -587,9 +591,10 @@ struct PresetRow {
 
 struct PresetDlgData {
     DrapeHookApi api{};
-    HWND lv = nullptr;
-    HWND combo = nullptr;
+    HWND lv     = nullptr;
+    HWND combo  = nullptr;
     HWND status = nullptr;
+    int  intensity = 1;  // 0=Low 1=Medium 2=High
     std::vector<PresetRow> rows;
 };
 
@@ -701,18 +706,22 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
     case WM_INITDIALOG: {
         d = reinterpret_cast<PresetDlgData*>(lp);
         SetWindowLongPtrA(dlg, GWLP_USERDATA, lp);
-        SetWindowTextA(dlg, "Drape Smart Conform");
+        SetWindowTextA(dlg, "Smart Conform");
 
-        d->lv = GetDlgItem(dlg, IDC_PRESET_LIST);
-        d->combo = GetDlgItem(dlg, IDC_PRESET_COMBO);
+        d->lv     = GetDlgItem(dlg, IDC_PRESET_LIST);
+        d->combo  = GetDlgItem(dlg, IDC_PRESET_COMBO);
         d->status = GetDlgItem(dlg, IDC_PRESET_STATUS);
 
         ListView_SetExtendedListViewStyle(d->lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-        LVCOLUMNA c0{LVCF_TEXT | LVCF_WIDTH, 0, 280, const_cast<char*>("Mesh")};
-        LVCOLUMNA c1{LVCF_TEXT | LVCF_WIDTH, 0, 160, const_cast<char*>("Preset")};
+        LVCOLUMNA c0{LVCF_TEXT | LVCF_WIDTH, 0, 270, const_cast<char*>("Mesh")};
+        LVCOLUMNA c1{LVCF_TEXT | LVCF_WIDTH, 0, 150, const_cast<char*>("Behavior")};
         ListView_InsertColumn(d->lv, COL_PRESET_SHAPE, &c0);
         ListView_InsertColumn(d->lv, COL_PRESET_VALUE, &c1);
         PopulatePresetCombo(d->combo);
+
+        // Intensity: default to Medium.
+        d->intensity = 1;
+        SendMessageA(GetDlgItem(dlg, IDC_INT_MED), BM_SETCHECK, BST_CHECKED, 0);
 
         std::array<char, 65536> buf{};
         int count = d->api.getCurrentShapes ? d->api.getCurrentShapes(buf.data(), (int)buf.size()) : -1;
@@ -732,8 +741,7 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         UpdatePresetStatus(d);
 
         if (count <= 0 || d->rows.empty()) {
-            SetWindowTextA(d->status,
-                           "No meshes found. Check %TEMP%\\drape_debug.log.");
+            SetWindowTextA(d->status, "No meshes found. Check %TEMP%\\drape_debug.log.");
             EnableWindow(GetDlgItem(dlg, IDOK), FALSE);
         } else {
             ListView_SetItemState(d->lv, 0, LVIS_SELECTED | LVIS_FOCUSED,
@@ -758,8 +766,9 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
     }
 
     case WM_COMMAND: {
-        WORD id = LOWORD(wp);
+        WORD id   = LOWORD(wp);
         WORD code = HIWORD(wp);
+
         if (id == IDC_PRESET_COMBO && code == CBN_SELCHANGE && d) {
             int row = SelectedPresetRow(d->lv);
             if (row >= 0 && row < (int)d->rows.size()) {
@@ -771,7 +780,27 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
             return TRUE;
         }
 
+        if ((id == IDC_INT_LOW || id == IDC_INT_MED || id == IDC_INT_HIGH) && d) {
+            d->intensity = (id == IDC_INT_LOW) ? 0 : (id == IDC_INT_MED) ? 1 : 2;
+            return TRUE;
+        }
+
+        if (id == IDC_AUTO_DETECT && d) {
+            for (int i = 0; i < (int)d->rows.size(); ++i) {
+                d->rows[i].preset = GuessPresetForShapeUi(d->rows[i].shape);
+                ListView_SetItemText(d->lv, i, COL_PRESET_VALUE,
+                                     const_cast<char*>(PresetLabel(d->rows[i].preset)));
+            }
+            int sel = SelectedPresetRow(d->lv);
+            if (sel >= 0 && sel < (int)d->rows.size())
+                SendMessageA(d->combo, CB_SETCURSEL,
+                             ComboIndexForPreset(d->rows[sel].preset), 0);
+            return TRUE;
+        }
+
         if (id == IDOK && d) {
+            if (d->api.setProcessingIntensity)
+                d->api.setProcessingIntensity(d->intensity);
             if (d->api.clearShapePresets)
                 d->api.clearShapePresets();
             for (const auto& row : d->rows) {
@@ -797,29 +826,68 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
 
+    // Layout constants (dialog units)
+    // Dialog: 480 × 330
+    // Section: mesh list (top), preset row, intensity row, status, buttons (bottom)
+    const short DW = 480, DH = 330;
+    const short M = 8;   // margin
+    const short IW = DW - M * 2;  // inner width = 464
+
+    // Row tops
+    const short yHint    = M;           // hint label
+    const short yList    = yHint + 14;  // listview
+    const short listH    = 170;
+    const short yPreset  = yList + listH + 6;  // preset row
+    const short yIntLbl  = yPreset + 20;       // "Processing:" label
+    const short yInt     = yIntLbl + 2;        // radio buttons (same row)
+    const short yStatus  = yInt + 18;          // status text
+    const short statusH  = 18;
+    const short yButtons = DH - 26;            // bottom button row
+
     DlgBuilder b;
-    const WORD nControls = 8;
-    b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT |
-         WS_CAPTION | WS_SYSMENU | WS_POPUP);
+    // Count: hint(1) + list(1) + "Selected mesh:"(1) + combo(1) + auto-btn(1)
+    //      + "Processing:"(1) + 3 radios + status(1) + Conform + Cancel = 12
+    const WORD nControls = 12;
+    b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_CAPTION | WS_SYSMENU | WS_POPUP);
     b.dw(0); b.w(nControls);
-    b.w(0); b.w(0); b.w(470); b.w(292);
-    b.w(0); b.w(0); b.str(L"Drape Smart Conform");
+    b.w(0); b.w(0); b.w(DW); b.w(DH);
+    b.w(0); b.w(0); b.str(L"Smart Conform");
     b.w(9); b.str(L"Segoe UI");
 
-    b.control(SS_LEFT, 8, 8, 446, 18, 0, L"STATIC",
-              L"Choose how each mesh should behave during Smart Conform.");
+    // ── Hint ─────────────────────────────────────────────────────────────
+    b.control(SS_LEFT, M, yHint, IW, 11, 0, L"STATIC",
+              L"Set the behavior for each mesh, then click Conform.");
+
+    // ── Mesh listview ─────────────────────────────────────────────────────
     b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
-              8, 28, 454, 190, IDC_PRESET_LIST, L"SysListView32", L"");
-    b.control(SS_LEFT, 8, 226, 108, 10, 0, L"STATIC", L"Selected mesh preset:");
+              M, yList, IW, listH, IDC_PRESET_LIST, L"SysListView32", L"");
+
+    // ── Preset row: label + combo + Auto-detect button ────────────────────
+    b.control(SS_LEFT | SS_CENTERIMAGE, M, yPreset, 100, 14, 0, L"STATIC",
+              L"Selected mesh:");
     b.control(CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
-              120, 224, 170, 120, IDC_PRESET_COMBO, L"COMBOBOX", L"");
-    b.control(SS_LEFT, 8, 246, 454, 12, IDC_PRESET_STATUS, L"STATIC", L"");
-    b.control(BS_DEFPUSHBUTTON | WS_TABSTOP,
-              280, 266, 92, 16, IDOK, L"BUTTON", L"Conform");
+              112, yPreset - 1, 190, 120, IDC_PRESET_COMBO, L"COMBOBOX", L"");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              382, 266, 72, 16, IDCANCEL, L"BUTTON", L"Cancel");
-    b.control(SS_LEFT, 8, 266, 250, 16, 0, L"STATIC",
-              L"Belts preserve waist follow; accessories resist deformation.");
+              312, yPreset - 1, 90, 14, IDC_AUTO_DETECT, L"BUTTON", L"Auto-detect all");
+
+    // ── Intensity row ─────────────────────────────────────────────────────
+    b.control(SS_LEFT | SS_CENTERIMAGE, M, yInt, 76, 14, 0, L"STATIC",
+              L"Processing:");
+    b.control(BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP,
+              88, yInt, 70, 14, IDC_INT_LOW,  L"BUTTON", L"Low");
+    b.control(BS_AUTORADIOBUTTON | WS_TABSTOP,
+              162, yInt, 80, 14, IDC_INT_MED,  L"BUTTON", L"Medium");
+    b.control(BS_AUTORADIOBUTTON | WS_TABSTOP,
+              246, yInt, 70, 14, IDC_INT_HIGH, L"BUTTON", L"High");
+
+    // ── Status ────────────────────────────────────────────────────────────
+    b.control(SS_LEFT, M, yStatus, IW, statusH, IDC_PRESET_STATUS, L"STATIC", L"");
+
+    // ── Buttons ──────────────────────────────────────────────────────────
+    b.control(BS_DEFPUSHBUTTON | WS_TABSTOP,
+              DW - M - 170, yButtons, 80, 16, IDOK, L"BUTTON", L"Conform");
+    b.control(BS_PUSHBUTTON | WS_TABSTOP,
+              DW - M - 82, yButtons, 74, 16, IDCANCEL, L"BUTTON", L"Cancel");
 
     PresetDlgData data;
     data.api = api;
