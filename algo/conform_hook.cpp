@@ -1593,23 +1593,21 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.physicsDrape = true;
         p.physicsDrapeInitPushStiffness = 0.80f;
         p.physicsDrapeInitPushPasses    = 8;
-        p.maxDisplacementMult = 0.0f;   // no cap: cloth can deviate freely from raw
-        p.inwardSuppressionStrength = 0.0f; // not needed: body collision handles it
-        p.clearanceStrength = 0.06f;
-        p.clearanceSlack = 0.50f;
-        p.bodyCollisionStrength = 0.40f;
-        p.bodyClearance = 0.18f;
-        p.bodyGapPreserve = 0.20f;
-        p.bodyGapCap = 2.5f;
+        p.maxDisplacementMult = 0.0f;
+        p.inwardSuppressionStrength = 0.0f;
+        p.clearanceStrength = 0.0f;
+        p.clearanceSlack = 0.0f;
+        p.bodyCollisionStrength = 0.0f;
+        p.bodyGapPreserve = 0.0f;
+        p.bodyGapCap = 0.0f;
         p.bodyColumnStrength = 0.0f;
         p.envelopeStrength = 0.0f;
-        p.drapeReturnRate = 0.05f;
-        p.drapeEnvelopeStrength = 0.65f;
-        p.drapeEnvelopeBins = 64;
-        p.relaxPerUnitZ = 0.14f;
-        p.layerStrength = 0.05f;
-        p.layerIterations = 1;
-        p.constraintIterations = 0;
+        p.drapeEnvelopeStrength = 1.0f;
+        p.drapeEnvelopeBins = 96;
+        p.relaxPerUnitZ = 0.0f;
+        p.layerStrength = 0.0f;
+        p.layerIterations = 0;
+        p.constraintIterations = 5;
         // Momentum-free cloth drape (stable Gauss-Seidel relaxation).
         // pbdIterations = relaxation steps; constraintIterations = passes/step;
         // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
@@ -1623,7 +1621,10 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.clothMaxDrop = 6.0f;            // small clean drop, no melt
         p.stretchStiffness = 0.60f;       // stiffer → keeps structure, less melt
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
-        p.bodyClearance = 0.85f;          // sit the cloth off the body (hides clipping)
+        // bodyClearance is used by BOTH collideVertex (Verlet collision) and the
+        // body-shell envelope. 0.50 keeps cloth off the body without pushing too
+        // wide (the envelope adds clearance on top of the body shell radius).
+        p.bodyClearance = 0.50f;
         p.bendingStiffness = 0.08f;       // light: smooths folds without melting
         p.bendingIterations = 1;
         p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
@@ -2082,8 +2083,9 @@ static void ApplyBodyEnvelopeDrapePass(
         return std::max(0, std::min(ZB - 1, zb));
     };
 
-    // Top of the drape region: highest Z among drape verts. The envelope is
-    // seeded here so the skirt only sees the body from the waist/belt down.
+    // Top of the drape region: highest Z among drape verts. Verts at the top
+    // of the saia (next to the belt) are pinned (m=0) so they stay at the
+    // conformed Z; free verts drop below them. The max Z is always the belt.
     int drapeTopZb = 0;
     bool any = false;
     for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
