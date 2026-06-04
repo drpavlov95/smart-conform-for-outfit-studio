@@ -31,6 +31,7 @@
 #include <atomic>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
@@ -154,6 +155,29 @@ struct BodyShell {
     bool valid = false;
 };
 
+// ── 3D body collider: BVH over the morphed body triangles ──────────────────
+// Real geometric collision (closest point on the actual body surface), the
+// foundation that replaces the radial shell approximation. Built once per body
+// morph (keyed by refDataName) and cached. Answers "where does the body actually
+// push the cloth out?" using point-to-triangle closest-point queries + the real
+// surface normal — works for belly, hips, sides, bust, and limbs alike.
+struct BodyBVH {
+    struct Node {
+        Vec3 bmin{0.0f, 0.0f, 0.0f};
+        Vec3 bmax{0.0f, 0.0f, 0.0f};
+        int  left  = -1;   // child node index; -1 ⇒ leaf
+        int  start = 0;    // [start,start+count) into triIndex for a leaf
+        int  count = 0;
+    };
+    std::vector<Vec3> verts;                       // morphed body vertices
+    std::vector<std::array<uint16_t, 3>> tris;     // triangle vertex indices
+    std::vector<Vec3> centroid;                    // per-triangle centroid
+    std::vector<Vec3> faceNormal;                  // per-triangle unit normal
+    std::vector<int>  triIndex;                    // leaf triangle ordering
+    std::vector<Node> nodes;
+    bool valid = false;
+};
+
 // ── Per-shape weight cache (rebuilt when the open project changes) ─────
 static std::mutex g_cacheMx;
 static std::string g_projectKey;   // current resolved project name
@@ -164,7 +188,9 @@ static std::unordered_map<std::string, std::vector<EdgeConstraint>> g_shapeEdges
 static std::unordered_map<std::string, std::vector<BendingConstraint>> g_shapeBending;
 static std::unordered_map<std::string, int> g_shapeGeometryPresets;
 static std::vector<Vec3> g_refVerts;
+static std::vector<std::array<uint16_t, 3>> g_refTris;  // body triangles (for BVH)
 static std::unordered_map<std::string, BodyShell> g_bodyShellCache;
+static std::unordered_map<std::string, BodyBVH> g_bodyBVHCache;
 // Pre-built masks (vert -> weight) reused across a shape's sliders.
 static std::unordered_map<std::string, std::unordered_map<uint16_t, float>> g_shapeMask;
 static std::unordered_map<std::string, int> g_shapePresets;
@@ -773,6 +799,202 @@ static float ClampRange(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
 
+static float Dot(const Vec3& a, const Vec3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+static Vec3 Cross(const Vec3& a, const Vec3& b) {
+    return Vec3{ a.y * b.z - a.z * b.y,
+                a.z * b.x - a.x * b.z,
+                a.x * b.y - a.y * b.x };
+}
+static Vec3 VMin(const Vec3& a, const Vec3& b) {
+    return Vec3{ std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z) };
+}
+static Vec3 VMax(const Vec3& a, const Vec3& b) {
+    return Vec3{ std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) };
+}
+static float Comp(const Vec3& v, int axis) {
+    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+}
+
+// ── BVH build (iterative median split over triangle centroids) ─────────────
+static void BuildBodyBVH(const std::vector<Vec3>& verts,
+                         const std::vector<std::array<uint16_t, 3>>& tris,
+                         BodyBVH& bvh) {
+    bvh = BodyBVH{};
+    if (verts.empty() || tris.empty()) return;
+    bvh.verts = verts;
+
+    const size_t nt = tris.size();
+    bvh.tris.reserve(nt);
+    bvh.centroid.reserve(nt);
+    bvh.faceNormal.reserve(nt);
+    bvh.triIndex.reserve(nt);
+    for (size_t i = 0; i < nt; ++i) {
+        const auto& t = tris[i];
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size())
+            continue;
+        const Vec3& a = verts[t[0]];
+        const Vec3& b = verts[t[1]];
+        const Vec3& c = verts[t[2]];
+        Vec3 nrm = Cross(Sub(b, a), Sub(c, a));
+        float l = Len(nrm);
+        int idx = (int)bvh.tris.size();
+        bvh.tris.push_back(t);
+        bvh.centroid.push_back(Scale(Add(Add(a, b), c), 1.0f / 3.0f));
+        bvh.faceNormal.push_back(l > 1.0e-8f ? Scale(nrm, 1.0f / l) : Vec3{0.0f, 0.0f, 1.0f});
+        bvh.triIndex.push_back(idx);
+    }
+    if (bvh.tris.empty()) return;
+
+    struct BuildTask { int node, start, count; };
+    bvh.nodes.reserve(bvh.tris.size() * 2);
+    bvh.nodes.push_back(BodyBVH::Node{});
+    std::vector<BuildTask> stack;
+    stack.push_back({0, 0, (int)bvh.tris.size()});
+
+    while (!stack.empty()) {
+        BuildTask task = stack.back(); stack.pop_back();
+        Vec3 bmin{ 1e30f,  1e30f,  1e30f};
+        Vec3 bmax{-1e30f, -1e30f, -1e30f};
+        Vec3 cmin = bmin, cmax = bmax;
+        for (int i = task.start; i < task.start + task.count; ++i) {
+            int ti = bvh.triIndex[i];
+            const auto& t = bvh.tris[ti];
+            bmin = VMin(bmin, VMin(bvh.verts[t[0]], VMin(bvh.verts[t[1]], bvh.verts[t[2]])));
+            bmax = VMax(bmax, VMax(bvh.verts[t[0]], VMax(bvh.verts[t[1]], bvh.verts[t[2]])));
+            cmin = VMin(cmin, bvh.centroid[ti]);
+            cmax = VMax(cmax, bvh.centroid[ti]);
+        }
+        bvh.nodes[task.node].bmin = bmin;
+        bvh.nodes[task.node].bmax = bmax;
+
+        if (task.count <= 4) {
+            bvh.nodes[task.node].left  = -1;
+            bvh.nodes[task.node].start = task.start;
+            bvh.nodes[task.node].count = task.count;
+            continue;
+        }
+
+        Vec3 ext = Sub(cmax, cmin);
+        int axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z ? 1 : 2);
+        float mid = 0.5f * (Comp(cmin, axis) + Comp(cmax, axis));
+
+        int l = task.start, r = task.start + task.count - 1;
+        while (l <= r) {
+            if (Comp(bvh.centroid[bvh.triIndex[l]], axis) < mid) ++l;
+            else { std::swap(bvh.triIndex[l], bvh.triIndex[r]); --r; }
+        }
+        int leftCount = l - task.start;
+        if (leftCount == 0 || leftCount == task.count) leftCount = task.count / 2;
+
+        int leftNode = (int)bvh.nodes.size();
+        bvh.nodes.push_back(BodyBVH::Node{});
+        bvh.nodes.push_back(BodyBVH::Node{});
+        bvh.nodes[task.node].left  = leftNode;
+        bvh.nodes[task.node].count = 0;   // internal
+        stack.push_back({leftNode,     task.start,             leftCount});
+        stack.push_back({leftNode + 1, task.start + leftCount, task.count - leftCount});
+    }
+    bvh.valid = true;
+}
+
+// Closest point on triangle abc to p (Ericson, Real-Time Collision Detection).
+static Vec3 ClosestPtTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+    Vec3 ab = Sub(b, a), ac = Sub(c, a), ap = Sub(p, a);
+    float d1 = Dot(ab, ap), d2 = Dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    Vec3 bp = Sub(p, b);
+    float d3 = Dot(ab, bp), d4 = Dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        float v = d1 / (d1 - d3);
+        return Add(a, Scale(ab, v));
+    }
+    Vec3 cp = Sub(p, c);
+    float d5 = Dot(ab, cp), d6 = Dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        float w = d2 / (d2 - d6);
+        return Add(a, Scale(ac, w));
+    }
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return Add(b, Scale(Sub(c, b), w));
+    }
+    float denom = 1.0f / (va + vb + vc);
+    float v = vb * denom, w = vc * denom;
+    return Add(a, Add(Scale(ab, v), Scale(ac, w)));
+}
+
+static float Dist2PointAABB(const Vec3& p, const Vec3& bmin, const Vec3& bmax) {
+    float dx = std::max(0.0f, std::max(bmin.x - p.x, p.x - bmax.x));
+    float dy = std::max(0.0f, std::max(bmin.y - p.y, p.y - bmax.y));
+    float dz = std::max(0.0f, std::max(bmin.z - p.z, p.z - bmax.z));
+    return dx * dx + dy * dy + dz * dz;
+}
+
+// Closest point on the body surface to p, with that triangle's face normal.
+static bool BVHClosestPoint(const BodyBVH& bvh, const Vec3& p,
+                            Vec3& outCP, Vec3& outNormal, float& outDist2) {
+    if (!bvh.valid || bvh.nodes.empty()) return false;
+    float best = 1e30f;
+    int bestTri = -1;
+    Vec3 bestCP{0.0f, 0.0f, 0.0f};
+
+    int stack[128];
+    int sp = 0;
+    stack[sp++] = 0;
+    while (sp > 0) {
+        int ni = stack[--sp];
+        const BodyBVH::Node& node = bvh.nodes[ni];
+        if (Dist2PointAABB(p, node.bmin, node.bmax) > best) continue;
+        if (node.left < 0) {
+            for (int i = node.start; i < node.start + node.count; ++i) {
+                int ti = bvh.triIndex[i];
+                const auto& t = bvh.tris[ti];
+                Vec3 cp = ClosestPtTriangle(p, bvh.verts[t[0]], bvh.verts[t[1]], bvh.verts[t[2]]);
+                float d2 = Len2(Sub(p, cp));
+                if (d2 < best) { best = d2; bestTri = ti; bestCP = cp; }
+            }
+        } else {
+            int lc = node.left, rc = node.left + 1;
+            float dl = Dist2PointAABB(p, bvh.nodes[lc].bmin, bvh.nodes[lc].bmax);
+            float dr = Dist2PointAABB(p, bvh.nodes[rc].bmin, bvh.nodes[rc].bmax);
+            // push farther first so nearer is processed first
+            if (dl < dr) {
+                if (dr <= best && sp < 127) stack[sp++] = rc;
+                if (dl <= best && sp < 127) stack[sp++] = lc;
+            } else {
+                if (dl <= best && sp < 127) stack[sp++] = lc;
+                if (dr <= best && sp < 127) stack[sp++] = rc;
+            }
+        }
+    }
+    if (bestTri < 0) return false;
+    outCP = bestCP;
+    outNormal = bvh.faceNormal[bestTri];
+    outDist2 = best;
+    return true;
+}
+
+// Push a cloth vertex outside the body to `clearance` along the real surface
+// normal, if it is inside the body or closer than clearance. Returns true if moved.
+static bool BVHCollideVertex(const BodyBVH& bvh, Vec3& v, float clearance) {
+    Vec3 cp{0,0,0}, nrm{0,0,1};
+    float d2 = 0.0f;
+    if (!BVHClosestPoint(bvh, v, cp, nrm, d2)) return false;
+    float dist = std::sqrt(d2);
+    float sign = Dot(Sub(v, cp), nrm);   // >0 outside, <0 inside
+    bool inside = sign < 0.0f;
+    if (!inside && dist >= clearance) return false;  // already clear
+    v = Add(cp, Scale(nrm, clearance));  // sit exactly `clearance` off the surface
+    return true;
+}
+
 static uint64_t CurrentExeSize() {
     char path[MAX_PATH] = {};
     if (!GetModuleFileNameA(nullptr, path, MAX_PATH)) return 0;
@@ -1077,7 +1299,9 @@ static void RebuildCacheLocked() {
     g_shapeBending.clear();
     g_shapeGeometryPresets.clear();
     g_refVerts.clear();
+    g_refTris.clear();
     g_bodyShellCache.clear();
+    g_bodyBVHCache.clear();
     g_shapeMask.clear();
     g_missingShapesLogged.clear();
     g_appliedShapesLogged.clear();
@@ -1155,6 +1379,10 @@ static void RebuildCacheLocked() {
     std::vector<Triangle> bt; body->GetTriangles(bt);
     TriList bodyTris; bodyTris.reserve(bt.size());
     for (auto& t : bt) bodyTris.push_back({t.p1,t.p2,t.p3});
+    // Persist body triangles globally for the 3D BVH collider.
+    g_refTris.clear();
+    g_refTris.reserve(bt.size());
+    for (auto& t : bt) g_refTris.push_back({t.p1, t.p2, t.p3});
 
     DrapeConformer dc(g_opts);
     std::string bodyName = body->name.get();
@@ -2492,6 +2720,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                                  const std::vector<VertexBoneProfile>* profiles,
                                  const std::vector<EdgeConstraint>* edges,
                                  const BodyShell* bodyShell,
+                                 const BodyBVH* bodyBVH,
                                  const std::unordered_map<uint16_t, float>& presetMask,
                                  const TargetDataDiffs& rawDiff,
                                  TargetDataDiffs& outDiff,
@@ -2734,21 +2963,33 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // Body collision. Primary path: TRUE 3D collision against the morphed-body
+    // BVH (closest point on the real surface, push out along the real normal) —
+    // correct for belly, hips, sides, bust, and limbs. Falls back to the radial
+    // shell only when no BVH is available. `stiffness` blends toward the target so
+    // the PBD loop can apply it gradually; the final sweeps call with stiffness 1.
     auto collideVertex = [&](size_t i, float stiffness) {
-        if (!bodyShell || !bodyShell->valid || stiffness <= 0.0f)
-            return false;
+        if (stiffness <= 0.0f) return false;
 
-        float baseBodyR = 0.0f;
-        float morphBodyR = 0.0f;
+        if (bodyBVH && bodyBVH->valid) {
+            Vec3 target = finalVerts[i];
+            if (!BVHCollideVertex(*bodyBVH, target, params.bodyClearance))
+                return false;                       // already outside + clear
+            finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
+            return true;
+        }
+
+        // ── Fallback: radial shell ──
+        if (!bodyShell || !bodyShell->valid)
+            return false;
+        float baseBodyR = 0.0f, morphBodyR = 0.0f;
         if (!SampleBodyShell(*bodyShell, baseVerts[i], baseBodyR, morphBodyR))
             return false;
-
         float dirX = 0.0f, dirY = 0.0f, baseClothR = 0.0f;
         if (!RadialDir(finalVerts[i], dirX, dirY, baseClothR) &&
             !RadialDir(baseVerts[i], dirX, dirY, baseClothR)) {
             return false;
         }
-
         float baseGap = std::max(0.0f, RadialRadius(baseVerts[i]) - baseBodyR);
         float preservedGap = std::min(baseGap * params.bodyGapPreserve, params.bodyGapCap);
         float targetR = morphBodyR + params.bodyClearance + preservedGap;
@@ -3207,31 +3448,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
     }
 
-    // Final body-collision sweep (verletCloth): the post-PBD passes can leave
-    // drape verts inside the body (visible as the body poking through). Push them
-    // back outside the body shell FIRST.
-    if (params.verletCloth && bodyShell && bodyShell->valid) {
-        for (int it = 0; it < 3; ++it)
-            for (size_t i = 0; i < n; ++i)
-                if (drapeEl[i] >= 0.20f && collideVertex(i, 1.0f))
-                    ++stats.collisionAdjusted;
-    }
-
-    // ── Finishing: SMOOTH + two-sided monotonic ENVELOPE (verletCloth) ─────
-    // Why the old finish stayed jagged (user's question): the envelope was a
-    // one-sided floor (only pushed INSIDE verts out), so Verlet's outward bumps
-    // survived; and collideVertex ran AFTER it each round, re-faceting to the
-    // coarse 48-bin body shell — overriding the smoothing. Fix:
-    //  1. Envelope is now TWO-SIDED: it pulls outward bumps IN to the smooth
-    //     monotonic surface too, so it both de-jags and obeys the rule. (The
-    //     envelope radius is >= body radius, so it IS the collision — no separate
-    //     collideVertex needed, hence no 48-bin re-faceting.)
-    //  2. The loop ENDS with the envelope, so the smooth monotonic surface is the
-    //     final radial state, not the faceted collide.
-    if (params.verletCloth && bodyShell && bodyShell->valid) {
+    // ── Finishing (verletCloth) ────────────────────────────────────────────
+    // Primary collider is now the 3D BVH: smooth, then push every drape vert onto
+    // the REAL body surface (closest point + normal). This replaces the radial
+    // shell envelope as the shaper — the result follows the actual belly/hip/bust
+    // geometry instead of a central-axis approximation. The loose "don't tuck in"
+    // rule will be layered back on top of this as an auxiliary constraint.
+    if (params.verletCloth && bodyBVH && bodyBVH->valid) {
         for (int it = 0; it < 6; ++it) {
-            // Laplacian smooth (Z + tangential mostly; radial gets re-set by the
-            // envelope right after, so a stronger 0.30 is safe here).
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3246,12 +3470,28 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
                 }
             }
-            // Two-sided body-shell envelope: radius := monotonic envelope (de-jags
-            // + collides + obeys the loose rule). The hanging-chain via radial
-            // propagation was tried here but propagated the widest-above radius down
-            // without geometric validity → a horizontal saucer at the waist. That
-            // belly-overhang case needs true 3D (BVH) collision; keep the coherent
-            // envelope until then.
+            // 3D collision push-out (real surface). Runs LAST so it is the final state.
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f && collideVertex(i, 1.0f))
+                    ++stats.collisionAdjusted;
+        }
+    } else if (params.verletCloth && bodyShell && bodyShell->valid) {
+        // Fallback: radial-shell two-sided envelope (no BVH available).
+        for (int it = 0; it < 6; ++it) {
+            if (!useEdges.empty()) {
+                std::vector<Vec3> sum(n, Vec3{});
+                std::vector<int> cnt(n, 0);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                    sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
+                    Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
+                }
+            }
             ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
                                        params.bodyClearance, 1.0f,
                                        params.drapeReturnRate, /*twoSided=*/true, stats);
@@ -3367,6 +3607,7 @@ static void Detour_GenResult(
     BuildPresetMaskLocked(*shapeName, weightsIt->second, profiles, edges, presetMask, preset);
 
     const BodyShell* bodyShell = nullptr;
+    const BodyBVH* bodyBVH = nullptr;
     if (refDataName && !refDataName->empty() && !g_refVerts.empty()) {
         auto shellIt = g_bodyShellCache.find(*refDataName);
         if (shellIt == g_bodyShellCache.end()) {
@@ -3378,10 +3619,29 @@ static void Detour_GenResult(
                 shellIt = inserted.first;
                 HLog("detour: body shell built for refData '%s' verts=%zu diffVerts=%zu",
                      refDataName->c_str(), g_refVerts.size(), refDiff.size());
+
+                // Build the 3D BVH over the same morphed body (real collider).
+                if (!g_refTris.empty()) {
+                    std::vector<Vec3> morphed(g_refVerts.size());
+                    for (size_t i = 0; i < g_refVerts.size(); ++i)
+                        morphed[i] = Add(g_refVerts[i],
+                                         DiffAt(refDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+                    BodyBVH bvh;
+                    auto t0 = std::chrono::steady_clock::now();
+                    BuildBodyBVH(morphed, g_refTris, bvh);
+                    auto t1 = std::chrono::steady_clock::now();
+                    long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+                    HLog("detour: body BVH built for refData '%s' tris=%zu nodes=%zu %ldms",
+                         refDataName->c_str(), bvh.tris.size(), bvh.nodes.size(), ms);
+                    g_bodyBVHCache.emplace(*refDataName, std::move(bvh));
+                }
             }
         }
         if (shellIt != g_bodyShellCache.end() && shellIt->second.valid)
             bodyShell = &shellIt->second;
+        auto bvhIt = g_bodyBVHCache.find(*refDataName);
+        if (bvhIt != g_bodyBVHCache.end() && bvhIt->second.valid)
+            bodyBVH = &bvhIt->second;
     }
 
     // ── Static cloth pass (main path) ──────────────────────────────────────
@@ -3395,7 +3655,7 @@ static void Detour_GenResult(
             TargetDataDiffs solvedDiff;
             StaticSolveStats stats;
             bool passOk = ApplyStaticClothPass(*shapeName, *sliderName, preset,
-                                               vertsIt->second, profiles, edges, bodyShell,
+                                               vertsIt->second, profiles, edges, bodyShell, bodyBVH,
                                                presetMask, rawDiff, solvedDiff, stats);
             if (passOk) {
                 if (HostSetResultDiff(self, shapeName, sliderName, solvedDiff)) {
