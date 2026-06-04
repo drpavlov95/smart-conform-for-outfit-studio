@@ -3152,7 +3152,8 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // round) and the smooth removes the facets the projection leaves.
     if (params.verletCloth && bodyShell && bodyShell->valid) {
         for (int it = 0; it < 5; ++it) {
-            // Laplacian smooth over drape verts.
+            // Laplacian smooth: gentle (0.18) to avoid pulling side-panel verts
+            // inward past the body surface into concavities (waist, inner thigh).
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3164,13 +3165,17 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 for (size_t i = 0; i < n; ++i) {
                     if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
                     Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
-                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.35f));
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.18f));
                 }
             }
-            // Re-impose the radial envelope (pushes outward only, tapers by returnRate).
+            // Envelope pushes outward to monotonic floor. Then collideVertex
+            // catches any vert the smooth pulled into a body concavity whose
+            // local angular envelope floor is too low to detect.
             ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
                                        params.bodyClearance, 1.0f,
                                        params.drapeReturnRate, stats);
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f) collideVertex(i, 1.0f);
         }
     }
 
