@@ -574,30 +574,19 @@ struct DlgBuilder {
 
 enum : UINT {
     IDC_PRESET_LIST    = 2001,
-    IDC_PRESET_COMBO   = 2002,
+    IDC_EDIT_COMBO     = 2002,  // inline dropdown over the Behavior cell
     IDC_PRESET_STATUS  = 2003,
     IDC_INT_LOW        = 2004,
     IDC_INT_MED        = 2005,
     IDC_INT_HIGH       = 2006,
     IDC_AUTO_DETECT    = 2007,
-    IDC_TITLE          = 2008,
     IDC_SUBTITLE       = 2009,
     IDC_GRP_MESHES     = 2010,
     IDC_GRP_QUALITY    = 2011,
-    IDC_LBL_BEHAVIOR   = 2012,
     IDC_QUALITY_DESC   = 2013,
-    IDC_HEADER_BG      = 2014,
     COL_PRESET_SHAPE   = 0,
     COL_PRESET_VALUE   = 1,
 };
-
-// ── Visual identity (OutfitStudio-adjacent light theme) ───────────────────
-// Soft neutral surfaces, a single blue accent, clear type hierarchy.
-static const COLORREF kColHeaderBg = RGB(0xF4, 0xF6, 0xF9);  // header strip
-static const COLORREF kColTitle    = RGB(0x1A, 0x2A, 0x3A);  // near-black blue
-static const COLORREF kColSubtle   = RGB(0x6A, 0x73, 0x80);  // muted gray text
-static const COLORREF kColAccent   = RGB(0x2D, 0x6C, 0xDF);  // accent blue
-static const COLORREF kColDialogBg = RGB(0xFB, 0xFC, 0xFE);  // dialog surface
 
 struct PresetRow {
     std::string shape;
@@ -607,24 +596,18 @@ struct PresetRow {
 struct PresetDlgData {
     DrapeHookApi api{};
     HWND lv     = nullptr;
-    HWND combo  = nullptr;
+    HWND combo  = nullptr;  // inline edit combo (shown over a Behavior cell)
     HWND status = nullptr;
-    int  intensity = 1;  // 0=Low 1=Medium 2=High
+    int  intensity = 1;     // 0=Low 1=Medium 2=High
+    int  editRow   = -1;    // row currently being edited inline, or -1
     std::vector<PresetRow> rows;
-
-    // GDI resources (created on init, freed on destroy).
-    HFONT  fTitle    = nullptr;  // bold 11pt header
-    HFONT  fSubtitle = nullptr;  // 8pt muted
-    HFONT  fBody     = nullptr;  // 9pt standard
-    HBRUSH brHeader  = nullptr;
-    HBRUSH brDialog  = nullptr;
 };
 
 // Returns the human-readable description for a quality level.
 static const char* QualityDesc(int level) {
     switch (level) {
-    case 0:  return "Fewer passes — fastest, good for a quick preview.";
-    case 2:  return "Extra passes — slowest, best for extreme body morphs.";
+    case 0:  return "Fewer passes - fastest, good for a quick preview.";
+    case 2:  return "Extra passes - slowest, best for extreme body morphs.";
     default: return "Balanced quality and speed (recommended).";
     }
 }
@@ -727,8 +710,41 @@ static void UpdatePresetStatus(PresetDlgData* d) {
     if (!d || !d->status) return;
     size_t n = d->rows.size();
     std::string s = std::to_string(n) + (n == 1 ? " mesh ready." : " meshes ready.");
-    s += "  Select a row to change its behavior.";
+    s += "  Click a Behavior cell to change it.";
     SetWindowTextA(d->status, s.c_str());
+}
+
+// Commit the inline edit combo back to the row, then hide it.
+static void CommitInlineEdit(PresetDlgData* d) {
+    if (!d || !d->combo || d->editRow < 0) return;
+    int sel = (int)SendMessageA(d->combo, CB_GETCURSEL, 0, 0);
+    if (sel >= 0 && d->editRow < (int)d->rows.size()) {
+        d->rows[d->editRow].preset = PresetFromComboIndex(sel);
+        ListView_SetItemText(d->lv, d->editRow, COL_PRESET_VALUE,
+                             const_cast<char*>(PresetLabel(d->rows[d->editRow].preset)));
+    }
+    ShowWindow(d->combo, SW_HIDE);
+    d->editRow = -1;
+    SetFocus(d->lv);
+}
+
+// Open the inline edit combo over the Behavior cell of `row`.
+static void BeginInlineEdit(PresetDlgData* d, int row) {
+    if (!d || !d->combo || row < 0 || row >= (int)d->rows.size()) return;
+    // Position over the Behavior subitem rectangle.
+    RECT rc{};
+    rc.top = COL_PRESET_VALUE;   // subitem index
+    rc.left = LVIR_BOUNDS;
+    if (!ListView_GetSubItemRect(d->lv, row, COL_PRESET_VALUE, LVIR_BOUNDS, &rc))
+        return;
+    MapWindowPoints(d->lv, GetParent(d->lv), (POINT*)&rc, 2);
+    d->editRow = row;
+    SendMessageA(d->combo, CB_SETCURSEL, ComboIndexForPreset(d->rows[row].preset), 0);
+    // Drop the list a bit taller than the cell so it's easy to use.
+    SetWindowPos(d->combo, HWND_TOP, rc.left, rc.top,
+                 rc.right - rc.left, 200, SWP_SHOWWINDOW);
+    SetFocus(d->combo);
+    SendMessageA(d->combo, CB_SHOWDROPDOWN, TRUE, 0);
 }
 
 static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
@@ -741,41 +757,23 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         SetWindowTextA(dlg, "Smart Conform");
 
         d->lv     = GetDlgItem(dlg, IDC_PRESET_LIST);
-        d->combo  = GetDlgItem(dlg, IDC_PRESET_COMBO);
+        d->combo  = GetDlgItem(dlg, IDC_EDIT_COMBO);
         d->status = GetDlgItem(dlg, IDC_PRESET_STATUS);
 
-        // ── Build GDI resources for the type hierarchy / surfaces ──────────
-        auto makeFont = [&](int pt, int weight) -> HFONT {
-            HDC hdc = GetDC(dlg);
-            int h = -MulDiv(pt, GetDeviceCaps(hdc, LOGPIXELSY), 72);
-            ReleaseDC(dlg, hdc);
-            return CreateFontA(h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        };
-        d->fTitle    = makeFont(13, FW_SEMIBOLD);
-        d->fSubtitle = makeFont(8,  FW_NORMAL);
-        d->fBody     = makeFont(9,  FW_NORMAL);
-        d->brHeader  = CreateSolidBrush(kColHeaderBg);
-        d->brDialog  = CreateSolidBrush(kColDialogBg);
-
-        // Apply fonts to the type-hierarchy controls.
-        SendMessageA(GetDlgItem(dlg, IDC_TITLE),       WM_SETFONT, (WPARAM)d->fTitle,    TRUE);
-        SendMessageA(GetDlgItem(dlg, IDC_SUBTITLE),    WM_SETFONT, (WPARAM)d->fSubtitle, TRUE);
-        SendMessageA(GetDlgItem(dlg, IDC_QUALITY_DESC),WM_SETFONT, (WPARAM)d->fSubtitle, TRUE);
-        SendMessageA(GetDlgItem(dlg, IDC_PRESET_STATUS),WM_SETFONT,(WPARAM)d->fSubtitle, TRUE);
-
-        SetWindowTextA(GetDlgItem(dlg, IDC_TITLE),    "Smart Conform");
         SetWindowTextA(GetDlgItem(dlg, IDC_SUBTITLE),
-                       "Set how each mesh should drape against the body morph.");
+                       "Set how each mesh should drape against the body morph. "
+                       "Click a Behavior cell to change it.");
 
         ListView_SetExtendedListViewStyle(d->lv,
-            LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        LVCOLUMNA c0{LVCF_TEXT | LVCF_WIDTH, 0, 268, const_cast<char*>("Mesh")};
-        LVCOLUMNA c1{LVCF_TEXT | LVCF_WIDTH, 0, 162, const_cast<char*>("Behavior")};
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        LVCOLUMNA c0{LVCF_TEXT | LVCF_WIDTH, 0, 244, const_cast<char*>("Mesh")};
+        LVCOLUMNA c1{LVCF_TEXT | LVCF_WIDTH, 0, 168, const_cast<char*>("Behavior")};
         ListView_InsertColumn(d->lv, COL_PRESET_SHAPE, &c0);
         ListView_InsertColumn(d->lv, COL_PRESET_VALUE, &c1);
+
+        // The inline edit combo is hidden until a cell is clicked.
         PopulatePresetCombo(d->combo);
+        ShowWindow(d->combo, SW_HIDE);
 
         // Intensity: default to Medium.
         d->intensity = 1;
@@ -806,68 +804,23 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         } else {
             ListView_SetItemState(d->lv, 0, LVIS_SELECTED | LVIS_FOCUSED,
                                   LVIS_SELECTED | LVIS_FOCUSED);
-            SendMessageA(d->combo, CB_SETCURSEL, ComboIndexForPreset(d->rows[0].preset), 0);
         }
         return TRUE;
     }
 
-    // ── Themed painting ────────────────────────────────────────────────────
-    case WM_CTLCOLORDLG:
-        return d && d->brDialog ? (INT_PTR)d->brDialog : FALSE;
-
-    case WM_CTLCOLORSTATIC: {
-        if (!d) break;
-        HDC hdc = (HDC)wp;
-        HWND ctl = (HWND)lp;
-        int cid = GetDlgCtrlID(ctl);
-        SetBkMode(hdc, TRANSPARENT);
-        if (cid == IDC_TITLE) {
-            SetTextColor(hdc, kColTitle);
-            SetBkColor(hdc, kColHeaderBg);
-            return (INT_PTR)(d->brHeader ? d->brHeader : d->brDialog);
-        }
-        if (cid == IDC_SUBTITLE) {
-            SetTextColor(hdc, kColSubtle);
-            SetBkColor(hdc, kColHeaderBg);
-            return (INT_PTR)(d->brHeader ? d->brHeader : d->brDialog);
-        }
-        if (cid == IDC_HEADER_BG)
-            return (INT_PTR)(d->brHeader ? d->brHeader : d->brDialog);
-        if (cid == IDC_QUALITY_DESC || cid == IDC_PRESET_STATUS) {
-            SetTextColor(hdc, kColSubtle);
-            return (INT_PTR)d->brDialog;
-        }
-        // group boxes, labels, radios → dialog surface
-        SetTextColor(hdc, kColTitle);
-        return (INT_PTR)d->brDialog;
-    }
-
-    case WM_CTLCOLORBTN:
-        return d && d->brDialog ? (INT_PTR)d->brDialog : FALSE;
-
-    case WM_DESTROY: {
-        if (d) {
-            if (d->fTitle)    DeleteObject(d->fTitle);
-            if (d->fSubtitle) DeleteObject(d->fSubtitle);
-            if (d->fBody)     DeleteObject(d->fBody);
-            if (d->brHeader)  DeleteObject(d->brHeader);
-            if (d->brDialog)  DeleteObject(d->brDialog);
-            d->fTitle = d->fSubtitle = d->fBody = nullptr;
-            d->brHeader = d->brDialog = nullptr;
-        }
-        break;
-    }
-
     case WM_NOTIFY: {
         auto* nm = reinterpret_cast<NMHDR*>(lp);
-        if (nm && nm->idFrom == IDC_PRESET_LIST && nm->code == LVN_ITEMCHANGED && d) {
-            auto* item = reinterpret_cast<NMLISTVIEW*>(lp);
-            if ((item->uChanged & LVIF_STATE) &&
-                (item->uNewState & LVIS_SELECTED) &&
-                item->iItem >= 0 && item->iItem < (int)d->rows.size()) {
-                SendMessageA(d->combo, CB_SETCURSEL,
-                             ComboIndexForPreset(d->rows[item->iItem].preset), 0);
-            }
+        if (!nm || !d) break;
+        // Click on the list: open the inline editor if the Behavior cell was hit.
+        if (nm->idFrom == IDC_PRESET_LIST && nm->code == NM_CLICK) {
+            auto* ia = reinterpret_cast<NMITEMACTIVATE*>(lp);
+            LVHITTESTINFO ht{};
+            ht.pt = ia->ptAction;
+            int row = ListView_SubItemHitTest(d->lv, &ht);
+            if (row >= 0 && ht.iSubItem == COL_PRESET_VALUE)
+                BeginInlineEdit(d, row);
+            else
+                CommitInlineEdit(d);
         }
         break;
     }
@@ -876,15 +829,12 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         WORD id   = LOWORD(wp);
         WORD code = HIWORD(wp);
 
-        if (id == IDC_PRESET_COMBO && code == CBN_SELCHANGE && d) {
-            int row = SelectedPresetRow(d->lv);
-            if (row >= 0 && row < (int)d->rows.size()) {
-                int comboIndex = (int)SendMessageA(d->combo, CB_GETCURSEL, 0, 0);
-                d->rows[row].preset = PresetFromComboIndex(comboIndex);
-                ListView_SetItemText(d->lv, row, COL_PRESET_VALUE,
-                                     const_cast<char*>(PresetLabel(d->rows[row].preset)));
+        // Inline edit combo: commit on selection, cancel/commit on close-up.
+        if (id == IDC_EDIT_COMBO && d) {
+            if (code == CBN_SELCHANGE || code == CBN_CLOSEUP) {
+                CommitInlineEdit(d);
+                return TRUE;
             }
-            return TRUE;
         }
 
         if ((id == IDC_INT_LOW || id == IDC_INT_MED || id == IDC_INT_HIGH) && d) {
@@ -894,15 +844,12 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         }
 
         if (id == IDC_AUTO_DETECT && d) {
+            CommitInlineEdit(d);
             for (int i = 0; i < (int)d->rows.size(); ++i) {
                 d->rows[i].preset = GuessPresetForShapeUi(d->rows[i].shape);
                 ListView_SetItemText(d->lv, i, COL_PRESET_VALUE,
                                      const_cast<char*>(PresetLabel(d->rows[i].preset)));
             }
-            int sel = SelectedPresetRow(d->lv);
-            if (sel >= 0 && sel < (int)d->rows.size())
-                SendMessageA(d->combo, CB_SETCURSEL,
-                             ComboIndexForPreset(d->rows[sel].preset), 0);
             return TRUE;
         }
 
@@ -935,92 +882,73 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
     InitCommonControlsEx(&icc);
 
     // ── Layout grid (dialog units) ────────────────────────────────────────
-    // A clear vertical rhythm: header strip → meshes group → quality group →
-    // status line → action bar. 8px gutter, content inset 12px.
-    const short DW = 396, DH = 332;
-    const short PAD = 12;           // outer content inset
-    const short CW  = DW - PAD * 2; // content width
+    // Native Windows look: standard dialog surface, group boxes for chunking,
+    // edit-in-place behavior column (no redundant editor row). Clear rhythm.
+    const short DW = 392, DH = 322;
+    const short PAD = 10;
+    const short CW  = DW - PAD * 2;
 
-    // Header strip (full-bleed light band with title + subtitle)
-    const short hdrH    = 40;
-    const short yTitle  = 8;
-    const short ySub    = 23;
+    const short ySub     = 8;                  // one-line instruction
+    const short yMeshGrp = ySub + 16;
+    const short meshGrpH = 170;
+    const short yList    = yMeshGrp + 13;
+    const short listH    = meshGrpH - 21;
 
-    // Meshes group
-    const short yMeshGrp = hdrH + 8;
-    const short meshGrpH = 158;
-    const short yList    = yMeshGrp + 14;
-    const short listH    = meshGrpH - 22;
+    const short yQualGrp  = yMeshGrp + meshGrpH + 8;
+    const short qualGrpH  = 42;
+    const short yRadio    = yQualGrp + 13;
+    const short yQualDesc = yQualGrp + 27;
 
-    // "Behavior" inline editor row (under the list, inside the group footer area)
-    const short yEditRow = yMeshGrp + meshGrpH + 8;
-    const short yBehLbl   = yEditRow + 3;
-    const short yCombo    = yEditRow;
-    const short yAutoBtn  = yEditRow;
-
-    // Quality group
-    const short yQualGrp = yEditRow + 24;
-    const short qualGrpH = 44;
-    const short yRadio   = yQualGrp + 14;
-    const short yQualDesc = yQualGrp + 28;
-
-    // Status + actions
-    const short yStatus  = yQualGrp + qualGrpH + 6;
-    const short yButtons = DH - 26;
+    const short yStatus  = yQualGrp + qualGrpH + 5;
+    const short yButtons = DH - 24;
 
     DlgBuilder b;
-    // header bg(1) title(1) subtitle(1) meshGrp(1) list(1) behLbl(1) combo(1)
-    // auto(1) qualGrp(1) 3 radios qualDesc(1) status(1) Conform(1) Cancel(1) = 16
-    const WORD nControls = 16;
+    // subtitle(1) meshGrp(1) list(1) editCombo(1) auto(1) qualGrp(1)
+    //   + 3 radios + qualDesc(1) status(1) Conform(1) Cancel(1) = 13
+    const WORD nControls = 13;
     b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_CAPTION | WS_SYSMENU | WS_POPUP);
     b.dw(0); b.w(nControls);
     b.w(0); b.w(0); b.w(DW); b.w(DH);
     b.w(0); b.w(0); b.str(L"Smart Conform");
     b.w(9); b.str(L"Segoe UI");
 
-    // ── Header strip ──────────────────────────────────────────────────────
-    // A full-width static behind the title gives the colored band.
-    b.control(SS_LEFT, 0, 0, DW, hdrH, IDC_HEADER_BG, L"STATIC", L"");
-    b.control(SS_LEFT | SS_NOPREFIX, PAD, yTitle, CW, 14, IDC_TITLE, L"STATIC",
-              L"Smart Conform");
+    // ── Instruction line ──────────────────────────────────────────────────
     b.control(SS_LEFT | SS_NOPREFIX, PAD, ySub, CW, 11, IDC_SUBTITLE, L"STATIC", L"");
 
     // ── Meshes group ──────────────────────────────────────────────────────
     b.control(BS_GROUPBOX, PAD, yMeshGrp, CW, meshGrpH, IDC_GRP_MESHES,
-              L"BUTTON", L"  Meshes  ");
+              L"BUTTON", L"Meshes");
     b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
-              PAD + 8, yList, CW - 16, listH, IDC_PRESET_LIST, L"SysListView32", L"");
-
-    // ── Behavior editor row (label + combo + auto-detect) ─────────────────
-    b.control(SS_LEFT | SS_CENTERIMAGE, PAD, yBehLbl, 52, 12, IDC_LBL_BEHAVIOR,
-              L"STATIC", L"Behavior:");
-    b.control(CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
-              PAD + 54, yCombo, 168, 120, IDC_PRESET_COMBO, L"COMBOBOX", L"");
+              PAD + 7, yList, CW - 14, listH, IDC_PRESET_LIST, L"SysListView32", L"");
+    // Inline edit combo — created hidden, positioned over a Behavior cell on click.
+    b.control(CBS_DROPDOWNLIST | WS_VSCROLL,
+              PAD + 7, yList, 160, 200, IDC_EDIT_COMBO, L"COMBOBOX", L"");
+    // Auto-detect button sits just under the list, right-aligned.
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              DW - PAD - 86, yAutoBtn, 86, 14, IDC_AUTO_DETECT, L"BUTTON",
-              L"Auto-detect all");
+              DW - PAD - 92, yMeshGrp + meshGrpH - 16, 84, 13,
+              IDC_AUTO_DETECT, L"BUTTON", L"Auto-detect all");
 
     // ── Quality group ─────────────────────────────────────────────────────
     b.control(BS_GROUPBOX, PAD, yQualGrp, CW, qualGrpH, IDC_GRP_QUALITY,
-              L"BUTTON", L"  Quality  ");
+              L"BUTTON", L"Quality");
     b.control(BS_AUTORADIOBUTTON | WS_TABSTOP | WS_GROUP,
-              PAD + 10, yRadio, 64, 12, IDC_INT_LOW,  L"BUTTON", L"Low");
+              PAD + 10, yRadio, 60, 11, IDC_INT_LOW,  L"BUTTON", L"Low");
     b.control(BS_AUTORADIOBUTTON | WS_TABSTOP,
-              PAD + 80, yRadio, 78, 12, IDC_INT_MED,  L"BUTTON", L"Medium");
+              PAD + 76, yRadio, 74, 11, IDC_INT_MED,  L"BUTTON", L"Medium");
     b.control(BS_AUTORADIOBUTTON | WS_TABSTOP,
-              PAD + 164, yRadio, 64, 12, IDC_INT_HIGH, L"BUTTON", L"High");
-    b.control(SS_LEFT | SS_NOPREFIX, PAD + 10, yQualDesc, CW - 20, 11,
+              PAD + 156, yRadio, 60, 11, IDC_INT_HIGH, L"BUTTON", L"High");
+    b.control(SS_LEFT | SS_NOPREFIX, PAD + 10, yQualDesc, CW - 20, 10,
               IDC_QUALITY_DESC, L"STATIC", L"");
 
     // ── Status line ───────────────────────────────────────────────────────
-    b.control(SS_LEFT | SS_NOPREFIX, PAD, yStatus, CW, 11,
+    b.control(SS_LEFT | SS_NOPREFIX, PAD, yStatus, CW - 4, 10,
               IDC_PRESET_STATUS, L"STATIC", L"");
 
     // ── Action bar ────────────────────────────────────────────────────────
     b.control(BS_DEFPUSHBUTTON | WS_TABSTOP,
-              DW - PAD - 158, yButtons, 86, 16, IDOK, L"BUTTON", L"Conform");
+              DW - PAD - 152, yButtons, 84, 15, IDOK, L"BUTTON", L"Conform");
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              DW - PAD - 66, yButtons, 66, 16, IDCANCEL, L"BUTTON", L"Cancel");
+              DW - PAD - 64, yButtons, 64, 15, IDCANCEL, L"BUTTON", L"Cancel");
 
     PresetDlgData data;
     data.api = api;

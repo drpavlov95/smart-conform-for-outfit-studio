@@ -3718,6 +3718,57 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // ── Rigid-island pass (Rigid Accessory / Rigid Armor) ────────────────────
+    // A medallion, buckle or plate should TRANSLATE with the morphing body but
+    // keep its own shape — vanilla conform deforms it vertex-by-vertex (the
+    // medallion bulges with the breast under it). Detect connected components and
+    // replace each island's per-vertex motion with a single rigid translation:
+    // the average (supportVert - baseVert) over the island. Shape is preserved
+    // exactly; the piece just rides the body.
+    int normPreset = NormalizePreset(preset);
+    if (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
+        normPreset == DRAPE_PRESET_RIGID_ARMOR) {
+        std::vector<std::vector<uint32_t>> adjR(n);
+        for (const auto& e : useEdges) {
+            if (e.a < n && e.b < n) {
+                adjR[e.a].push_back(e.b);
+                adjR[e.b].push_back(e.a);
+            }
+        }
+        std::vector<int> island(n, -1);
+        int nIsl = 0;
+        for (size_t s = 0; s < n; ++s) {
+            if (island[s] >= 0) continue;
+            std::vector<uint32_t> q{(uint32_t)s};
+            island[s] = nIsl;
+            for (size_t qi = 0; qi < q.size(); ++qi)
+                for (uint32_t nb : adjR[q[qi]])
+                    if (island[nb] < 0) { island[nb] = nIsl; q.push_back(nb); }
+            ++nIsl;
+        }
+        // Average conform translation per island (over verts the slider touched).
+        std::vector<Vec3> islandShift((size_t)nIsl, Vec3{0,0,0});
+        std::vector<int>  islandCount((size_t)nIsl, 0);
+        for (size_t i = 0; i < n; ++i) {
+            // Only verts that vanilla actually moved contribute to the rigid shift.
+            Vec3 raw = DiffAt(rawDiff, (uint16_t)i);
+            if (Len2(raw) < 1.0e-8f) continue;
+            int id = island[i];
+            islandShift[(size_t)id] = Add(islandShift[(size_t)id], Sub(supportVerts[i], baseVerts[i]));
+            ++islandCount[(size_t)id];
+        }
+        for (int id = 0; id < nIsl; ++id)
+            if (islandCount[(size_t)id] > 0)
+                islandShift[(size_t)id] = Scale(islandShift[(size_t)id], 1.0f / (float)islandCount[(size_t)id]);
+        // Apply the rigid shift: base position + island translation (shape kept).
+        for (size_t i = 0; i < n; ++i) {
+            int id = island[i];
+            if (islandCount[(size_t)id] > 0)
+                finalVerts[i] = Add(baseVerts[i], islandShift[(size_t)id]);
+        }
+        stats.collisionAdjusted += nIsl;  // reuse a counter to surface island count
+    }
+
     // Write only non-zero diffs (matches BodySlide convention).
     outDiff.clear();
     outDiff.reserve(rawDiff.size());
