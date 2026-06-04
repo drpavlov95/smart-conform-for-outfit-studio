@@ -1849,10 +1849,10 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.clothMaxDrop = 6.0f;            // small clean drop, no melt
         p.stretchStiffness = 0.60f;       // stiffer → keeps structure, less melt
         p.collisionStiffness = 0.85f;     // keep cloth outside the body
-        // bodyClearance is used by BOTH collideVertex (Verlet collision) and the
-        // body-shell envelope. 0.50 keeps cloth off the body without pushing too
-        // wide (the envelope adds clearance on top of the body shell radius).
-        p.bodyClearance = 0.50f;
+        // bodyClearance: how far off the real body surface the cloth sits.
+        // BVH pushes each vert to exactly this distance from the nearest surface.
+        // 0.65 eliminates the small side clips without visibly gapping the cloth.
+        p.bodyClearance = 0.65f;
         p.bendingStiffness = 0.08f;       // light: smooths folds without melting
         p.bendingIterations = 1;
         p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
@@ -3447,7 +3447,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
-        for (int it = 0; it < 6; ++it) {
+        for (int it = 0; it < 9; ++it) {   // more passes = smoother hem
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3459,7 +3459,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 for (size_t i = 0; i < n; ++i) {
                     if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
                     Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
-                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.38f));
                 }
             }
             // 3D collision push-out (real surface). Runs LAST so it is the final state.
