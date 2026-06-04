@@ -2083,9 +2083,7 @@ static void ApplyBodyEnvelopeDrapePass(
         return std::max(0, std::min(ZB - 1, zb));
     };
 
-    // Top of the drape region: highest Z among drape verts. Verts at the top
-    // of the saia (next to the belt) are pinned (m=0) so they stay at the
-    // conformed Z; free verts drop below them. The max Z is always the belt.
+    // Top of the drape region: highest Z among drape verts (the belt/waist).
     int drapeTopZb = 0;
     bool any = false;
     for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
@@ -2095,14 +2093,23 @@ static void ApplyBodyEnvelopeDrapePass(
     }
     if (!any) return;
 
-    // Per angular bin: envelope scans DOWN from drapeTopZb.
+    // CRITICAL: seed the running max ABOVE the belt. On a heavy body the belly
+    // (and bust) overhang the belt and project further out than the waist; the
+    // loose cloth must hang from THAT protrusion and fall vertical below it, not
+    // tuck back in under the overhang. Seeding only from the skirt top (belt)
+    // makes the envelope blind to the belly above it → the skirt follows the body
+    // inward below the belly ("volta pra trás"). Extend the seed up by ~18% of
+    // the body height so the belly/lower-bust protrusion is captured.
+    int seedTopZb = std::min(ZB - 1, drapeTopZb + (int)(0.18f * (float)ZB));
+
+    // Per angular bin: envelope scans DOWN from seedTopZb (above the belly).
     // envelopeR = max(bodyR, prev_envelopeR - returnRate * dzPerBin).
     // returnRate=0  → strict column (never narrows below the widest point).
     // returnRate>0  → slow taper (hangs gradually inward after a protrusion).
     std::vector<float> envR((size_t)RB * ZB, -1.0f);
     for (int rb = 0; rb < RB; ++rb) {
         float runEnv = -1.0f;
-        for (int zb = drapeTopZb; zb >= 0; --zb) {
+        for (int zb = seedTopZb; zb >= 0; --zb) {
             float bodyR = shell.morphR[(size_t)zb * RB + rb];
             if (bodyR < 0.0f) bodyR = 0.0f;
             if (runEnv < 0.0f) {
@@ -2117,7 +2124,7 @@ static void ApplyBodyEnvelopeDrapePass(
     // Light angular smoothing (wrap-around) to avoid per-bin facets.
     for (int pass = 0; pass < 2; ++pass) {
         std::vector<float> tmp = envR;
-        for (int zb = 0; zb <= drapeTopZb; ++zb) {
+        for (int zb = 0; zb <= seedTopZb; ++zb) {
             for (int rb = 0; rb < RB; ++rb) {
                 int rbm = (rb - 1 + RB) % RB, rbp = (rb + 1) % RB;
                 float a = envR[(size_t)zb * RB + rbm];
