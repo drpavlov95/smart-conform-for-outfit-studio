@@ -2067,6 +2067,14 @@ static void ApplyBodyEnvelopeDrapePass(
     float returnRate,          // how fast envelope can return inward per unit Z
                                // 0 = strict column (never narrows)
                                // 0.01-0.02 = loose drape (slow taper below belly)
+    bool twoSided,             // false: only push verts that are INSIDE out to the
+                               //   floor (one-sided minimum).
+                               // true: also pull OUTWARD bumps in to the envelope
+                               //   surface → flattens the cloth onto the smooth
+                               //   monotonic envelope. This is the radial collision
+                               //   AND the de-jagger in one; the result is the
+                               //   monotonic surface, so it still obeys the loose
+                               //   rule (envR is >= body and never decreases down).
     StaticSolveStats& stats)
 {
     if (!shell.valid || shell.morphR.empty()) return;
@@ -2148,7 +2156,9 @@ static void ApplyBodyEnvelopeDrapePass(
         float target = envR[(size_t)zb * RB + rb];
         if (target < 0.0f) continue;
         target += clearance;
-        if (r < target - 0.01f) {
+        bool pushOut = r < target - 0.01f;
+        bool pullIn  = twoSided && r > target + 0.01f;
+        if (pushOut || pullIn) {
             float newR = r + (target - r) * strength;
             finalVerts[i].x = g_refCenterX + dirX * newR;
             finalVerts[i].y = g_refCenterY + dirY * newR;
@@ -2485,54 +2495,47 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     static const std::vector<EdgeConstraint> kNoEdges;
     const std::vector<EdgeConstraint>& useEdges = edges ? *edges : kNoEdges;
 
-    // ── Per-vertex region classification ──────────────────────────────────
-    // drapeEl[i]: how much this vertex participates in gravity / vertical-
-    // envelope / body-column drape passes.
-    //   0 = upper body / sleeve → anchor strongly to vanilla conform.
-    //   1 = lower drape panel (skirt/hem/hip) → gravity + envelope apply.
+    // ── Per-vertex region classification (BONE-WEIGHT driven) ──────────────
+    // drapeEl[i]: how much this vertex participates in gravity / envelope drape.
+    //   0 = anchor (bodice, collar, sleeve) → follows vanilla conform.
+    //   1 = drape panel (skirt) → gravity + envelope apply.
     //
-    // Rules (based on bone weights + Z position):
-    //   • Upper half (normZ ≥ 0.52): always near-zero drape, regardless of
-    //     bone weights. Collar, chest, shoulder, back — all anchored.
-    //   • Arm-influenced verts (high arm/hand bone weight): near-zero drape
-    //     even in lower half (sleeves run through waist in some outfits).
-    //   • Lower half + pelvis/hip dominant + low arm: drape-eligible.
-    //   • Low-follow verts in lower half get partial drape via distance weight.
+    // Driven by which body bones the outfit vertex is skinned to — far more
+    // robust than a fixed Z line, because the skeleton is standardized across
+    // CBBE/3BA bodies (NPC Pelvis, NPC L Thigh, NPC Spine, ...):
+    //   • pelvis + leg (thigh/calf) dominant → SKIRT → drape.
+    //   • spine / clavicle / breast (the `torso` group) dominant → BODICE → anchor.
+    //   • arm / hand / foot dominant → SLEEVE / CUFF → anchor (and these break the
+    //     central-axis radial model, so they must stay out of the drape passes).
+    // Z is kept only as a fallback when the shape has no usable skin weights.
     float bodyZRange = (g_refMaxZ > g_refMinZ + 1.0f)
         ? (g_refMaxZ - g_refMinZ) : 1.0f;
 
     std::vector<float> drapeEl(n, 0.0f);
     for (size_t i = 0; i < n; ++i) {
-        float normZ = (baseVerts[i].z - g_refMinZ) / bodyZRange;
-        normZ = ClampRange(normZ, 0.0f, 1.0f);
-
-        if (normZ >= 0.52f) {
-            drapeEl[i] = 0.0f;  // upper half: never drape
-            continue;
-        }
-
-        float armInfl   = 0.0f;
-        float pelvisInfl = 0.0f;
-        if (profiles && i < profiles->size()) {
+        const bool haveBones = profiles && i < profiles->size();
+        if (haveBones) {
             const auto& bp = (*profiles)[i];
-            armInfl    = Clamp01(bp.arm + bp.handFoot * 0.5f);
-            pelvisInfl = Clamp01(bp.pelvis + bp.leg * 0.25f);
-        }
+            float lower = Clamp01(bp.pelvis + bp.leg);        // skirt bones
+            float upper = Clamp01(bp.torso);                  // bodice (spine/etc.)
+            float limb  = Clamp01(bp.arm + bp.handFoot);      // sleeve/cuff
+            float total = lower + upper + limb;
 
-        // Suppress drape for arm-influenced verts (sleeves through hip area)
-        float armSuppression = Clamp01(armInfl * 1.5f);
-        // Pelvis+hip dominance → drape eligible
-        float boneDrape = Clamp01(pelvisInfl * (1.0f - armSuppression));
-        // Low-follow (far from body) in lower half → partial drape
-        float distDrape = Clamp01((1.0f - follow[i]) * 0.55f);
-        drapeEl[i] = std::max(boneDrape, distDrape * (1.0f - armSuppression));
-        
-        // For loose draped physics, FORCE minimum drapeEl on all non-arm verts:
-        // Without this, high-follow (anchored) verts get drapeEl=0 and cloth doesn't simulate.
-        // Physics drape needs to move the cloth, so even "anchored to vanilla" verts 
-        // must participate in gravity/stretch to form cloth folds.
-        if (params.physicsDrape && drapeEl[i] < 0.25f && armInfl < 0.4f) {
-            drapeEl[i] = 0.40f;  // Force eligible for gravity/stretch
+            if (total < 0.05f) {
+                // No meaningful skin weight → Z fallback.
+                float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+                drapeEl[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
+            } else {
+                // Drape = lower-body dominance, killed by sleeve, reduced by how
+                // much the bodice (upper torso) shares the vertex.
+                float sleeveSuppress = Clamp01(limb * 1.6f);
+                float d = lower * (1.0f - sleeveSuppress);
+                drapeEl[i] = Clamp01(d);
+            }
+        } else {
+            // No profile at all → Z fallback.
+            float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+            drapeEl[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
         }
     }
 
@@ -3147,18 +3150,21 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.collisionAdjusted;
     }
 
-    // ── Finishing: interleave SMOOTH + monotonic ENVELOPE (verletCloth) ────
-    // The hardcoded LOOSE rule (ApplyBodyEnvelopeDrapePass) enforces the radial
-    // envelope; Laplacian smoothing evens out the low-poly facets. Done alone,
-    // smoothing-then-envelope leaves jaggies (envelope moves some verts, not
-    // others, with no smooth after) and envelope-then-smoothing undoes the rule.
-    // Interleaving converges to a surface that is BOTH smooth AND obeys the rule,
-    // because the envelope only ever pushes outward (re-imposing the rule each
-    // round) and the smooth removes the facets the projection leaves.
+    // ── Finishing: SMOOTH + two-sided monotonic ENVELOPE (verletCloth) ─────
+    // Why the old finish stayed jagged (user's question): the envelope was a
+    // one-sided floor (only pushed INSIDE verts out), so Verlet's outward bumps
+    // survived; and collideVertex ran AFTER it each round, re-faceting to the
+    // coarse 48-bin body shell — overriding the smoothing. Fix:
+    //  1. Envelope is now TWO-SIDED: it pulls outward bumps IN to the smooth
+    //     monotonic surface too, so it both de-jags and obeys the rule. (The
+    //     envelope radius is >= body radius, so it IS the collision — no separate
+    //     collideVertex needed, hence no 48-bin re-faceting.)
+    //  2. The loop ENDS with the envelope, so the smooth monotonic surface is the
+    //     final radial state, not the faceted collide.
     if (params.verletCloth && bodyShell && bodyShell->valid) {
-        for (int it = 0; it < 5; ++it) {
-            // Laplacian smooth: gentle (0.18) to avoid pulling side-panel verts
-            // inward past the body surface into concavities (waist, inner thigh).
+        for (int it = 0; it < 6; ++it) {
+            // Laplacian smooth (Z + tangential mostly; radial gets re-set by the
+            // envelope right after, so a stronger 0.30 is safe here).
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -3170,17 +3176,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 for (size_t i = 0; i < n; ++i) {
                     if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
                     Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
-                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.18f));
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
                 }
             }
-            // Envelope pushes outward to monotonic floor. Then collideVertex
-            // catches any vert the smooth pulled into a body concavity whose
-            // local angular envelope floor is too low to detect.
+            // Two-sided envelope: radius := monotonic envelope (de-jags + collides
+            // + obeys the loose rule). Runs LAST so it is the final radial state.
             ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
                                        params.bodyClearance, 1.0f,
-                                       params.drapeReturnRate, stats);
-            for (size_t i = 0; i < n; ++i)
-                if (drapeEl[i] >= 0.20f) collideVertex(i, 1.0f);
+                                       params.drapeReturnRate, /*twoSided=*/true, stats);
         }
     }
 
