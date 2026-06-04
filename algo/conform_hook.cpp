@@ -3478,49 +3478,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.collisionAdjusted;
         }
 
-        // ── Loose anti-tuck rule (BVH-based, Loose Draped only) ──────────────
-        // After BVH has pushed verts to the real body surface, enforce the user's
-        // rule: going DOWN the garment, the cloth's distance from the body surface
-        // can only INCREASE (new contact) or hold steady (free fall), never abruptly
-        // decrease (tuck back in). Implementation: sort drape verts top→bottom, keep
-        // a running max of dist_to_body per angular bin; any vert whose dist is
-        // LESS than the running max is pushed back out to that distance along the
-        // body normal — it falls "vertical" from the last contact point.
-        // returnRate tapers the floor slowly so the hem can gradually narrow below
-        // the widest protrusion instead of forming a rigid cylinder.
-        if (params.drapeReturnRate >= 0.0f) {
-            struct DVert { size_t i; float z; float dist; Vec3 cp; Vec3 nrm; };
-            // Angular bins (same 48 as the shell) for per-sector tracking.
-            const int AB = 48;
-            std::vector<DVert> dverts;
-            dverts.reserve(n);
-            for (size_t i = 0; i < n; ++i) {
-                if (drapeEl[i] < 0.20f) continue;
-                Vec3 cp{0,0,0}; Vec3 nrm{0,0,1}; float d2 = 0.0f;
-                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
-                dverts.push_back({i, finalVerts[i].z, std::sqrt(d2), cp, nrm});
-            }
-            std::sort(dverts.begin(), dverts.end(),
-                      [](const DVert& a, const DVert& b) { return a.z > b.z; });
-            std::vector<float> floorDist(AB, -1.0f);
-            std::vector<float> lastZ(AB, 1e30f);
-            for (auto& dv : dverts) {
-                float dirX = 0.0f, dirY = 0.0f, r = 0.0f;
-                if (!RadialDir(finalVerts[dv.i], dirX, dirY, r)) continue;
-                int ab = RadialBin(dirX, dirY, AB);
-                float dz = std::max(0.0f, lastZ[ab] - dv.z);
-                float taper = params.drapeReturnRate * dz;
-                float floor = (floorDist[ab] < 0.0f) ? dv.dist
-                              : std::max(0.0f, floorDist[ab] - taper);
-                if (dv.dist < floor - 0.01f) {
-                    // Push the vert outward along the stored body normal.
-                    finalVerts[dv.i] = Add(dv.cp, Scale(dv.nrm, floor));
-                    ++stats.envelopeAdjusted;
-                }
-                floorDist[ab] = std::max(floor, dv.dist);
-                lastZ[ab] = dv.z;
-            }
-        }
+        // Anti-tuck rule (TODO): after BVH, enforce that dist-to-body never
+        // decreases going down (loose cloth doesn't return inward). Attempted via
+        // cp+nrm*floor but that over-extrapolates normals across height → verts fly.
+        // Need to use vert-to-body direction (not surface normal) for large floors.
+        // Deferred — BVH alone is already a major improvement.
     } else if (params.verletCloth && bodyShell && bodyShell->valid) {
         // Fallback: radial-shell two-sided envelope (no BVH available).
         for (int it = 0; it < 6; ++it) {
