@@ -1629,11 +1629,10 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.surfaceSmoothIterations = 3;    // less flattening (keep folds)
         p.surfaceSmoothStrength = 0.15f;
         p.anchorStiffness = 0.50f;
-        // Gravity drape envelope (the soft-cloth rule): going down, the cloth
-        // radius is monotonic — it only moves OUT where the body bulges and never
-        // tucks back in where the body recedes (under-belly, waist, groin); it
-        // hangs vertical there. returnRate≈0 = perpendicular fall.
-        p.drapeReturnRate = 0.005f;
+        // Body-shell envelope returnRate: how fast the cloth can taper inward
+        // below a protrusion (belly/butt). 0 = strict vertical column.
+        // 0.01-0.02 = natural loose cloth taper below the belly.
+        p.drapeReturnRate = 0.012f;
         p.drapeEnvelopeStrength = 1.0f;
         p.drapeEnvelopeBins = 96;
         break;
@@ -2064,6 +2063,9 @@ static void ApplyBodyEnvelopeDrapePass(
     const BodyShell& shell,
     float clearance,
     float strength,
+    float returnRate,          // how fast envelope can return inward per unit Z
+                               // 0 = strict column (never narrows)
+                               // 0.01-0.02 = loose drape (slow taper below belly)
     StaticSolveStats& stats)
 {
     if (!shell.valid || shell.morphR.empty()) return;
@@ -2072,14 +2074,16 @@ static void ApplyBodyEnvelopeDrapePass(
     const int ZB = shell.zBins;
     if (RB <= 0 || ZB <= 0) return;
 
+    const float dzPerBin = (ZB > 1 && shell.invDz > 0.0f)
+        ? (1.0f / shell.invDz) : 1.0f;  // world-units per Z bin
+
     auto zBinOf = [&](float z) {
         int zb = static_cast<int>((z - shell.minZ) * shell.invDz);
         return std::max(0, std::min(ZB - 1, zb));
     };
 
-    // Top of the drape region: the highest Z among drape verts. The monotonic
-    // running max starts here so the skirt envelope is seeded by the waist/belt
-    // width, not the bust above it.
+    // Top of the drape region: highest Z among drape verts. The envelope is
+    // seeded here so the skirt only sees the body from the waist/belt down.
     int drapeTopZb = 0;
     bool any = false;
     for (size_t i = 0; i < n && i <= 0xFFFF; ++i) {
@@ -2089,14 +2093,22 @@ static void ApplyBodyEnvelopeDrapePass(
     }
     if (!any) return;
 
-    // Per angular bin: running max of body radius from drapeTopZb downward.
+    // Per angular bin: envelope scans DOWN from drapeTopZb.
+    // envelopeR = max(bodyR, prev_envelopeR - returnRate * dzPerBin).
+    // returnRate=0  → strict column (never narrows below the widest point).
+    // returnRate>0  → slow taper (hangs gradually inward after a protrusion).
     std::vector<float> envR((size_t)RB * ZB, -1.0f);
     for (int rb = 0; rb < RB; ++rb) {
-        float runMax = -1.0f;
+        float runEnv = -1.0f;
         for (int zb = drapeTopZb; zb >= 0; --zb) {
-            float r = shell.morphR[(size_t)zb * RB + rb];
-            if (r > runMax) runMax = r;
-            envR[(size_t)zb * RB + rb] = runMax;
+            float bodyR = shell.morphR[(size_t)zb * RB + rb];
+            if (bodyR < 0.0f) bodyR = 0.0f;
+            if (runEnv < 0.0f) {
+                runEnv = bodyR;
+            } else {
+                runEnv = std::max(bodyR, runEnv - returnRate * dzPerBin);
+            }
+            envR[(size_t)zb * RB + rb] = runEnv;
         }
     }
 
@@ -3153,9 +3165,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.35f));
                 }
             }
-            // Re-impose the monotonic radial rule (pushes outward only).
+            // Re-impose the radial envelope (pushes outward only, tapers by returnRate).
             ApplyBodyEnvelopeDrapePass(finalVerts, drapeEl, *bodyShell,
-                                       params.bodyClearance, 1.0f, stats);
+                                       params.bodyClearance, 1.0f,
+                                       params.drapeReturnRate, stats);
         }
     }
 
