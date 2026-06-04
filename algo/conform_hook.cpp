@@ -3565,6 +3565,21 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // ── Final anti-clip pass (all verts, verletCloth + BVH) ──────────────────
+    // Anchored verts (drapeEl < 0.20) return to supportVerts (vanilla conform),
+    // which can be inside the morphed body — they're never touched by the drape
+    // collision. A small-clearance BVH push on every vert catches these without
+    // disturbing verts that are already correctly positioned outside the body.
+    // Clearance is intentionally smaller (0.15) than bodyClearance so it only
+    // fixes real clips without pushing fitted/belted pieces off the body visibly.
+    if (params.verletCloth && bodyBVH && bodyBVH->valid) {
+        for (size_t i = 0; i < n; ++i) {
+            Vec3 target = finalVerts[i];
+            if (BVHCollideVertex(*bodyBVH, target, 0.15f))
+                finalVerts[i] = target;
+        }
+    }
+
     // Write only non-zero diffs (matches BodySlide convention).
     outDiff.clear();
     outDiff.reserve(rawDiff.size());
