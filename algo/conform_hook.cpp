@@ -2955,7 +2955,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // islandRigid[id]: this island is a rigid plate/accessory → translate only,
         // no drape, used later by the rigid-island pass even under Loose Draped.
         std::vector<uint8_t> islandRigid((size_t)numIslands, 0);
-        const int kSmallIsland = 120;  // verts; below this + flat → accessory
+
+        // Largest island vert count → used to gate "small" relative to the mesh.
+        int maxIslandSize = 1;
+        for (int id = 0; id < numIslands; ++id)
+            maxIslandSize = std::max(maxIslandSize, islandSize[(size_t)id]);
 
         for (int id = 0; id < numIslands; ++id) {
             const auto& ip = iprof[(size_t)id];
@@ -2969,13 +2973,22 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             float skirtnss  = ip.pelvis * ip.leg;
             float beltnss   = ip.pelvis * ip.torso * (1.0f - ip.leg);
             float sleevenss = ip.arm;
+            float drapeWeight = ip.pelvis + ip.leg;   // skirt/robe skin weight
 
-            // 1) Flat plate / trim / small accessory → RIGID (translate, keep shape).
-            //    Geometry alone is decisive here (medallion, buckle, belt plate,
-            //    chain link). flatness<0.20 = strongly anisotropic (a thin slab).
-            if ((islandSize[(size_t)id] < kSmallIsland && flatness < 0.30f) ||
-                (flatness < 0.18f && maxExt < 0.45f) ||
-                maxExt < 0.10f) {
+            // 1) RIGID plate / accessory → translate, keep shape. Must be ALL of:
+            //    • SMALL: few verts both absolutely and relative to the biggest
+            //      island (a cloth panel is large; a medallion/buckle is tiny).
+            //    • COMPACT: doesn't span much of the mesh (maxExt small).
+            //    • NOT cloth: little pelvis/leg skin weight (a skirt panel is
+            //      thin/flat too, so flatness alone is NOT enough — the giveaway
+            //      is that a panel carries skirt bone weight and a plate does not).
+            //    This conservative gate avoids rigidifying skirt panels (the white
+            //    slab bug: a large flat dress panel was being translated as a block).
+            bool small   = islandSize[(size_t)id] < 250 &&
+                           islandSize[(size_t)id] < maxIslandSize / 4;
+            bool compact = maxExt < 0.28f;
+            bool notCloth = drapeWeight < 0.20f;
+            if (small && compact && notCloth) {
                 islandClear[(size_t)id] = kAccessoryClear;
                 islandRigid[(size_t)id] = 1;
                 continue;
