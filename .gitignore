@@ -4,3 +4,4 @@ dist/*.exe
 *.user
 .vs/
 reference/
+reference/tmp/

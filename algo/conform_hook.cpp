@@ -38,6 +38,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -1846,18 +1847,22 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // melt the hem with uneven vertical sag.
         p.verletCloth = true;
         p.collisionStiffness = 0.85f;
-        p.bodyClearance = 0.65f;
-        p.bendingStiffness = 0.08f;
-        p.bendingIterations = 1;
-        p.surfaceSmoothIterations = 3;
-        p.surfaceSmoothStrength = 0.15f;
+        // Tuned drape (2026-06-05): moderate values — visibly looser than the body
+        // (clearance 0.9) with a real but bounded sag. gravity is PER-SUBSTEP and
+        // there are ~50 substeps, so keep it small (0.06 × 50 ≈ 3 units of pull);
+        // clothMaxDrop bounds the total sag so the hem can't melt/tear.
+        p.bodyClearance = 0.90f;       // looser than 0.65, not the 2.0 overdrive
+        p.bendingStiffness = 0.10f;    // a touch stiffer → fewer jagged folds
+        p.bendingIterations = 2;
+        p.surfaceSmoothIterations = 4; // extra smoothing → less jagged hem
+        p.surfaceSmoothStrength = 0.18f;
         p.anchorStiffness = 0.50f;
-        p.drapeReturnRate = 0.012f;
+        p.drapeReturnRate = 0.028f;
         p.drapeEnvelopeStrength = 1.0f;
         p.drapeEnvelopeBins = 96;
-        p.gravity = 0.12f;
-        p.clothMaxDrop = 6.0f;
-        p.stretchStiffness = 0.60f;
+        p.gravity = 0.07f;             // per-substep; ×50 ≈ 3.5 units total sag
+        p.clothMaxDrop = 8.0f;         // bounded sag — prevents melt/tear at hem
+        p.stretchStiffness = 0.75f;    // stiffer cloth → resists tearing
         // Processing intensity: Low=faster/fewer passes, Medium=default,
         // High=extra iterations for difficult extreme morphs.
         switch (g_processingIntensity.load(std::memory_order_relaxed)) {
@@ -2801,73 +2806,35 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     static const std::vector<EdgeConstraint> kNoEdges;
     const std::vector<EdgeConstraint>& useEdges = edges ? *edges : kNoEdges;
 
-    // ── Per-vertex region classification (BONE-WEIGHT driven) ──────────────
-    // drapeEl[i]: how much this vertex participates in gravity / envelope drape.
-    //   0 = anchor (bodice, collar, sleeve) → follows vanilla conform.
-    //   1 = drape panel (skirt) → gravity + envelope apply.
+    // ════════════════════════════════════════════════════════════════════════
+    // UNIFIED VERTEX CLASSIFICATION
+    // ════════════════════════════════════════════════════════════════════════
+    // ONE pass decides each vertex's behavior. Everything downstream (invMass,
+    // anchorWeight, vertClearance, gravity participation) derives from a single
+    // continuous value:
     //
-    // Driven by which body bones the outfit vertex is skinned to — far more
-    // robust than a fixed Z line, because the skeleton is standardized across
-    // CBBE/3BA bodies (NPC Pelvis, NPC L Thigh, NPC Spine, ...):
-    //   • pelvis + leg (thigh/calf) dominant → SKIRT → drape.
-    //   • spine / clavicle / breast (the `torso` group) dominant → BODICE → anchor.
-    //   • arm / hand / foot dominant → SLEEVE / CUFF → anchor (and these break the
-    //     central-axis radial model, so they must stay out of the drape passes).
-    // Z is kept only as a fallback when the shape has no usable skin weights.
+    //   drapeAmount[i] ∈ [0,1] — how much this vertex behaves like free-hanging
+    //                            cloth vs. anchored-to-body.
+    //     ~0.0  → anchored: bodice/collar/sleeve/cuff. Follows vanilla conform,
+    //             stays fitted to the body, no gravity.
+    //     ~1.0  → free drape: skirt/robe panel. Gravity + collision determine it.
+    //
+    // This REPLACES the three previously-conflicting systems (the old drapeEl
+    // bone formula, the island-clearance pass, and the anchor-boost loop) that
+    // computed contradictory labels from the same bone weights. See the memory
+    // note project-classification-architecture for the rationale.
+    //
+    // Key correction: the integrated belt drapes like cloth (it must NOT be
+    // frozen as anchor just because it carries waist/torso weight). drapeAmount
+    // therefore counts pelvis + leg + a share of the LOWER torso (waistline), so
+    // a waist band hangs instead of clinging. Sleeves/arms still suppress drape.
     float bodyZRange = (g_refMaxZ > g_refMinZ + 1.0f)
         ? (g_refMaxZ - g_refMinZ) : 1.0f;
 
-    std::vector<float> drapeEl(n, 0.0f);
-    for (size_t i = 0; i < n; ++i) {
-        const bool haveBones = profiles && i < profiles->size();
-        if (haveBones) {
-            const auto& bp = (*profiles)[i];
-            float lower = Clamp01(bp.pelvis + bp.leg);        // skirt bones
-            float upper = Clamp01(bp.torso);                  // bodice (spine/etc.)
-            float limb  = Clamp01(bp.arm + bp.handFoot);      // sleeve/cuff
-            float total = lower + upper + limb;
-
-            if (total < 0.05f) {
-                // No meaningful skin weight → Z fallback.
-                float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
-                drapeEl[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
-            } else {
-                // Drape = lower-body dominance, killed by sleeve, reduced by how
-                // much the bodice (upper torso) shares the vertex.
-                float sleeveSuppress = Clamp01(limb * 1.6f);
-                float d = lower * (1.0f - sleeveSuppress);
-                drapeEl[i] = Clamp01(d);
-            }
-        } else {
-            // No profile at all → Z fallback.
-            float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
-            drapeEl[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
-        }
-    }
-
-    // Count eligible and tally stats
-    for (size_t i = 0; i < n; ++i) {
-        if (drapeEl[i] > 0.25f) ++stats.drapeEligibleVerts;
-    }
-
-    // ── Per-island clearance (connected-component classification) ───────────
-    // Problem: belt and skirt can be SEPARATE ISLANDS in the same mesh. Per-
-    // vertex bone weights are ambiguous (both can have high pelvis weight), but
-    // the AGGREGATE over an island is unambiguous: the belt island wraps the
-    // waist (pelvis + spine, low leg), the skirt island hangs from the pelvis
-    // to the thighs (pelvis + leg). Detect connected components from edges,
-    // classify each island by its aggregate bone profile, then assign clearance.
-    //
-    // Island classification:
-    //   SKIRT  — pelvis + leg dominant                → full bodyClearance
-    //   BELT   — pelvis + torso, leg low              → small clearance (fitted)
-    //   BODICE — torso dominant                       → very small (anchored)
-    //   SLEEVE — arm dominant                         → very small
-    //   ACCESSORY — small island, unclear weights     → small (rigid trim)
+    std::vector<float> drapeAmount(n, 0.0f);
     std::vector<float> vertClearance(n, params.bodyClearance);
-    // Island classification surfaced to the rigid-island pass: per-vert island id
-    // and a per-island "is a rigid plate/accessory" flag (geometry-detected, so it
-    // fires even inside a Loose Draped mesh that has a merged medallion/buckle).
+    // Surfaced to the rigid-island pass below: per-vert island id + per-island
+    // "rigid plate/accessory" flag (medallion/buckle/chain → translate, keep shape).
     std::vector<int>     islandIdOut;
     std::vector<uint8_t> islandRigidOut;
     if (params.verletCloth) {
@@ -2946,20 +2913,45 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             meshDiag = std::max(1e-3f, Len(Sub(gmax, gmin)));
         }
 
-        // Classify each island and assign clearance.
-        const float kSkirtClear     = params.bodyClearance;  // full drape gap
-        const float kBeltClear      = 0.12f;                 // fitted, stays close
-        const float kAccessoryClear = 0.08f;                 // rigid trim, near-zero
-
-        std::vector<float> islandClear((size_t)numIslands, kSkirtClear);
-        // islandRigid[id]: this island is a rigid plate/accessory → translate only,
-        // no drape, used later by the rigid-island pass even under Loose Draped.
+        // ── STEP A: detect RIGID islands + per-island drape amount ──────────
+        // islandRigid[id]: rigid plate/accessory (medallion/buckle/chain) → handled
+        // by the rigid-island translate pass. islandDrape[id] ∈ [0,1]: how much the
+        // island behaves as free-hanging cloth, from its aggregate bone profile.
         std::vector<uint8_t> islandRigid((size_t)numIslands, 0);
+        std::vector<float>   islandDrape((size_t)numIslands, 1.0f);
 
         // Largest island vert count → used to gate "small" relative to the mesh.
         int maxIslandSize = 1;
         for (int id = 0; id < numIslands; ++id)
             maxIslandSize = std::max(maxIslandSize, islandSize[(size_t)id]);
+
+        // Waist line in world Z: torso weight only contributes to drape BELOW this.
+        float waistZ = g_refMinZ + bodyZRange * 0.55f;
+
+        // Per-vertex lower-body drape signal. pelvis+leg always count; torso counts
+        // only below the waist; sleeves suppress.
+        auto vertDrapeSignal = [&](size_t i) -> float {
+            if (!(profiles && i < profiles->size())) {
+                float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+                return (normZ < 0.50f) ? 0.55f : 0.05f;
+            }
+            const auto& bp = (*profiles)[i];
+            float belowWaist = (baseVerts[i].z < waistZ) ? 1.0f : 0.0f;
+            float lower  = Clamp01(bp.pelvis + bp.leg + bp.torso * 0.5f * belowWaist);
+            float sleeve = Clamp01((bp.arm + bp.handFoot) * 1.6f);
+            return Clamp01(lower * (1.0f - sleeve));
+        };
+
+        // Aggregate the per-vertex signal into a per-island mean (the stable,
+        // unambiguous level), plus detect rigid plates by geometry.
+        std::vector<float> islandSignalSum((size_t)numIslands, 0.0f);
+        std::vector<int>   islandSignalCnt((size_t)numIslands, 0);
+        for (size_t i = 0; i < n; ++i) {
+            int id = islandId[i];
+            if (id < 0 || id >= numIslands) continue;
+            islandSignalSum[(size_t)id] += vertDrapeSignal(i);
+            ++islandSignalCnt[(size_t)id];
+        }
 
         for (int id = 0; id < numIslands; ++id) {
             const auto& ip = iprof[(size_t)id];
@@ -2967,53 +2959,47 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             float e[3] = { std::fabs(ext.x), std::fabs(ext.y), std::fabs(ext.z) };
             std::sort(e, e + 3);                       // e[0]<=e[1]<=e[2]
             float maxExt   = e[2];
-            float flatness = e[0] / std::max(e[2], 1e-6f);  // min/max axis ratio
-            float zspan    = std::fabs(ext.z);
 
-            float skirtnss  = ip.pelvis * ip.leg;
-            float beltnss   = ip.pelvis * ip.torso * (1.0f - ip.leg);
-            float sleevenss = ip.arm;
-            float drapeWeight = ip.pelvis + ip.leg;   // skirt/robe skin weight
-
-            // 1) RIGID plate / accessory → translate, keep shape. Must be ALL of:
-            //    • SMALL: few verts both absolutely and relative to the biggest
-            //      island (a cloth panel is large; a medallion/buckle is tiny).
-            //    • COMPACT: doesn't span much of the mesh (maxExt small).
-            //    • NOT cloth: little pelvis/leg skin weight (a skirt panel is
-            //      thin/flat too, so flatness alone is NOT enough — the giveaway
-            //      is that a panel carries skirt bone weight and a plate does not).
-            //    This conservative gate avoids rigidifying skirt panels (the white
-            //    slab bug: a large flat dress panel was being translated as a block).
+            // RIGID plate / accessory → translate, keep shape. Conservative gate:
+            // SMALL (few verts, absolute + relative) AND COMPACT (small extent) AND
+            // NOT-CLOTH (low pelvis/leg). Avoids rigidifying cloth panels (white slab).
             bool small   = islandSize[(size_t)id] < 250 &&
                            islandSize[(size_t)id] < maxIslandSize / 4;
             bool compact = maxExt < 0.28f;
-            bool notCloth = drapeWeight < 0.20f;
+            bool notCloth = (ip.pelvis + ip.leg) < 0.20f;
             if (small && compact && notCloth) {
-                islandClear[(size_t)id] = kAccessoryClear;
                 islandRigid[(size_t)id] = 1;
+                islandDrape[(size_t)id] = 0.0f;
                 continue;
             }
 
-            // 2) Sleeve / arm-dominant tube → fitted, not drape.
-            if (sleevenss > skirtnss && sleevenss > beltnss && sleevenss > 0.15f) {
-                islandClear[(size_t)id] = kAccessoryClear;
-                continue;
+            // WAISTBAND / sculpted belt → rigid translate. These islands sit at the
+            // waist Z-range, have strong pelvis+torso, but very low leg weight (unlike
+            // the skirt). They form the ] cross-section of a belt and collapse under
+            // cloth physics. Vanilla conform preserves their shape by translating them
+            // with the body morph diff — we replicate that by flagging them as rigid.
+            // Gate: pelvis+torso strong, leg weak, narrow Z-span (not a full skirt panel).
+            {
+                float zSpan = islMax[(size_t)id].z - islMin[(size_t)id].z;
+                bool waistSig  = (ip.pelvis > 0.25f) && (ip.torso > 0.15f) && (ip.leg < 0.12f);
+                bool narrowBand = zSpan < (meshDiag * 0.08f);
+                if (waistSig && narrowBand) {
+                    islandRigid[(size_t)id] = 1;
+                    islandDrape[(size_t)id] = 0.0f;
+                    continue;
+                }
             }
 
-            // 3) Tall + voluminous + pelvis/leg → skirt drape (full clearance).
-            // 4) Waist band (pelvis+torso, low leg) → belt (small clearance).
-            float total = skirtnss + beltnss;
-            if (total < 0.02f) {
-                // No clear bone signal: fall back to geometry. Tall & not flat → drape.
-                islandClear[(size_t)id] =
-                    (zspan > 0.30f && flatness > 0.22f) ? kSkirtClear : kBeltClear;
-            } else {
-                float skirtFrac = skirtnss / (total + 1.0e-4f);
-                islandClear[(size_t)id] = kBeltClear + skirtFrac * (kSkirtClear - kBeltClear);
-            }
+            // Island drape level = mean per-vertex drape signal over the island.
+            // (Sleeves are handled per-vertex by the sleeve-suppress term in
+            // vertDrapeSignal — NOT by a whole-island sleeve gate, which would wrongly
+            // fitted-ify a large dress island that has sleeves merged into it.)
+            float islMeanSignal = islandSignalCnt[(size_t)id] > 0
+                ? islandSignalSum[(size_t)id] / (float)islandSignalCnt[(size_t)id] : 0.0f;
+            islandDrape[(size_t)id] = Clamp01(islMeanSignal);
         }
 
-        // Surface island classification to the rigid-island pass below.
+        // Surface island id + rigid flags to the rigid-island pass below.
         islandRigidOut.assign(islandRigid.begin(), islandRigid.end());
         islandIdOut.assign(islandId.begin(), islandId.end());
 
@@ -3021,53 +3007,66 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         for (uint8_t r : islandRigid) if (r) ++rigidIslands;
         HLog("detour: islands shape='%s' total=%d rigid=%d meshDiag=%.2f",
              shapeName.c_str(), numIslands, rigidIslands, meshDiag);
-        // Per-island debug (only first 20 islands to keep log short).
         for (int dbgId = 0; dbgId < std::min(numIslands, 20); ++dbgId) {
-            Vec3 ext = Scale(Sub(islMax[(size_t)dbgId], islMin[(size_t)dbgId]), 1.0f / meshDiag);
-            float e[3] = { std::fabs(ext.x), std::fabs(ext.y), std::fabs(ext.z) };
-            std::sort(e, e + 3);
-            float flatness = e[0] / std::max(e[2], 1e-6f);
-            float maxExt   = e[2];
             const auto& ip = iprof[(size_t)dbgId];
             float drapeW = ip.pelvis + ip.leg;
-            HLog("  isl#%d verts=%d flat=%.3f maxExt=%.3f drapeW=%.3f cls=%s",
-                 dbgId, islandSize[(size_t)dbgId], flatness, maxExt, drapeW,
-                 islandRigid[(size_t)dbgId] ? "RIGID" : "drape");
+            // Z range of the island as a fraction of body height (0=feet, 1=head).
+            float zLoF = ClampRange((islMin[(size_t)dbgId].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+            float zHiF = ClampRange((islMax[(size_t)dbgId].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+            const char* clsStr = islandRigid[(size_t)dbgId] ? "RIGID"
+                               : (islandDrape[(size_t)dbgId] < 0.15f) ? "fitted"
+                               : (islandDrape[(size_t)dbgId] < 0.55f) ? "soft-drape"
+                               : "drape";
+            HLog("  isl#%d verts=%d pelv=%.2f leg=%.2f torso=%.2f arm=%.2f z=[%.2f-%.2f] islDrape=%.3f cls=%s",
+                 dbgId, islandSize[(size_t)dbgId], ip.pelvis, ip.leg, ip.torso, ip.arm,
+                 zLoF, zHiF, islandDrape[(size_t)dbgId], clsStr);
+            (void)drapeW;
         }
 
-        // Per-vertex clearance from BONE WEIGHTS (this is the version that worked
-        // well visually). The island pass above is used ONLY to detect rigid plates
-        // for the rigid-island translate; it must NOT reshape the skirt/belt/sleeve
-        // clearance, which is driven per-vertex here. Rigid islands get a tight
-        // clearance so they sit close while the rigid pass translates them.
+        // ── STEP B: per-vertex drapeAmount ─────────────────────────────────
+        // PURELY per-vertex: drape is decided by the vertex's own lower-body bone
+        // signal + height (vertDrapeSignal). This distinguishes bodice from skirt
+        // WITHIN a single connected island (a dress where bodice+skirt+belt are one
+        // topological piece — the common case; the "belt" is not its own island).
+        // We deliberately do NOT blend in the island mean here: a whole-dress island
+        // has a low mean (dominated by the bodice) that would wrongly drag the skirt
+        // verts toward anchor. The island pass is used ONLY to flag rigid plates.
+        const float kSkirtClear = params.bodyClearance;  // full drape gap
+        const float kHugClear   = 0.12f;                 // fitted hugs the body
+        const float kRigidClear = 0.08f;                 // rigid trim near-zero
         for (size_t i = 0; i < n; ++i) {
             int id = islandId[i];
-            bool rigid = (id >= 0 && id < numIslands) && islandRigid[(size_t)id];
-            if (rigid) {
-                vertClearance[i] = kAccessoryClear;
+            if (id < 0 || id >= numIslands) { drapeAmount[i] = 0.0f; continue; }
+            if (islandRigid[(size_t)id]) {
+                drapeAmount[i]   = 0.0f;
+                vertClearance[i] = kRigidClear;
                 continue;
             }
-            if (drapeEl[i] < 0.20f) {
-                vertClearance[i] = 0.10f;   // anchored: just avoid clips
-                continue;
-            }
-            // Drape-eligible: blend skirt (pelvis+leg) vs belt (pelvis+torso,no leg).
-            float legW = 0.0f, torsoW = 0.0f, pelvisW = 0.0f;
+            drapeAmount[i]   = vertDrapeSignal(i);
+            vertClearance[i] = kHugClear + drapeAmount[i] * (kSkirtClear - kHugClear);
+        }
+
+    }
+
+    // ── Non-verlet presets: per-vertex drape from bones (Z fallback if none) ──
+    if (!params.verletCloth) {
+        for (size_t i = 0; i < n; ++i) {
             if (profiles && i < profiles->size()) {
                 const auto& bp = (*profiles)[i];
-                legW = Clamp01(bp.leg); torsoW = Clamp01(bp.torso); pelvisW = Clamp01(bp.pelvis);
-            }
-            float skirtnss = pelvisW * legW;
-            float beltnss  = pelvisW * torsoW * (1.0f - legW);
-            float tot = skirtnss + beltnss;
-            if (tot < 0.01f)
-                vertClearance[i] = params.bodyClearance * drapeEl[i];
-            else {
-                float skirtFrac = skirtnss / tot;
-                vertClearance[i] = kBeltClear + skirtFrac * (params.bodyClearance - kBeltClear);
+                float lower  = Clamp01(bp.pelvis + bp.leg);
+                float sleeve = Clamp01((bp.arm + bp.handFoot) * 1.6f);
+                drapeAmount[i] = Clamp01(lower * (1.0f - sleeve));
+            } else {
+                float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
+                drapeAmount[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
             }
         }
     }
+
+    // drapeEl is the single source of truth downstream; alias it to drapeAmount.
+    std::vector<float>& drapeEl = drapeAmount;
+    for (size_t i = 0; i < n; ++i)
+        if (drapeEl[i] > 0.25f) ++stats.drapeEligibleVerts;
 
     // Boost anchor for non-drape (upper body / sleeve) verts.
     for (size_t i = 0; i < n; ++i) {
@@ -3279,6 +3278,72 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // ── Proximity constraints (synthetic edges for near-touching cross-island verts) ──
+    // Problem: a belt or trim esculpted as part of a single dress mesh has no separate
+    // island. Its vertices are topologically connected to the surrounding cloth and
+    // move with it, but the belt straps can straddle seams where adjacent vert pairs
+    // have NO edge between them (different UV islands → no shared edge in the mesh).
+    // During the Verlet solve those pairs drift freely, tearing the belt apart.
+    //
+    // Solution: before the solve, find all base-mesh vertex pairs that are physically
+    // close (< kProxDist) but have NO topological edge connecting them (different islands
+    // OR simply not in useEdges). Add them as synthetic stretch constraints with the
+    // VANILLA rest length. They resist ONLY over-stretching (like all stretch constraints),
+    // so the cloth can still drape — they just prevent the strap from tearing open.
+    std::vector<EdgeConstraint> proxEdges;
+    std::vector<float>          proxRestLen;
+    if (params.verletCloth && n <= 0xFFFF) {
+        const float kProxDist  = 0.50f;
+        const float kProxDist2 = kProxDist * kProxDist;
+        const float pcell = kProxDist;
+        auto pkey = [&](const Vec3& p) -> uint64_t {
+            auto q = [&](float v) -> uint64_t { return (uint64_t)(uint32_t)(int32_t)std::llround(v / pcell); };
+            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+        };
+        // Build spatial hash over base mesh positions.
+        std::unordered_map<uint64_t, std::vector<uint32_t>> pgrid;
+        pgrid.reserve(n);
+        for (size_t i = 0; i < n; ++i) pgrid[pkey(baseVerts[i])].push_back((uint32_t)i);
+
+        // Build a fast lookup for existing edges (so we don't duplicate them).
+        std::unordered_set<uint64_t> edgeSet;
+        edgeSet.reserve(useEdges.size() * 2);
+        for (const auto& e : useEdges) {
+            uint32_t lo = std::min((uint32_t)e.a, (uint32_t)e.b);
+            uint32_t hi = std::max((uint32_t)e.a, (uint32_t)e.b);
+            edgeSet.insert(((uint64_t)lo << 32) | hi);
+        }
+
+        for (size_t i = 0; i < n; ++i) {
+            const Vec3& p = baseVerts[i];
+            for (int dx=-1;dx<=1;++dx) for (int dy=-1;dy<=1;++dy) for (int dz=-1;dz<=1;++dz) {
+                Vec3 qp{ p.x+dx*pcell, p.y+dy*pcell, p.z+dz*pcell };
+                auto it = pgrid.find(pkey(qp)); if (it==pgrid.end()) continue;
+                for (uint32_t j : it->second) {
+                    if (j <= (uint32_t)i) continue;
+                    if (Len2(Sub(baseVerts[j], p)) > kProxDist2) continue;
+                    // Skip if there's already a real edge between i and j.
+                    uint64_t key = ((uint64_t)i << 32) | j;
+                    if (edgeSet.count(key)) continue;
+                    // Rest length from BASE mesh (not support/morphed): this preserves
+                    // the sculpted 3D shape (e.g. belt ] cross-section thickness).
+                    // Using support rest length was wrong — on body morph the support
+                    // already collapses the belt sides together, so the constraint
+                    // then actively flattened the belt to match that morphed distance.
+                    float vLen = Len(Sub(baseVerts[j], baseVerts[i]));
+                    if (vLen < 1.0e-4f) continue;  // degenerate pair
+                    EdgeConstraint ec;
+                    ec.a = (uint16_t)i; ec.b = (uint16_t)j; ec.restLength = vLen;
+                    proxEdges.push_back(ec);
+                    proxRestLen.push_back(vLen);
+                }
+            }
+        }
+        if (!proxEdges.empty())
+            HLog("detour: prox-constraints shape='%s' synthetic=%zu",
+                 shapeName.c_str(), proxEdges.size());
+    }
+
     // ── Cloth drape solve (momentum-free relaxation) ───────────────────────
     // Keeps the key idea from johnBuffer/ClothSimulation — distance constraints
     // that resist ONLY stretching, so the cloth folds and hangs instead of
@@ -3316,6 +3381,86 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         for (auto& kv : coincidence)
             if (kv.second.size() > 1) weldGroups.push_back(std::move(kv.second));
 
+        // ── Inter-island junction stitching ─────────────────────────────────
+        // The dress bodice (fitted, stays put) and the skirt (drape, falls) are
+        // SEPARATE islands that merely TOUCH at the waist with no shared edges
+        // (verified in the log: bodice z=[0.63-0.97], skirt z=[0.05-0.64]). When
+        // the body grows, the fitted bodice holds while the draping skirt moves,
+        // and the unwelded gap between them opens into a visible hole at the back.
+        // Coincidence welding misses it because the two borders aren't EXACTLY
+        // coincident. Here we explicitly pair near-touching verts from DIFFERENT
+        // islands and weld them so the skirt top tracks the bodice bottom.
+        if (!islandIdOut.empty() && islandIdOut.size() == n) {
+            // Spatial hash for O(n) neighbour lookup (cell ≈ kStitchDist).
+            const float kStitchDist  = 1.50f;
+            const float kStitchDist2 = kStitchDist * kStitchDist;
+            const float cell = kStitchDist;
+            auto cellKey = [&](const Vec3& p) -> uint64_t {
+                auto q = [&](float v) -> uint64_t {
+                    return (uint64_t)(uint32_t)(int32_t)std::llround(v / cell);
+                };
+                return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+            };
+            std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+            grid.reserve(n);
+            for (size_t i = 0; i < n; ++i)
+                grid[cellKey(baseVerts[i])].push_back((uint32_t)i);
+
+            // For each vert, find the NEAREST vert in a DIFFERENT island within
+            // kStitchDist and weld that PAIR (2 verts only — never a blob, so the
+            // skirt border can't collapse to a point). Each pair is its own group;
+            // the existing weldSeams keeps them coincident every substep.
+            // Gate: the horizontal (XY) offset must be small — a bodice→skirt junction
+            // is verts at the same circumference but different Z. This lets a large
+            // VERTICAL gap stitch (the real hole) without pulling front-to-back.
+            const float kStitchXY2 = 0.45f * 0.45f;
+            int stitched = 0;
+            std::unordered_map<uint64_t,int> islandPairCount;  // diag: which islands join
+            for (size_t i = 0; i < n; ++i) {
+                int idi = islandIdOut[i];
+                if (idi < 0) continue;
+                // Never stitch FROM a rigid island — rigid islands use translate pass,
+                // not the PBD solver, so welding them to cloth verts drags the cloth
+                // border to the rigid position and creates a crease at the boundary.
+                if (idi < (int)islandRigidOut.size() && islandRigidOut[(size_t)idi]) continue;
+                const Vec3& p = baseVerts[i];
+                float bestD2 = kStitchDist2;
+                int   bestJ  = -1;
+                for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    Vec3 qp{ p.x + dx*cell, p.y + dy*cell, p.z + dz*cell };
+                    auto it = grid.find(cellKey(qp));
+                    if (it == grid.end()) continue;
+                    for (uint32_t j : it->second) {
+                        if ((size_t)j == i) continue;
+                        if (islandIdOut[j] == idi) continue;     // same island: skip
+                        // Also skip if partner is rigid — same reason.
+                        int idj = islandIdOut[j];
+                        if (idj >= 0 && idj < (int)islandRigidOut.size() && islandRigidOut[(size_t)idj]) continue;
+                        float ddx = baseVerts[j].x - p.x, ddy = baseVerts[j].y - p.y;
+                        if (ddx*ddx + ddy*ddy > kStitchXY2) continue;  // not vertically aligned
+                        float d2 = Len2(Sub(baseVerts[j], p));
+                        if (d2 < bestD2) { bestD2 = d2; bestJ = (int)j; }
+                    }
+                }
+                // Only weld in one direction (i < bestJ) to avoid duplicate pairs.
+                if (bestJ >= 0 && (size_t)bestJ > i) {
+                    weldGroups.push_back({ (uint32_t)i, (uint32_t)bestJ });
+                    ++stitched;
+                    int a = idi, b = islandIdOut[bestJ];
+                    if (a > b) std::swap(a, b);
+                    ++islandPairCount[((uint64_t)a << 32) | (uint32_t)b];
+                }
+            }
+            if (stitched > 0) {
+                HLog("detour: junction-stitch shape='%s' pairs=%d", shapeName.c_str(), stitched);
+                for (auto& kv : islandPairCount)
+                    HLog("    stitch isl#%d<->isl#%d count=%d",
+                         (int)(kv.first >> 32), (int)(kv.first & 0xFFFFFFFF), kv.second);
+            }
+        }
+
         auto weldSeams = [&]() {
             for (auto& g : weldGroups) {
                 // If any member is pinned, the whole seam stays at the conformed
@@ -3339,10 +3484,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float gStep     = params.gravity;            // per-step downward nudge
         const float stretchK2 = Clamp01(params.stretchStiffness);
         const float maxDrop   = params.clothMaxDrop;
-        // Edges may elongate up to +18%: enough for gravity to pull the skirt down
-        // and reorient it off the body, but not so much it over-stretches into a
-        // melted sag at the hem. (Seam welding handles real splits.)
-        const float kMaxStretch = 1.18f;
+        // Edges may elongate up to +10%: enough for gravity to reorient the skirt
+        // off the body, but tight enough that the hem can't over-stretch into a
+        // melted sag or tear open at the back. (Seam welding handles real splits.)
+        const float kMaxStretch = 1.10f;
 
         auto solveStretch = [&](float k) {
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -3363,6 +3508,28 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             }
         };
 
+        // Proximity constraints: bidirectional distance-preserving for vert pairs
+        // that are near-touching in the base mesh but have no topological edge.
+        // Bidirectional (resist BOTH stretch and compression) so belt straps can't
+        // drift apart OR bunch together — they hold their vanilla relative position.
+        auto solveProxStretch = [&](float k) {
+            for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
+                const auto& e = proxEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float w1 = m[e.a], w2 = m[e.b];
+                float wSum = w1 + w2;
+                if (wSum <= kLenEps) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                if (len <= kLenEps) continue;
+                float rest = proxRestLen[ei];
+                if (std::fabs(len - rest) < 0.01f) continue;   // within tolerance
+                Vec3 delta = Scale(dir, ((len - rest) / len) * k / wSum);
+                finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
+                finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
+            }
+        };
+
         for (int s = 0; s < substeps; ++s) {
             // 1) Gravity nudge (NO momentum). Free verts only.
             for (size_t i = 0; i < n; ++i) {
@@ -3374,6 +3541,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             // 2) Constraint relaxation.
             for (int it = 0; it < cIters; ++it) {
                 solveStretch(stretchK2);                 // asymmetric: resist stretch only
+                // Proxy constraints run at higher stiffness (1.0) to act as structural
+                // braces — they preserve sculpted shapes (belt ] cross-section) which
+                // are NOT topological edges and would otherwise collapse under gravity.
+                if (!proxEdges.empty()) solveProxStretch(1.0f);
 
                 // Light bending for fold smoothness (conformed rest distance).
                 if (params.bendingStiffness > 0.0f && bendingPtr) {
@@ -3415,6 +3586,8 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             // 3) Hard stretch cap: no edge may exceed rest*kMaxStretch. This is the
             //    definitive anti-tear — even if relaxation under-converges, edges
             //    can never blow up. Two strong asymmetric passes against the cap.
+            //    Also enforce proxy constraints so belt straps don't exceed cap either.
+            if (!proxEdges.empty()) solveProxStretch(1.0f);
             for (int it = 0; it < 2; ++it) {
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                     const auto& e = useEdges[ei];
@@ -3879,24 +4052,276 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         for (size_t i = 0; i < n; ++i) {
             int id = island[i];
             if (id < 0 || !islandIsRigid(id)) continue;
-            Vec3 raw = DiffAt(rawDiff, (uint16_t)i);
-            if (Len2(raw) < 1.0e-8f) continue;   // only conform-touched verts
+            // Include ALL verts in the average, not just rawDiff-touched ones.
+            // Chain links and other accessories with near-zero skin weight produce
+            // rawDiff ≈ 0, making islandCount stay 0 and the island get no shift.
+            // For rigid translate, every vert contributes its supportVert displacement.
             islandShift[(size_t)id] = Add(islandShift[(size_t)id], Sub(supportVerts[i], baseVerts[i]));
             ++islandCount[(size_t)id];
         }
-        for (int id = 0; id < nIsl; ++id)
+        std::vector<int> islandSizeR(nIsl, 0);
+        for (int id : island) if (id >= 0) ++islandSizeR[(size_t)id];
+        for (int id = 0; id < nIsl; ++id) {
             if (islandCount[(size_t)id] > 0)
                 islandShift[(size_t)id] = Scale(islandShift[(size_t)id], 1.0f / (float)islandCount[(size_t)id]);
+        }
+
+        // Compute per-island centroid for proximity-based shift inheritance.
+        std::vector<Vec3> islandCentroid((size_t)nIsl, Vec3{0,0,0});
+        std::vector<int>  islandCentCnt((size_t)nIsl, 0);
+        for (size_t i = 0; i < n; ++i) {
+            int id = island[i];
+            if (id >= 0) {
+                islandCentroid[(size_t)id] = Add(islandCentroid[(size_t)id], baseVerts[i]);
+                ++islandCentCnt[(size_t)id];
+            }
+        }
+        for (int id = 0; id < nIsl; ++id)
+            if (islandCentCnt[(size_t)id] > 0)
+                islandCentroid[(size_t)id] = Scale(islandCentroid[(size_t)id],
+                                                    1.0f / (float)islandCentCnt[(size_t)id]);
+
+        // Propagate shift from "anchor" islands (|shift| large) to "float" islands
+        // (|shift| near zero). This fixes chain links that have near-zero skin weight:
+        // sliders that move the torso barely touch chains, so their supportVerts delta
+        // is ~0 even though the chain should follow the medallion it hangs from.
+        // Strategy: for each low-shift rigid island, find the closest high-shift rigid
+        // island by centroid distance and copy its shift.
+        const float kShiftNearZero = 0.03f;  // shift below this is considered "floating"
+        const float kShiftNearZeroSq = kShiftNearZero * kShiftNearZero;
+        for (int id = 0; id < nIsl; ++id) {
+            if (!islandIsRigid(id)) continue;
+            if (Len2(islandShift[(size_t)id]) >= kShiftNearZeroSq) continue; // already has shift
+            // Find nearest rigid island with a real shift.
+            float bestDist2 = 1e30f;
+            int   bestSrc   = -1;
+            for (int src = 0; src < nIsl; ++src) {
+                if (src == id || !islandIsRigid(src)) continue;
+                if (Len2(islandShift[(size_t)src]) < kShiftNearZeroSq) continue;
+                float d2 = Len2(Sub(islandCentroid[(size_t)id], islandCentroid[(size_t)src]));
+                if (d2 < bestDist2) { bestDist2 = d2; bestSrc = src; }
+            }
+            if (bestSrc >= 0)
+                islandShift[(size_t)id] = islandShift[(size_t)bestSrc];
+        }
+
+        // ── Chain/cordão per-vert IDW shift ─────────────────────────────────
+        // A necklace chain (isl#10 in Medallions) is a single large island that
+        // spans between multiple medallion islands.  Applying one mean shift to all
+        // 153 chain verts translates the whole chain as a block → chain floats away
+        // from the medallions when the body morphs.
+        //
+        // Fix: identify "chain" islands (large rigid islands whose mean shift is
+        // plausible but whose individual verts need spatially-varying shifts) and
+        // replace their uniform island shift with a per-vert IDW interpolation of
+        // the shifts of the smaller "anchor" islands (the medallions).
+        //
+        // Chain heuristic: rigid island with > kChainVertThresh verts AND the ratio
+        // of its bounding-box diagonal to the average medallion bbox diagonal is > 2.
+        // In practice for this mesh: 153-vert chain vs 13/26-vert medallions.
+        const int kChainVertThresh = 60;  // islands larger than this are chain candidates
+
+        // Collect "anchor" islands: rigid, small (≤ kChainVertThresh verts), real shift.
+        struct AnchorIsl { int id; Vec3 centroid; Vec3 shift; };
+        std::vector<AnchorIsl> anchors;
+        for (int id = 0; id < nIsl; ++id) {
+            if (!islandIsRigid(id)) continue;
+            if (islandSizeR[(size_t)id] > kChainVertThresh) continue;
+            if (Len2(islandShift[(size_t)id]) < kShiftNearZeroSq) continue;
+            anchors.push_back({id, islandCentroid[(size_t)id], islandShift[(size_t)id]});
+        }
+
+        // For each chain island, build a per-vert shift table via IDW from anchors.
+        // Key: island id → vector<Vec3> indexed by position in the full vert array.
+        // We store as a flat map vertIdx→shift.
+        std::unordered_map<size_t, Vec3> chainVertShift;
+        if (!anchors.empty()) {
+            for (size_t i = 0; i < n; ++i) {
+                int id = island[i];
+                if (id < 0 || !islandIsRigid(id)) continue;
+                if (islandSizeR[(size_t)id] <= kChainVertThresh) continue;  // not a chain island
+                // IDW: weight = 1/dist² to each anchor centroid.
+                Vec3 sumShift{0,0,0};
+                float sumW = 0.0f;
+                for (const auto& a : anchors) {
+                    float d2 = Len2(Sub(baseVerts[i], a.centroid));
+                    if (d2 < 1e-6f) d2 = 1e-6f;
+                    float w = 1.0f / d2;
+                    sumShift = Add(sumShift, Scale(a.shift, w));
+                    sumW += w;
+                }
+                if (sumW > 0.0f)
+                    chainVertShift[i] = Scale(sumShift, 1.0f / sumW);
+            }
+            if (!chainVertShift.empty())
+                HLog("  chain-IDW: %d chain verts remapped from %d anchors",
+                     (int)chainVertShift.size(), (int)anchors.size());
+        }
+
+        // Log per-island rigid shift for diagnosis.
+        for (int id = 0; id < nIsl; ++id) {
+            if (wholeMeshRigid || (id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id]))
+                HLog("  rigid-isl#%d verts=%d cnt=%d shift=(%.3f,%.3f,%.3f)",
+                     id, islandSizeR[(size_t)id], islandCount[(size_t)id],
+                     islandShift[(size_t)id].x, islandShift[(size_t)id].y, islandShift[(size_t)id].z);
+        }
 
         int rigidVerts = 0;
         for (size_t i = 0; i < n; ++i) {
             int id = island[i];
-            if (id >= 0 && islandIsRigid(id) && islandCount[(size_t)id] > 0) {
-                finalVerts[i] = Add(baseVerts[i], islandShift[(size_t)id]);  // shape kept
+            if (id >= 0 && islandIsRigid(id)) {
+                // Chain verts use per-vert IDW shift; medallion/plate verts use island mean.
+                auto it = chainVertShift.find(i);
+                if (it != chainVertShift.end())
+                    finalVerts[i] = Add(baseVerts[i], it->second);
+                else
+                    finalVerts[i] = Add(baseVerts[i], islandShift[(size_t)id]);  // shape kept
                 ++rigidVerts;
             }
         }
         stats.collisionAdjusted += rigidVerts;
+
+        // ── Rigid-border seam closure ───────────────────────────────────────
+        // After rigid translate, the border verts of rigid islands (belt, buckle)
+        // sit at their correct translated positions. The adjacent cloth verts (bodice
+        // bottom edge, skirt top edge) were placed by the PBD solver independently
+        // and may have drifted away, creating a visible gap or V-crease at the border.
+        //
+        // For each near-touching base pair where ONE side is rigid and the other is
+        // cloth, pull the CLOTH vert to maintain the vanilla relative offset from the
+        // (now correctly placed) rigid vert. The rigid vert is never moved.
+        if (!islandIdOut.empty() && islandIdOut.size() == n && nIsl > 0) {
+            const float kBorderNear  = 0.80f;
+            const float kBorderNear2 = kBorderNear * kBorderNear;
+            const float bcell = 0.85f;
+            auto bkey = [&](const Vec3& p) -> uint64_t {
+                auto q = [&](float v) -> uint64_t { return (uint64_t)(uint32_t)(int32_t)std::llround(v / bcell); };
+                return (q(p.x)*73856093ull)^(q(p.y)*19349663ull)^(q(p.z)*83492791ull);
+            };
+            std::unordered_map<uint64_t,std::vector<uint32_t>> bg;
+            bg.reserve(n);
+            for (size_t i = 0; i < n; ++i) bg[bkey(baseVerts[i])].push_back((uint32_t)i);
+
+            int borderFixed = 0;
+            for (int round = 0; round < 2; ++round) {
+                for (size_t i = 0; i < n; ++i) {
+                    int idi = islandIdOut[i];
+                    if (idi < 0) continue;
+                    bool ri = islandIsRigid(idi);
+                    if (!ri) continue;  // start from rigid side only
+                    const Vec3& p = baseVerts[i];
+                    for (int dx=-1;dx<=1;++dx) for (int dy=-1;dy<=1;++dy) for (int dz=-1;dz<=1;++dz) {
+                        Vec3 qp{p.x+dx*bcell,p.y+dy*bcell,p.z+dz*bcell};
+                        auto it = bg.find(bkey(qp)); if (it==bg.end()) continue;
+                        for (uint32_t j : it->second) {
+                            if ((size_t)j == i) continue;
+                            int idj = islandIdOut[j];
+                            if (idj == idi) continue;           // same island
+                            if (islandIsRigid(idj)) continue;   // both rigid — skip
+                            if (Len2(Sub(baseVerts[j],p)) > kBorderNear2) continue;
+                            // Pull cloth vert j to restore vanilla offset from rigid vert i.
+                            Vec3 vanOff = Sub(supportVerts[j], supportVerts[i]);
+                            Vec3 target = Add(finalVerts[i], vanOff);
+                            // Blend: don't snap fully in one round, prevent fighting stretch solver.
+                            float alpha = (round == 0) ? 0.6f : 0.9f;
+                            finalVerts[j] = Add(finalVerts[j], Scale(Sub(target, finalVerts[j]), alpha));
+                            if (round == 1) ++borderFixed;
+                        }
+                    }
+                }
+            }
+            if (borderFixed > 0)
+                HLog("detour: rigid-border shape='%s' fixed=%d", shapeName.c_str(), borderFixed);
+        }
+    }
+
+    // ── Cross-island seam closure (ROOT-CAUSE FIX for the back hole) ─────────
+    // Root cause (proven by gap-diag instrumentation): the garment has separate
+    // islands that BUTT against each other at the waist with NO triangle spanning
+    // the join and only a small (~0.4u) vanilla separation. Vanilla conform moves
+    // both sides by the same body diff, so the unmodeled seam stays sub-pixel. Our
+    // physics moves each side independently (no edge links them, and the welds only
+    // catch EXACTLY-coincident verts at 0.01u, not these 0.4u seams), so the sides
+    // drift apart — measured up to 4.0u — opening the seam into a visible hole.
+    //
+    // Fix: for each near-touching cross-island base pair, restore the VANILLA
+    // relative offset (supportVerts[j]-supportVerts[i]). Both sides keep the drape
+    // motion the solver gave them, but their RELATIVE position is pinned to what
+    // vanilla had, so the seam can never open wider than the body actually grew.
+    // We move the higher-drape (looser) side toward the other to avoid fighting an
+    // anchored side; if both are loose, split the correction.
+    if (params.verletCloth && !islandIdOut.empty() && islandIdOut.size() == n) {
+        // near-touching radius: 0.65u catches the back butt-joint (vanSep~0.4) AND
+        // the belt-strap mini-island gaps (slightly wider). Front-to-back false
+        // pairs are impossible — those are >5u apart (body width). Cell ≥ radius so
+        // the 27-cell neighbour search covers the radius.
+        const float kNear  = 0.65f;
+        const float kNear2 = kNear * kNear;
+        const float cell   = 0.70f;
+        auto ckey = [&](const Vec3& p) -> uint64_t {
+            auto q = [&](float v) -> uint64_t { return (uint64_t)(uint32_t)(int32_t)std::llround(v / cell); };
+            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+        };
+        std::unordered_map<uint64_t, std::vector<uint32_t>> g;
+        g.reserve(n);
+        for (size_t i = 0; i < n; ++i) g[ckey(baseVerts[i])].push_back((uint32_t)i);
+
+        float worstBefore = 0.0f, worstAfter = 0.0f;
+        int crossPairs = 0, fixedPairs = 0;
+        // Two relaxation rounds so a vert shared by several cross pairs converges.
+        for (int round = 0; round < 2; ++round) {
+            for (size_t i = 0; i < n; ++i) {
+                const Vec3& p = baseVerts[i];
+                for (int dx=-1;dx<=1;++dx) for (int dy=-1;dy<=1;++dy) for (int dz=-1;dz<=1;++dz) {
+                    Vec3 qp{ p.x+dx*cell, p.y+dy*cell, p.z+dz*cell };
+                    auto it = g.find(ckey(qp)); if (it==g.end()) continue;
+                    for (uint32_t j : it->second) {
+                        if ((size_t)j<=i) continue;
+                        if (islandIdOut[j]==islandIdOut[i]) continue;     // same island
+                        if (Len2(Sub(baseVerts[j], p)) > kNear2) continue; // near-touching only
+                        // Rigid-island verts (medallion/buckle) must keep their exact
+                        // translated shape — never move them. If BOTH sides are rigid,
+                        // skip; if ONE is rigid, the loose side takes the full fix.
+                        bool ri = (islandIdOut[i] >= 0 && islandIdOut[i] < (int)islandRigidOut.size()
+                                   && islandRigidOut[(size_t)islandIdOut[i]]);
+                        bool rj = (islandIdOut[j] >= 0 && islandIdOut[j] < (int)islandRigidOut.size()
+                                   && islandRigidOut[(size_t)islandIdOut[j]]);
+                        if (ri && rj) continue;
+                        // Target: keep the exact vanilla offset between the pair.
+                        Vec3 vanOff = Sub(supportVerts[j], supportVerts[i]);
+                        Vec3 curOff = Sub(finalVerts[j], finalVerts[i]);
+                        Vec3 err = Sub(curOff, vanOff);             // how far we over-opened
+                        float errLen = Len(err);
+                        if (round == 0) {
+                            ++crossPairs;
+                            worstBefore = std::max(worstBefore, errLen);
+                        }
+                        if (errLen < 0.02f) continue;
+                        // Distribute the correction: a rigid side never moves; otherwise
+                        // the looser (higher drape) vert yields more.
+                        float wi, wj;
+                        if (ri)      { wi = 0.0f; wj = 1.0f; }   // i rigid → only j moves
+                        else if (rj) { wi = 1.0f; wj = 0.0f; }   // j rigid → only i moves
+                        else {
+                            float di = drapeAmount[i], dj = drapeAmount[j];
+                            float sum = di + dj;
+                            wi = (sum > 1e-4f) ? dj / sum : 0.5f; // i takes share ∝ other's drape
+                            wj = 1.0f - wi;
+                        }
+                        finalVerts[i] = Add(finalVerts[i], Scale(err, wi));
+                        finalVerts[j] = Sub(finalVerts[j], Scale(err, wj));
+                        if (round == 1) {
+                            ++fixedPairs;
+                            Vec3 newOff = Sub(finalVerts[j], finalVerts[i]);
+                            worstAfter = std::max(worstAfter, Len(Sub(newOff, vanOff)));
+                        }
+                    }
+                }
+            }
+        }
+        if (crossPairs > 0)
+            HLog("detour: seam-close shape='%s' crossPairs=%d fixed=%d worstBefore=%.3f worstAfter=%.3f",
+                 shapeName.c_str(), crossPairs, fixedPairs, worstBefore, worstAfter);
     }
 
     // Write only non-zero diffs (matches BodySlide convention).

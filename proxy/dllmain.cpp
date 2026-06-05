@@ -1,10 +1,12 @@
 #include "dialog.h"
 #include <windows.h>
+#include <commctrl.h>
 #include <string>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdarg>
+#include <thread>
 
 static constexpr UINT DRAPE_CMD_ID = 0xD4A9u;
 
@@ -82,6 +84,148 @@ static HWND FindOsWindow() {
     return ctx.hw;
 }
 
+// ── Progress window (runs on its own thread, safe while OS is blocked) ──
+// Creates a small topmost window with a marquee progress bar and a label.
+// Owns its own message loop so it stays alive and animating while the main
+// thread is blocked in SendMessageA(Conform All). Closed via the done flag.
+
+struct ProgressCtx {
+    std::atomic<bool> done{ false };
+    HWND              hwnd{ nullptr };
+    std::atomic<bool> created{ false };
+};
+
+static DWORD WINAPI ProgressThreadProc(LPVOID param) {
+    ProgressCtx* ctx = reinterpret_cast<ProgressCtx*>(param);
+
+    // Ensure common controls (progress bar) are available.
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_PROGRESS_CLASS };
+    InitCommonControlsEx(&icc);
+
+    // Register a simple window class for our progress dialog.
+    WNDCLASSEXA wc{};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = DefWindowProcA;
+    wc.hInstance     = GetModuleHandleA(nullptr);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "DrapeProgressWnd";
+    RegisterClassExA(&wc);   // harmless if already registered
+
+    const int W = 360, H = 100;
+    int sx = GetSystemMetrics(SM_CXSCREEN);
+    int sy = GetSystemMetrics(SM_CYSCREEN);
+    HWND hw = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "DrapeProgressWnd", "Smart Conform",
+        WS_POPUP | WS_CAPTION,
+        (sx - W) / 2, (sy - H) / 2, W, H,
+        nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hw) { ctx->created.store(true); return 1; }
+
+    // Line 1
+    CreateWindowExA(0, "STATIC", "Processing cloth simulation, please wait...",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        10, 8, W - 20, 18, hw, nullptr, wc.hInstance, nullptr);
+
+    // Line 2
+    CreateWindowExA(0, "STATIC", "OutfitStudio might freeze temporarily, don't click anything.",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        10, 28, W - 20, 18, hw, nullptr, wc.hInstance, nullptr);
+
+    // Marquee progress bar
+    HWND pb = CreateWindowExA(0, PROGRESS_CLASSA, nullptr,
+        WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
+        10, 54, W - 20, 20, hw, nullptr, wc.hInstance, nullptr);
+    SendMessageA(pb, PBM_SETMARQUEE, TRUE, 40);  // 40 ms scroll interval
+
+    ShowWindow(hw, SW_SHOW);
+    UpdateWindow(hw);
+    ctx->hwnd = hw;
+    ctx->created.store(true, std::memory_order_release);
+
+    // Own message loop — keeps the window responsive while OS is frozen.
+    MSG msg;
+    while (!ctx->done.load(std::memory_order_relaxed)) {
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        Sleep(16);  // ~60 fps poll
+    }
+    DestroyWindow(hw);
+    return 0;
+}
+
+// RAII wrapper: spawns the progress window on construction, destroys on destruction.
+struct ScopedProgressWindow {
+    ProgressCtx ctx;
+    HANDLE      thread{ nullptr };
+
+    ScopedProgressWindow() {
+        thread = CreateThread(nullptr, 0, ProgressThreadProc, &ctx, 0, nullptr);
+        // Wait until window is created (or failed) before returning.
+        if (thread) while (!ctx.created.load(std::memory_order_acquire)) Sleep(5);
+    }
+    ~ScopedProgressWindow() {
+        ctx.done.store(true, std::memory_order_release);
+        if (thread) { WaitForSingleObject(thread, 3000); CloseHandle(thread); }
+    }
+};
+
+// ── CBT hook: detect when the native "Conform All" dialog is dismissed ──
+// The flow is: our menu → first dialog (Smart Conform preset) → SendMessageA
+// triggers native Conform All → that opens a SECOND modal dialog → user clicks
+// OK → processing starts (main thread freezes). We want the progress window to
+// appear only after the user dismisses that second dialog, not during it.
+//
+// Strategy: install a WH_CBT hook before SendMessageA. Track the FIRST dialog
+// window that gets created after the hook is installed. When that window is
+// destroyed (user clicked OK/Cancel), fire the progress window.
+
+struct ConformDialogTracker {
+    HHOOK               hook{ nullptr };
+    HWND                dialogHwnd{ nullptr };   // the native Conform All dialog
+    std::atomic<bool>   dialogDismissed{ false };
+    ProgressCtx*        progressCtx{ nullptr };
+    HANDLE              progressThread{ nullptr };
+};
+
+static ConformDialogTracker* g_tracker = nullptr;  // valid only during SendMessageA
+
+static LRESULT CALLBACK ConformCbtProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && g_tracker) {
+        if (nCode == HCBT_CREATEWND) {
+            // Capture the first new dialog/popup created after we installed the hook.
+            // That's the native "Conform All" confirmation dialog.
+            if (!g_tracker->dialogHwnd) {
+                HWND hw = reinterpret_cast<HWND>(wParam);
+                char cls[64] = {};
+                GetClassNameA(hw, cls, sizeof(cls));
+                // Only capture real dialogs/popups, not tooltips or combo popups.
+                LONG style = GetWindowLongA(hw, GWL_STYLE);
+                if ((style & WS_POPUP) || strncmp(cls, "#32770", 6) == 0) {
+                    g_tracker->dialogHwnd = hw;
+                    DbgLog("CBT: captured conform dialog hwnd=%p class='%s'", (void*)hw, cls);
+                }
+            }
+        } else if (nCode == HCBT_DESTROYWND) {
+            // When the captured dialog is destroyed, the user clicked OK/Cancel.
+            // Start the progress window NOW — processing is about to begin.
+            HWND hw = reinterpret_cast<HWND>(wParam);
+            if (hw == g_tracker->dialogHwnd && !g_tracker->dialogDismissed.exchange(true)) {
+                DbgLog("CBT: conform dialog dismissed, spawning progress window");
+                g_tracker->progressThread = CreateThread(
+                    nullptr, 0, ProgressThreadProc, g_tracker->progressCtx, 0, nullptr);
+                if (g_tracker->progressThread) {
+                    while (!g_tracker->progressCtx->created.load(std::memory_order_acquire))
+                        Sleep(5);
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_tracker ? g_tracker->hook : nullptr, nCode, wParam, lParam);
+}
+
 // ── WndProc subclass: intercept our menu command ──────────────────────
 
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
@@ -112,7 +256,29 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
                 ~ScopedHookEnable() { fn(0); }
             } hookScope(setHookEnabled);
 
+            // Install CBT hook to detect when the native Conform All dialog is
+            // dismissed (user clicked OK). Progress window spawns at that point,
+            // not before — the dialog phase is interactive, not processing.
+            ProgressCtx progressCtx;
+            ConformDialogTracker tracker;
+            tracker.progressCtx = &progressCtx;
+            g_tracker = &tracker;
+            tracker.hook = SetWindowsHookExA(WH_CBT, ConformCbtProc,
+                                              nullptr, GetCurrentThreadId());
+            DbgLog("Smart Conform All: CBT hook installed=%p", (void*)tracker.hook);
+
             SendMessageA(hw, WM_COMMAND, MAKEWPARAM(g_conformAllId, 0), 0);
+            // SendMessageA returned — processing done. Tear down.
+
+            if (tracker.hook) { UnhookWindowsHookEx(tracker.hook); tracker.hook = nullptr; }
+            g_tracker = nullptr;
+
+            // Close progress window if it was spawned.
+            progressCtx.done.store(true, std::memory_order_release);
+            if (tracker.progressThread) {
+                WaitForSingleObject(tracker.progressThread, 3000);
+                CloseHandle(tracker.progressThread);
+            }
             DbgLog("Smart Conform All done");
         } else {
             DbgLog("Smart Conform unavailable (ready=%d hook=%p conformAllId=%u)",
