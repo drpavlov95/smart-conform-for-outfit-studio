@@ -197,8 +197,17 @@ static std::unordered_map<std::string, int> g_shapeLayer;
 // Per-shape triangles (base topology) — used to build a per-mesh collider BVH so an
 // outer garment can be pushed off an inner one DURING the solve (like the body).
 static std::unordered_map<std::string, std::vector<std::array<uint16_t, 3>>> g_shapeTris;
+// Cache of each mesh's SOLVED (physics-final) positions, keyed by slider THEN shape,
+// so a later-solved mesh can collide against an earlier-solved one's actual draped
+// shape (not just its conformed position). OutfitStudio iterates mesh-outer /
+// slider-inner (all sliders for Cloak, then all for Clothes), so we must keep results
+// for EVERY slider — a single-slider cache would be wiped before the inner mesh runs.
+struct SolvedMesh { std::vector<Vec3> verts; int layer = 0; };
+static std::unordered_map<std::string,
+                          std::unordered_map<std::string, SolvedMesh>> g_solvedShapes; // [slider][shape]
 static std::vector<Vec3> g_refVerts;
 static std::vector<std::array<uint16_t, 3>> g_refTris;  // body triangles (for BVH)
+static BodyBVH g_refBodyBVH;                            // base-body BVH for base-order tests
 static std::unordered_map<std::string, BodyShell> g_bodyShellCache;
 static std::unordered_map<std::string, BodyBVH> g_bodyBVHCache;
 // Pre-built masks (vert -> weight) reused across a shape's sliders.
@@ -910,34 +919,53 @@ static void BuildBodyBVH(const std::vector<Vec3>& verts,
 }
 
 // Closest point on triangle abc to p (Ericson, Real-Time Collision Detection).
-static Vec3 ClosestPtTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+static Vec3 ClosestPtTriangleBary(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c,
+                                  float& outU, float& outV, float& outW) {
     Vec3 ab = Sub(b, a), ac = Sub(c, a), ap = Sub(p, a);
     float d1 = Dot(ab, ap), d2 = Dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    if (d1 <= 0.0f && d2 <= 0.0f) {
+        outU = 1.0f; outV = 0.0f; outW = 0.0f;
+        return a;
+    }
     Vec3 bp = Sub(p, b);
     float d3 = Dot(ab, bp), d4 = Dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return b;
+    if (d3 >= 0.0f && d4 <= d3) {
+        outU = 0.0f; outV = 1.0f; outW = 0.0f;
+        return b;
+    }
     float vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
         float v = d1 / (d1 - d3);
+        outU = 1.0f - v; outV = v; outW = 0.0f;
         return Add(a, Scale(ab, v));
     }
     Vec3 cp = Sub(p, c);
     float d5 = Dot(ab, cp), d6 = Dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return c;
+    if (d6 >= 0.0f && d5 <= d6) {
+        outU = 0.0f; outV = 0.0f; outW = 1.0f;
+        return c;
+    }
     float vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
         float w = d2 / (d2 - d6);
+        outU = 1.0f - w; outV = 0.0f; outW = w;
         return Add(a, Scale(ac, w));
     }
     float va = d3 * d6 - d5 * d4;
     if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
         float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        outU = 0.0f; outV = 1.0f - w; outW = w;
         return Add(b, Scale(Sub(c, b), w));
     }
     float denom = 1.0f / (va + vb + vc);
     float v = vb * denom, w = vc * denom;
+    outU = 1.0f - v - w; outV = v; outW = w;
     return Add(a, Add(Scale(ab, v), Scale(ac, w)));
+}
+
+static Vec3 ClosestPtTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+    float u = 0.0f, v = 0.0f, w = 0.0f;
+    return ClosestPtTriangleBary(p, a, b, c, u, v, w);
 }
 
 static float Dist2PointAABB(const Vec3& p, const Vec3& bmin, const Vec3& bmax) {
@@ -948,12 +976,14 @@ static float Dist2PointAABB(const Vec3& p, const Vec3& bmin, const Vec3& bmax) {
 }
 
 // Closest point on the body surface to p, with that triangle's face normal.
-static bool BVHClosestPoint(const BodyBVH& bvh, const Vec3& p,
-                            Vec3& outCP, Vec3& outNormal, float& outDist2) {
+static bool BVHClosestPointEx(const BodyBVH& bvh, const Vec3& p,
+                              Vec3& outCP, Vec3& outNormal, float& outDist2,
+                              int* outTri, float* outU, float* outV, float* outW) {
     if (!bvh.valid || bvh.nodes.empty()) return false;
     float best = 1e30f;
     int bestTri = -1;
     Vec3 bestCP{0.0f, 0.0f, 0.0f};
+    float bestU = 0.0f, bestV = 0.0f, bestW = 0.0f;
 
     int stack[128];
     int sp = 0;
@@ -966,9 +996,14 @@ static bool BVHClosestPoint(const BodyBVH& bvh, const Vec3& p,
             for (int i = node.start; i < node.start + node.count; ++i) {
                 int ti = bvh.triIndex[i];
                 const auto& t = bvh.tris[ti];
-                Vec3 cp = ClosestPtTriangle(p, bvh.verts[t[0]], bvh.verts[t[1]], bvh.verts[t[2]]);
+                float u = 0.0f, v = 0.0f, w = 0.0f;
+                Vec3 cp = ClosestPtTriangleBary(p, bvh.verts[t[0]], bvh.verts[t[1]], bvh.verts[t[2]],
+                                                u, v, w);
                 float d2 = Len2(Sub(p, cp));
-                if (d2 < best) { best = d2; bestTri = ti; bestCP = cp; }
+                if (d2 < best) {
+                    best = d2; bestTri = ti; bestCP = cp;
+                    bestU = u; bestV = v; bestW = w;
+                }
             }
         } else {
             int lc = node.left, rc = node.left + 1;
@@ -988,6 +1023,34 @@ static bool BVHClosestPoint(const BodyBVH& bvh, const Vec3& p,
     outCP = bestCP;
     outNormal = bvh.faceNormal[bestTri];
     outDist2 = best;
+    if (outTri) *outTri = bestTri;
+    if (outU) *outU = bestU;
+    if (outV) *outV = bestV;
+    if (outW) *outW = bestW;
+    return true;
+}
+
+static bool BVHClosestPoint(const BodyBVH& bvh, const Vec3& p,
+                            Vec3& outCP, Vec3& outNormal, float& outDist2) {
+    return BVHClosestPointEx(bvh, p, outCP, outNormal, outDist2,
+                             nullptr, nullptr, nullptr, nullptr);
+}
+
+static Vec3 TriPointBary(const BodyBVH& bvh, int tri, float u, float v, float w) {
+    if (tri < 0 || tri >= (int)bvh.tris.size()) return Vec3{0.0f, 0.0f, 0.0f};
+    const auto& t = bvh.tris[(size_t)tri];
+    return Add(Scale(bvh.verts[t[0]], u),
+               Add(Scale(bvh.verts[t[1]], v), Scale(bvh.verts[t[2]], w)));
+}
+
+static bool BVHSignedGap(const BodyBVH& bvh, const Vec3& p, float& outGap, Vec3* outNrm) {
+    Vec3 cp{0,0,0}, nrm{0,0,1};
+    float d2 = 0.0f;
+    if (!BVHClosestPoint(bvh, p, cp, nrm, d2)) return false;
+    float dist = std::sqrt(d2);
+    float sign = Dot(Sub(p, cp), nrm);
+    outGap = sign < 0.0f ? -dist : dist;
+    if (outNrm) *outNrm = nrm;
     return true;
 }
 
@@ -1310,8 +1373,10 @@ static void RebuildCacheLocked() {
     g_shapeGeometryPresets.clear();
     g_shapeLayer.clear();
     g_shapeTris.clear();
+    g_solvedShapes.clear();
     g_refVerts.clear();
     g_refTris.clear();
+    g_refBodyBVH = BodyBVH{};
     g_bodyShellCache.clear();
     g_bodyBVHCache.clear();
     g_shapeMask.clear();
@@ -1395,6 +1460,10 @@ static void RebuildCacheLocked() {
     g_refTris.clear();
     g_refTris.reserve(bt.size());
     for (auto& t : bt) g_refTris.push_back({t.p1, t.p2, t.p3});
+    BuildBodyBVH(g_refVerts, g_refTris, g_refBodyBVH);
+    if (g_refBodyBVH.valid)
+        HLog("cache: base body BVH built tris=%zu nodes=%zu",
+             g_refBodyBVH.tris.size(), g_refBodyBVH.nodes.size());
 
     DrapeConformer dc(g_opts);
     std::string bodyName = body->name.get();
@@ -1508,8 +1577,11 @@ static void RebuildCacheLocked() {
         }
 
         // Pairwise: for shapes A,B, over shared cells, count how often A is outside B
-        // (and vice versa). The net sign decides which is outer in their overlap.
-        // Build a "beats" tally → topological-ish rank via simple score accumulation.
+        // (and vice versa). The net decides which is outer in their overlap, and gives
+        // a strict winner per pair. We accumulate a per-shape score (higher = outer).
+        // A simple majority (>60% of decisive cells) wins the pair, so two garments in
+        // the same vertical band (pants under a long dress) get separated even with
+        // modest overlap — the previous 2x ratio + shared<3 gate left them tied.
         std::unordered_map<std::string, int> score;  // higher = more outer
         for (auto& kv : g_shapeVerts) score[kv.first] = 0;
         for (size_t a = 0; a < shapes.size(); ++a) {
@@ -1521,12 +1593,15 @@ static void RebuildCacheLocked() {
                     float ra = ca.second.first / (float)ca.second.second;
                     float rb = it->second.first / (float)it->second.second;
                     ++shared;
-                    if (ra > rb + 0.5f) ++aOuter;
-                    else if (rb > ra + 0.5f) ++bOuter;
+                    if (ra > rb + 0.25f) ++aOuter;       // lower margin: thin garments differ little
+                    else if (rb > ra + 0.25f) ++bOuter;
                 }
-                if (shared < 3) continue;  // not meaningfully overlapping
-                if (aOuter > bOuter * 2)      score[shapes[a].name] += 1;
-                else if (bOuter > aOuter * 2) score[shapes[b].name] += 1;
+                if (shared < 2) continue;                 // need at least minimal overlap
+                int decisive = aOuter + bOuter;
+                if (decisive < 1) continue;               // no clear winner anywhere
+                // Simple majority of decisive cells wins the pair.
+                if (aOuter * 5 > decisive * 3)      score[shapes[a].name] += 1;  // a outside >60%
+                else if (bOuter * 5 > decisive * 3) score[shapes[b].name] += 1;  // b outside >60%
             }
         }
         for (auto& kv : score) g_shapeLayer[kv.first] = kv.second;
@@ -2813,21 +2888,39 @@ static void ApplyEdgeConstraintPass(std::vector<Vec3>& finalVerts,
     }
 }
 
+// One OUTER garment's collider, keeping its identity (not merged with other outers).
+// Holds the outer mesh's BASE and CURRENT surfaces as separate BVHs, plus its preset
+// (for adaptive clearance). The anti-clip pass keeps THIS mesh tucked under each of
+// these individually, so the nearest-point can never silently jump between meshes.
+struct OuterCollider {
+    BodyBVH base;
+    BodyBVH current;
+    int     preset = 0;
+    std::string name;
+};
+
 static bool ApplyStaticClothPass(const std::string& shapeName,
                                  const std::string& sliderName,
                                  int preset,
                                  const std::vector<Vec3>& baseVerts,
                                  const std::vector<VertexBoneProfile>* profiles,
                                  const std::vector<EdgeConstraint>* edges,
+                                 const std::vector<std::array<uint16_t, 3>>* tris,
                                  const BodyShell* bodyShell,
                                  const BodyBVH* bodyBVH,
                                  const std::unordered_map<uint16_t, float>& presetMask,
                                  const TargetDataDiffs& rawDiff,
-                                 // Collider BVH built from all INNER (lower-layer) meshes for this
-                                 // slider at their conformed positions (order-independent). This
-                                 // mesh is pushed off it DURING the solve, like the body, so the
-                                 // cloth constraints relax around it. Null if innermost mesh.
-                                 const BodyBVH* innerBVH,
+                                 // OUTER-mesh colliders, ONE PER outer garment (kept separate so the
+                                 // nearest-point can't silently jump between cloak/belt/pants). Each
+                                 // holds the outer mesh's base + current surface and its preset (for
+                                 // adaptive clearance). The anti-clip is ONE-DIRECTIONAL: it only PULLS
+                                 // THIS mesh IN under each outer one — never pushes the outer mesh out,
+                                 // so the outermost layer (fur cloak) is never deformed (it gets an
+                                 // empty list). Empty/null if this is the outermost mesh.
+                                 const std::vector<OuterCollider>* outerColliders,
+                                 // Receives this mesh's final solved positions, for the caller to
+                                 // cache as an outerBVH source for later-solved inner meshes.
+                                 std::vector<Vec3>* outSolvedVerts,
                                  TargetDataDiffs& outDiff,
                                  StaticSolveStats& stats) {
     stats = StaticSolveStats{};
@@ -2839,6 +2932,8 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     if (!params.enabled)
         return false;
     stats.physicsDrapeActive = params.physicsDrape;
+
+    const bool isLoosePreset = NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED;
 
     size_t n = std::min<size_t>(baseVerts.size(), 0x10000);
     std::vector<Vec3> supportVerts(n);
@@ -3141,8 +3236,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // belt/bodice sits TIGHT to the body (small gap) so it is never caught
         // here even within a Loose-Draped mesh.
         const bool kLooseHangEnabled =
-            (NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) &&
-            bodyBVH && bodyBVH->valid;
+            isLoosePreset && bodyBVH && bodyBVH->valid;
         // Gap thresholds: below kGapNear the vert hugs the body (keep bone signal);
         // above kGapFar it is unambiguously free-hanging cloth (full drape).
         const float kGapNear = 1.0f;
@@ -3181,6 +3275,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
             drapeAmount[i]   = sig;
             vertClearance[i] = kHugClear + sig * (kSkirtClear - kHugClear);
+
         }
 
         if (kLooseHangEnabled && hangVerts > 0)
@@ -3339,29 +3434,18 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // (stays fitted), so both can live in the same mesh without the belt being
     // pushed out as far as the skirt.
     // Inner-mesh layer clearance: how far outside an inner garment this mesh must sit.
-    const float kInnerClear = 0.45f;
     auto collideVertex = [&](size_t i, float stiffness) -> bool {
         if (stiffness <= 0.0f) return false;
         float vc = vertClearance[i];
-        bool moved = false;
-        // (1) Inner-mesh collision: push out of any lower-layer garment, like the body.
-        // Skip rigid/pinned verts (belt/medallion shapes stay exact).
-        if (innerBVH && innerBVH->valid && invMass[i] > 0.0f) {
-            int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
-            bool rigid = (id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id]);
-            if (!rigid) {
-                Vec3 target = finalVerts[i];
-                if (BVHCollideVertex(*innerBVH, target, kInnerClear)) {
-                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
-                    moved = true;
-                }
-            }
-        }
-        // (2) Body collision (primary).
+        // Inter-garment ordering is handled entirely by the bidirectional per-vertex
+        // anti-clip post-pass (local order from the base mesh). The in-solve collider
+        // only handles the BODY — pushing off other garments here would be one-
+        // directional and could shove a vert to the wrong side of the local order.
+        // Body collision (primary).
         if (bodyBVH && bodyBVH->valid) {
             Vec3 target = finalVerts[i];
             if (!BVHCollideVertex(*bodyBVH, target, vc))
-                return moved;
+                return false;
             finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
             return true;
         }
@@ -4142,16 +4226,18 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // Clearance is intentionally smaller (0.15) than bodyClearance so it only
     // fixes real clips without pushing fitted/belted pieces off the body visibly.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
+        float clearFactor = 0.5f;
         for (size_t i = 0; i < n; ++i) {
             Vec3 target = finalVerts[i];
-            // Use per-vert clearance; belt verts use their small clearance,
-            // skirt verts use their full clearance. Floor at 0.10 to catch
-            // any genuine penetration even for fully-anchored verts.
-            float ac = std::max(0.10f, vertClearance[i] * 0.5f);
+            float ac = std::max(0.10f, vertClearance[i] * clearFactor);
             if (BVHCollideVertex(*bodyBVH, target, ac))
                 finalVerts[i] = target;
         }
     }
+
+    // NOTE: the per-vertex anti-clip pass runs LATER, AFTER seam-close — see below.
+    // Running it here let seam-close drag the tucked verts back to a clipping position
+    // (seam-close restores cross-island vanilla offsets and was undoing the anti-clip).
 
     // ── Rigid-island pass ────────────────────────────────────────────────────
     // A medallion, buckle or plate should TRANSLATE with the morphing body but
@@ -4482,6 +4568,383 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                  shapeName.c_str(), crossPairs, fixedPairs, worstBefore, worstAfter);
     }
 
+    // Final body recollision AFTER seam-close. Seam-close can move verts after the
+    // earlier body collision; enforce only a tiny body floor here. Outer-layer room
+    // conflicts are handled by the covered-vertex suppress pass below, not by
+    // inflating the visible outer garment.
+    if (params.verletCloth && bodyBVH && bodyBVH->valid) {
+        const float kBodyFloorClear = 0.06f;
+        int repushed = 0;
+        for (size_t i = 0; i < n; ++i) {
+            int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+            if (id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id])
+                continue;                         // rigid plate: keep exact shape
+            float ac = kBodyFloorClear;
+            Vec3 target = finalVerts[i];
+            if (BVHCollideVertex(*bodyBVH, target, ac)) {
+                finalVerts[i] = target;
+                ++repushed;
+            }
+        }
+        if (repushed > 0) {
+            stats.bodyAdjusted += repushed;
+            HLog("detour: final-body-reclear shape='%s' mode='floor' clr=%.2f pushed=%d",
+                 shapeName.c_str(), kBodyFloorClear, repushed);
+        }
+    }
+
+    // ── Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes ────
+    // MUST run AFTER seam-close (which restores cross-island offsets and would undo it).
+    // This is the LAST geometry pass — its corrections are the final word.
+    //
+    // ONE-DIRECTIONAL by layer rank (addresses the review): the collider is built ONLY
+    // from garments ABOVE this one (strictly higher rank). The rule only ever PULLS THIS
+    // mesh IN under them — it never pushes the outer mesh out, so the outermost layer (a
+    // fur cloak) is never deformed (it gets no collider at all → untouched).
+    //
+    // REAL CLEARANCE, not just order-sign inversion (addresses the review): a vert is
+    // corrected whenever it fails to sit at least kClearance UNDER the outer surface —
+    // i.e. it has popped outside, is coincident, OR is merely grazing within the margin.
+    //
+    // Metric = signed body-gap (distance to the body surface along the body normal),
+    // which is well-defined on shoulders/back where radial-from-axis was degenerate.
+    // BUT only act where the BASE mesh had THIS vert genuinely UNDER the outer mesh
+    // (myBaseGap < otherBaseGap) — so we never invert a region where this mesh is
+    // legitimately the outer one locally (dress-over-pants-at-hip etc. stays correct).
+    if (NormalizePreset(preset) != DRAPE_PRESET_AUTO &&
+        outerColliders && !outerColliders->empty() &&
+        bodyBVH && bodyBVH->valid) {
+        const float kOverlap = 2.75f;   // base proximity to count as a real overlap
+        const float kBaseUnderSlack = 0.06f; // tolerate near-coincident base layers
+        const int   kRounds  = 4;
+        auto bodyGap = [&](const Vec3& p, Vec3& outNrm) -> float {
+            float gap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, p, gap, &outNrm)) {
+                outNrm = Vec3{0,0,1};
+                return 0.0f;
+            }
+            return gap;
+        };
+        const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
+        auto baseBodyGap = [&](const Vec3& p, Vec3& outNrm) -> float {
+            float gap = 0.0f;
+            if (!BVHSignedGap(*baseBodyBVH, p, gap, &outNrm)) {
+                outNrm = Vec3{0,0,1};
+                return 0.0f;
+            }
+            return gap;
+        };
+        // Adaptive clearance by the OUTER mesh's preset (review #3): a thin gappy fur
+        // cloak needs a small margin (don't crush the inner mesh into the body); rigid
+        // armor/belt sits thicker and needs more.
+        auto clearanceFor = [](int outerPreset) -> float {
+            switch (NormalizePreset(outerPreset)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.20f;  // cloak/cape — small
+            case DRAPE_PRESET_RIGID_ARMOR:
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.45f;  // armor — thick
+            case DRAPE_PRESET_BELT:            return 0.40f;  // belt — thick
+            default:                           return 0.30f;
+            }
+        };
+
+        int tucked = 0;
+        for (int round = 0; round < kRounds; ++round) {
+            int roundMoved = 0;
+            for (size_t i = 0; i < n; ++i) {
+                Vec3 myNrm{};
+                float myGap = bodyGap(finalVerts[i], myNrm);
+
+                // Against EACH outer garment separately (review #1: keep identity).
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.base.valid || !oc.current.valid) continue;
+                    const float kClearance = clearanceFor(oc.preset);
+
+                    // Was I UNDER this outer mesh in the BASE config, and overlapping?
+                    Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
+                    int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                    if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bnrm, bd2,
+                                           &baseTri, &bu, &bv, &bw)) continue;
+                    if (std::sqrt(bd2) > kOverlap) continue;
+                    Vec3 dummy{};
+                    if (baseBodyGap(baseVerts[i], dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
+                    if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+
+                    // CURRENT: am I clearing THIS outer mesh by its clearance?
+                    Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                    float othGap  = bodyGap(cp, dummy);
+                    float allowed = othGap - kClearance;
+                    if (myGap <= allowed) continue;            // already tucked under this one
+
+                    // BODY-CLAMP (review #2): never pull a vert closer to the body than a
+                    // tiny floor — if the outer mesh hugs the body so tight there's no room
+                    // for the inner garment, do NOT reintroduce body clipping. Tuck only as
+                    // far as the floor allows (partial fix beats a body poke-through).
+                    const float kBodyFloor = 0.06f;            // min gap to keep off the body
+                    float target = std::max(allowed, kBodyFloor);
+                    if (myGap <= target) continue;
+                    finalVerts[i] = Add(finalVerts[i], Scale(myNrm, target - myGap));
+                    myGap = target;                            // update for next collider
+                    if (round == 0) ++tucked;
+                    ++roundMoved;
+                }
+            }
+            if (roundMoved == 0) break;
+        }
+        if (tucked > 0)
+            HLog("detour: anti-clip shape='%s' tuckedUnder=%d outers=%zu",
+                 shapeName.c_str(), tucked, outerColliders->size());
+
+        // ── Covered-vertex suppression (DISABLED) ───────────────────────────
+        // The idea (zap covered inner verts where there's no room) is sound, but this
+        // implementation moves verts deep INTO the body to hide them, which tears the
+        // mesh: a hidden vert pulled 1-2u inward while its neighbours stay put creates
+        // stretched/ripped triangles (observed hidden=172 feathered=475 deepestGap=-2.25).
+        // The correct "hide" is collapsing a covered vert ONTO a neighbour (zero-area),
+        // not pushing it through the body — left for a future rewrite. For now the
+        // tuck-only pass above handles the easy cases; residual covered clipping is left
+        // for the user's zap slider (no rips). Kept compiled-but-dead for reference.
+        const bool kEnableSuppress = false;
+        if (kEnableSuppress) {
+        const float kBodyFloor = 0.06f;
+        std::vector<float> suppress(n, 0.0f);
+        std::vector<float> suppressTargetGap(n, 0.0f);
+        int suppressCore = 0;
+        int suppressFaceTris = 0;
+        int suppressFaceSamples = 0;
+        float worstSuppressPen = 0.0f;
+        float deepestSuppressGap = 0.0f;
+        auto markSuppress = [&](size_t vi, float targetGap, float pen) {
+            if (vi >= n) return;
+            if (suppress[vi] < 1.0f) {
+                suppress[vi] = 1.0f;
+                ++suppressCore;
+            }
+            suppressTargetGap[vi] = std::min(suppressTargetGap[vi], targetGap);
+            deepestSuppressGap = std::min(deepestSuppressGap, targetGap);
+            worstSuppressPen = std::max(worstSuppressPen, pen);
+        };
+        for (size_t i = 0; i < n; ++i) {
+            Vec3 myNrm{};
+            float myGap = bodyGap(finalVerts[i], myNrm);
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.base.valid || !oc.current.valid) continue;
+                const float kClearance = clearanceFor(oc.preset);
+
+                Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
+                int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bnrm, bd2,
+                                       &baseTri, &bu, &bv, &bw)) continue;
+                if (std::sqrt(bd2) > kOverlap) continue;
+                Vec3 dummy{};
+                if (baseBodyGap(baseVerts[i], dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+
+                Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                float outerGap = bodyGap(cp, dummy);
+                float allowed = outerGap - kClearance;
+                float pen = myGap - allowed;
+                if (pen <= 0.01f) continue;
+
+                // Body conflict: the outer surface does not leave even the minimum
+                // body floor for this inner layer, so a movement-only fix is invalid.
+                if (allowed >= kBodyFloor) continue;
+                if (suppress[i] < 1.0f) {
+                    suppress[i] = 1.0f;
+                    ++suppressCore;
+                }
+                float targetGap = ClampRange(allowed - 0.30f, -3.00f, -0.55f);
+                markSuppress(i, targetGap, pen);
+            }
+        }
+
+        // Vertex-only tests miss the most visible failure mode: a triangle face can
+        // cross the outer layer even when none of its corners is a good sample.
+        // Sample each inner triangle in base/current space and suppress the whole
+        // triangle when a covered surface sample is in a body-conflict region.
+        if (tris && !tris->empty()) {
+            struct SampleBary { float a, b, c; };
+            static const SampleBary kSamples[] = {
+                {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                {0.5f, 0.5f, 0.0f},
+                {0.5f, 0.0f, 0.5f},
+                {0.0f, 0.5f, 0.5f},
+                {0.60f, 0.20f, 0.20f},
+                {0.20f, 0.60f, 0.20f},
+                {0.20f, 0.20f, 0.60f},
+            };
+            auto triPoint = [](const std::vector<Vec3>& verts,
+                               const std::array<uint16_t, 3>& t,
+                               const SampleBary& s) -> Vec3 {
+                return Add(Scale(verts[t[0]], s.a),
+                           Add(Scale(verts[t[1]], s.b), Scale(verts[t[2]], s.c)));
+            };
+
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                bool triMarked = false;
+                float triTargetGap = 0.0f;
+                float triWorstPen = 0.0f;
+                for (const SampleBary& sb : kSamples) {
+                    Vec3 baseSample = triPoint(baseVerts, t, sb);
+                    Vec3 curSample  = triPoint(finalVerts, t, sb);
+                    Vec3 myNrm{};
+                    float myGap = bodyGap(curSample, myNrm);
+
+                    for (const OuterCollider& oc : *outerColliders) {
+                        if (!oc.base.valid || !oc.current.valid) continue;
+                        const float kClearance = clearanceFor(oc.preset);
+
+                        Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
+                        int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                        if (!BVHClosestPointEx(oc.base, baseSample, bcp, bnrm, bd2,
+                                               &baseTri, &bu, &bv, &bw)) continue;
+                        if (std::sqrt(bd2) > kOverlap) continue;
+                        Vec3 dummy{};
+                        if (baseBodyGap(baseSample, dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
+                        if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+
+                        Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                        float outerGap = bodyGap(cp, dummy);
+                        float allowed = outerGap - kClearance;
+                        float pen = myGap - allowed;
+                        if (pen <= 0.01f || allowed >= kBodyFloor) continue;
+
+                        float targetGap = ClampRange(allowed - 0.35f, -3.00f, -0.65f);
+                        triTargetGap = std::min(triTargetGap, targetGap);
+                        triWorstPen = std::max(triWorstPen, pen);
+                        triMarked = true;
+                        ++suppressFaceSamples;
+                    }
+                }
+                if (triMarked) {
+                    markSuppress(t[0], triTargetGap, triWorstPen);
+                    markSuppress(t[1], triTargetGap, triWorstPen);
+                    markSuppress(t[2], triTargetGap, triWorstPen);
+                    ++suppressFaceTris;
+                }
+            }
+        }
+
+        if (suppressCore > 0) {
+            std::vector<float> weight = suppress;
+            std::vector<float> targetGap = suppressTargetGap;
+            if (edges && !edges->empty()) {
+                static const float kFeatherDecay[] = {0.75f, 0.55f, 0.35f};
+                for (int ring = 0; ring < 3; ++ring) {
+                    std::vector<float> next = weight;
+                    std::vector<float> nextTarget = targetGap;
+                    for (const EdgeConstraint& e : *edges) {
+                        if (e.a >= n || e.b >= n) continue;
+                        float wa = weight[e.b] * kFeatherDecay[ring];
+                        if (wa > next[e.a]) {
+                            next[e.a] = wa;
+                            nextTarget[e.a] = std::min(nextTarget[e.a], targetGap[e.b]);
+                        }
+                        float wb = weight[e.a] * kFeatherDecay[ring];
+                        if (wb > next[e.b]) {
+                            next[e.b] = wb;
+                            nextTarget[e.b] = std::min(nextTarget[e.b], targetGap[e.a]);
+                        }
+                    }
+                    weight.swap(next);
+                    targetGap.swap(nextTarget);
+                }
+            }
+
+            int hidden = 0, feathered = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float w = Clamp01(weight[i]);
+                if (w <= 0.01f) continue;
+                Vec3 cp{0,0,0}, nrm{0,0,1};
+                float d2 = 0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                Vec3 target = Add(cp, Scale(nrm, targetGap[i]));
+                finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), w));
+                if (suppress[i] >= 0.99f) ++hidden;
+                else ++feathered;
+            }
+            HLog("detour: anti-clip-suppress shape='%s' hidden=%d feathered=%d faceTris=%d faceSamples=%d outers=%zu worstPen=%.2f deepestGap=%.2f",
+                 shapeName.c_str(), hidden, feathered,
+                 suppressFaceTris, suppressFaceSamples, outerColliders->size(),
+                 worstSuppressPen, deepestSuppressGap);
+        }
+
+        // One final forced cleanup for the exact vertices that would otherwise show
+        // up in the residual report. This catches boundary cases where a vertex was
+        // only feathered but the current outer surface still leaves no physical room.
+        int forcedResidual = 0;
+        float forcedDeepestGap = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.base.valid || !oc.current.valid) continue;
+                const float kClearance = clearanceFor(oc.preset);
+
+                Vec3 bcp{0,0,0}, bn{0,0,1}; float bd2 = 0.0f;
+                int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bn, bd2,
+                                       &baseTri, &bu, &bv, &bw)) continue;
+                if (std::sqrt(bd2) > kOverlap) continue;
+                Vec3 dn{};
+                if (baseBodyGap(baseVerts[i], dn) >= baseBodyGap(bcp, dn) + kBaseUnderSlack) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+
+                Vec3 outerCP = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                float outerGap = bodyGap(outerCP, dn);
+                float allowed = outerGap - kClearance;
+                if (allowed >= kBodyFloor) continue;
+                float pen = bodyGap(finalVerts[i], dn) - allowed;
+                if (pen <= 0.01f) continue;
+
+                Vec3 bodyCP{0,0,0}, nrm{0,0,1};
+                float d2 = 0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], bodyCP, nrm, d2)) continue;
+                float targetGap = ClampRange(allowed - 0.50f, -3.50f, -0.85f);
+                finalVerts[i] = Add(bodyCP, Scale(nrm, targetGap));
+                forcedDeepestGap = std::min(forcedDeepestGap, targetGap);
+                ++forcedResidual;
+                break;
+            }
+        }
+        if (forcedResidual > 0)
+            HLog("detour: anti-clip-cleanup shape='%s' forced=%d deepestGap=%.2f",
+                 shapeName.c_str(), forcedResidual, forcedDeepestGap);
+        }  // end if (kEnableSuppress)
+
+        // DIAGNOSTIC per OUTER shape (review #5): where residual clipping remains and
+        // whether it's a body-conflict (no room) vs a genuine miss.
+        for (const OuterCollider& oc : *outerColliders) {
+            if (!oc.base.valid || !oc.current.valid) continue;
+            const float kClearance = clearanceFor(oc.preset);
+            int stillBad = 0, bodyConflict = 0; float worstPen = 0, worstZ = 0, sumZ = 0;
+            float sumOuterGap = 0, minOuterGap = 1e9f;   // real body↔outer gap at conflict pts
+            for (size_t i = 0; i < n; ++i) {
+                Vec3 bcp{0,0,0}, bn{0,0,1}; float bd2 = 0.0f;
+                int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bn, bd2,
+                                       &baseTri, &bu, &bv, &bw)) continue;
+                if (std::sqrt(bd2) > kOverlap) continue;
+                Vec3 dn{};
+                if (baseBodyGap(baseVerts[i], dn) >= baseBodyGap(bcp, dn) + kBaseUnderSlack) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+                Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                float outerGap = bodyGap(cp, dn);           // how far the OUTER sits off body
+                float allowed = outerGap - kClearance;
+                float pen = bodyGap(finalVerts[i], dn) - allowed;
+                if (pen > 0.01f) {
+                    ++stillBad; sumZ += finalVerts[i].z;
+                    sumOuterGap += outerGap; minOuterGap = std::min(minOuterGap, outerGap);
+                    if (allowed < 0.06f) ++bodyConflict;   // no room between body and outer
+                    if (pen > worstPen) { worstPen = pen; worstZ = finalVerts[i].z; }
+                }
+            }
+            if (stillBad > 0)
+                HLog("detour: anti-clip-RESIDUAL shape='%s' outer='%s' stillBad=%d bodyConflict=%d avgZ=%.1f worstZ=%.1f worstPen=%.2f avgOuterGap=%.2f minOuterGap=%.2f",
+                     shapeName.c_str(), oc.name.c_str(), stillBad, bodyConflict,
+                     sumZ/(float)stillBad, worstZ, worstPen,
+                     sumOuterGap/(float)stillBad, minOuterGap);
+        }
+    }
+
     // Write only non-zero diffs (matches BodySlide convention).
     outDiff.clear();
     outDiff.reserve(rawDiff.size());
@@ -4497,6 +4960,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         if (kv.first >= n)
             outDiff[kv.first] = kv.second;
     }
+
+    // Hand the final solved positions back so the caller can cache them as an
+    // outer-collider source for inner meshes solved later in this slider.
+    if (outSolvedVerts)
+        *outSolvedVerts = finalVerts;
 
     return true;
 }
@@ -4517,6 +4985,23 @@ static void Detour_GenResult(
     if (!g_enabled.load(std::memory_order_acquire) || !g_diffZeroVert ||
         !self || !shapeName || !sliderName || solidMode) {
         return;
+    }
+
+    // Skip genital / body-part meshes entirely: they are body geometry, not garments,
+    // so cloth + layer logic is pointless and can deform them. Vanilla conform already
+    // ran above (g_origGenResult) — returning now leaves that correct result in place.
+    {
+        std::string ln = lower(*shapeName);
+        static const char* kBodyPartTokens[] = {
+            "vagina", "anus", "penis", "scrotum", "clitoris", "labia", "areola", "nipple",
+        };
+        for (const char* tok : kBodyPartTokens) {
+            if (NameHas(ln, tok)) {
+                if (g_missingShapesLogged.insert(*shapeName).second)
+                    HLog("detour: SKIP body-part mesh '%s' → vanilla conform", shapeName->c_str());
+                return;
+            }
+        }
     }
 
     std::lock_guard<std::mutex> lk(g_cacheMx);
@@ -4556,6 +5041,8 @@ static void Detour_GenResult(
     int preset = DRAPE_PRESET_AUTO;
     const auto* profiles = profilesIt != g_shapeBoneProfiles.end() ? &profilesIt->second : nullptr;
     const auto* edges = edgesIt != g_shapeEdges.end() ? &edgesIt->second : nullptr;
+    auto trisIt = g_shapeTris.find(*shapeName);
+    const auto* tris = trisIt != g_shapeTris.end() ? &trisIt->second : nullptr;
     BuildPresetMaskLocked(*shapeName, weightsIt->second, profiles, edges, presetMask, preset);
 
     const BodyShell* bodyShell = nullptr;
@@ -4607,65 +5094,83 @@ static void Detour_GenResult(
             TargetDataDiffs solvedDiff;
             StaticSolveStats stats;
 
-            // Build a collider BVH from all INNER (lower-layer) meshes at their
-            // conformed positions for this slider, so the solve can push this mesh
-            // off them DURING relaxation (like the body). Order-independent: each
-            // inner mesh's conformed shape = its base verts + its OWN conform diff,
-            // available regardless of whether its physics has run yet. We merge all
-            // inner meshes into one vert+tri list and build a single BVH.
-            BodyBVH innerBVH;
+            // Build the OUTER-mesh colliders: ONE PER garment that sits ABOVE this one
+            // (strictly higher layer rank), kept SEPARATE so the nearest-point can never
+            // jump between cloak/belt/pants (review #1). Each carries the outer mesh's
+            // base + current surface and its preset (for adaptive clearance). The
+            // outermost mesh (highest rank) gets an empty list → never deformed.
+            int myLayerRank = 0;
+            { auto it = g_shapeLayer.find(*shapeName); if (it != g_shapeLayer.end()) myLayerRank = it->second; }
+            std::vector<OuterCollider> outerColliders;
             {
-                int myLayer = 0;
-                auto mlit = g_shapeLayer.find(*shapeName);
-                if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
-                if (myLayer > 0) {
-                    std::vector<Vec3> mergedV;
-                    std::vector<std::array<uint16_t,3>> mergedT;
-                    for (const auto& lv : g_shapeLayer) {
-                        if (lv.second >= myLayer) continue;        // not strictly inner
-                        const std::string& innerName = lv.first;
-                        // Skip BODY meshes (3BBB etc.): they ARE the body, already handled
-                        // by bodyBVH. Including them double-collides every garment off a
-                        // second body copy → catastrophic inflation. Body meshes are the
-                        // ones the user left as Auto (no explicit garment preset).
-                        if (NormalizePreset(PresetForShapeLocked(innerName)) == DRAPE_PRESET_AUTO)
-                            continue;
-                        auto ivIt = g_shapeVerts.find(innerName);
-                        auto itIt = g_shapeTris.find(innerName);
-                        if (ivIt == g_shapeVerts.end() || ivIt->second.empty()) continue;
-                        if (itIt == g_shapeTris.end() || itIt->second.empty()) continue;
-                        TargetDataDiffs innerRaw;
-                        if (!HostGetRawResultDiff(self, &innerName, sliderName, innerRaw))
-                            continue;
-                        const auto& ibase = ivIt->second;
-                        // Merging shifts this mesh's tri indices by the current vert count.
-                        // BVH uses uint16 indices, so cap: skip a mesh that would overflow
-                        // the combined index space (rare; meshes are usually < 64k each).
-                        size_t baseOff = mergedV.size();
-                        if (baseOff + ibase.size() > 0xFFFF) continue;
-                        mergedV.reserve(baseOff + ibase.size());
-                        for (size_t k = 0; k < ibase.size(); ++k) {
-                            Vec3 d = DiffAt(innerRaw, (uint16_t)std::min<size_t>(k, 0xFFFF));
-                            mergedV.push_back(Add(ibase[k], d));
+                auto slIt = g_solvedShapes.find(*sliderName);
+                for (const auto& kv : g_shapeVerts) {
+                    const std::string& other = kv.first;
+                    if (other == *shapeName) continue;
+                    int otherPreset = PresetForShapeLocked(other);
+                    if (NormalizePreset(otherPreset) == DRAPE_PRESET_AUTO)
+                        continue;                                  // skip body meshes
+                    int otherRank = 0;
+                    { auto it = g_shapeLayer.find(other); if (it != g_shapeLayer.end()) otherRank = it->second; }
+                    if (otherRank <= myLayerRank) continue;        // only strictly OUTER meshes
+                    auto itIt = g_shapeTris.find(other);
+                    if (itIt == g_shapeTris.end() || itIt->second.empty()) continue;
+                    const auto& obase = kv.second;
+                    if (obase.empty() || obase.size() > 0xFFFF) continue;
+
+                    // current config: solved if cached this slider, else conformed.
+                    const std::vector<Vec3>* cur = nullptr;
+                    if (slIt != g_solvedShapes.end()) {
+                        auto svIt = slIt->second.find(other);
+                        if (svIt != slIt->second.end() && !svIt->second.verts.empty())
+                            cur = &svIt->second.verts;
+                    }
+                    std::vector<Vec3> conformed;
+                    if (!cur) {
+                        TargetDataDiffs oraw;
+                        if (HostGetRawResultDiff(self, &other, sliderName, oraw)) {
+                            conformed.resize(obase.size());
+                            for (size_t k = 0; k < obase.size(); ++k)
+                                conformed[k] = Add(obase[k],
+                                    DiffAt(oraw, (uint16_t)std::min<size_t>(k, 0xFFFF)));
+                            cur = &conformed;
                         }
-                        for (const auto& t : itIt->second)
-                            mergedT.push_back({ (uint16_t)(t[0] + baseOff),
-                                                (uint16_t)(t[1] + baseOff),
-                                                (uint16_t)(t[2] + baseOff) });
                     }
-                    if (!mergedV.empty() && !mergedT.empty()) {
-                        BuildBodyBVH(mergedV, mergedT, innerBVH);
-                        HLog("detour: layer-collider shape='%s' layer=%d innerVerts=%zu innerTris=%zu",
-                             shapeName->c_str(), myLayer, mergedV.size(), mergedT.size());
-                    }
+                    if (!cur || cur->size() != obase.size()) continue;
+
+                    OuterCollider oc;
+                    oc.name = other;
+                    oc.preset = otherPreset;
+                    BuildBodyBVH(obase, itIt->second, oc.base);
+                    BuildBodyBVH(*cur,  itIt->second, oc.current);
+                    if (oc.base.valid && oc.current.valid)
+                        outerColliders.push_back(std::move(oc));
+                }
+                if (!outerColliders.empty()) {
+                    std::string names;
+                    for (auto& oc : outerColliders) { if (!names.empty()) names += ","; names += oc.name; }
+                    HLog("detour: anti-clip-collider shape='%s' slider='%s' myRank=%d outers=[%s]",
+                         shapeName->c_str(), sliderName->c_str(), myLayerRank, names.c_str());
                 }
             }
 
+            std::vector<Vec3> solvedVerts;
             bool passOk = ApplyStaticClothPass(*shapeName, *sliderName, preset,
-                                               vertsIt->second, profiles, edges, bodyShell, bodyBVH,
+                                               vertsIt->second, profiles, edges, tris,
+                                               bodyShell, bodyBVH,
                                                presetMask, rawDiff,
-                                               innerBVH.valid ? &innerBVH : nullptr,
+                                               outerColliders.empty() ? nullptr : &outerColliders,
+                                               &solvedVerts,
                                                solvedDiff, stats);
+            // Cache this mesh's solved positions per (slider, shape) so other meshes
+            // solved later this slider use its actual draped surface as their collider.
+            if (passOk && !solvedVerts.empty()) {
+                int myLayer = 0;
+                auto mlit = g_shapeLayer.find(*shapeName);
+                if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
+                SolvedMesh sm; sm.verts = std::move(solvedVerts); sm.layer = myLayer;
+                g_solvedShapes[*sliderName][*shapeName] = std::move(sm);
+            }
             if (passOk) {
                 if (HostSetResultDiff(self, shapeName, sliderName, solvedDiff)) {
                     // Log EVERY slider (no deduplication) so we can verify the write path.
@@ -4839,6 +5344,9 @@ int DrapeClearShapePresets() {
     std::lock_guard<std::mutex> lk(g_cacheMx);
     g_shapePresets.clear();
     g_appliedShapesLogged.clear();
+    // Clear the per-slider solved-mesh cache too: it holds the PREVIOUS Conform run's
+    // results, which would otherwise be used as stale colliders on the next run.
+    g_solvedShapes.clear();
     HLog("preset-ui: cleared shape presets");
     return 0;
 }
