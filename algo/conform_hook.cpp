@@ -190,6 +190,13 @@ static std::unordered_map<std::string, std::vector<Vec3>> g_shapeVerts;
 static std::unordered_map<std::string, std::vector<EdgeConstraint>> g_shapeEdges;
 static std::unordered_map<std::string, std::vector<BendingConstraint>> g_shapeBending;
 static std::unordered_map<std::string, int> g_shapeGeometryPresets;
+// Inter-mesh layer order: higher = more outer (farther from body). Computed once
+// per project in RebuildCacheLocked by sampling base-mesh overlaps. An outer mesh
+// is pushed out to clear any inner (lower-layer) mesh during the solve.
+static std::unordered_map<std::string, int> g_shapeLayer;
+// Per-shape triangles (base topology) — used to build a per-mesh collider BVH so an
+// outer garment can be pushed off an inner one DURING the solve (like the body).
+static std::unordered_map<std::string, std::vector<std::array<uint16_t, 3>>> g_shapeTris;
 static std::vector<Vec3> g_refVerts;
 static std::vector<std::array<uint16_t, 3>> g_refTris;  // body triangles (for BVH)
 static std::unordered_map<std::string, BodyShell> g_bodyShellCache;
@@ -1301,6 +1308,8 @@ static void RebuildCacheLocked() {
     g_shapeEdges.clear();
     g_shapeBending.clear();
     g_shapeGeometryPresets.clear();
+    g_shapeLayer.clear();
+    g_shapeTris.clear();
     g_refVerts.clear();
     g_refTris.clear();
     g_bodyShellCache.clear();
@@ -1442,6 +1451,12 @@ static void RebuildCacheLocked() {
         g_shapeVerts[name]   = std::move(outVerts);
         g_shapeEdges[name]   = std::move(edges);
         g_shapeBending[name] = std::move(bending);
+        {
+            std::vector<Triangle> st; s->GetTriangles(st);
+            auto& dst = g_shapeTris[name];
+            dst.reserve(st.size());
+            for (auto& t : st) dst.push_back({t.p1, t.p2, t.p3});
+        }
         HLog("cache: shape '%s' created %zu bending constraints", name.c_str(), g_shapeBending[name].size());
         g_shapeMask[name]    = std::move(mask);
         ++built;
@@ -1450,6 +1465,76 @@ static void RebuildCacheLocked() {
              g_shapeEdges[name].size(), boneInfluenced, avgTorsoBone, avgLimbBone,
              PresetName(geometryPreset));
     }
+
+    // ── Inter-mesh layer order pre-pass ──────────────────────────────────────
+    // For every pair of garment meshes, sample where they overlap (same vertical
+    // column near the body) in the BASE mesh and record which sits farther from the
+    // body's central axis there (outer). Aggregate into a per-shape layer rank so
+    // the solver can push an outer mesh out of any inner mesh it would clip through.
+    //
+    // Distance-from-axis is a cheap, robust "outer-ness" proxy: a cloak worn over a
+    // tunic has a larger XY radius at the same Z/column than the tunic. We pair up
+    // meshes by binning verts into a coarse (column, Z) grid and comparing mean radii
+    // where both meshes have samples.
+    {
+        struct ShapeRadial {
+            std::string name;
+            // grid key (qx,qy,qz packed) -> {sumRadius, count}
+            std::unordered_map<uint64_t, std::pair<float,int>> cells;
+        };
+        const float kCell = 4.0f;  // coarse column size (units)
+        auto gkey = [&](const Vec3& p) -> uint64_t {
+            auto q = [&](float v) -> uint64_t {
+                return (uint64_t)(uint32_t)(int32_t)std::llround(v / kCell);
+            };
+            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+        };
+        auto radiusOf = [&](const Vec3& p) -> float {
+            float dx = p.x - g_refCenterX, dy = p.y - g_refCenterY;
+            return std::sqrt(dx * dx + dy * dy);
+        };
+
+        std::vector<ShapeRadial> shapes;
+        shapes.reserve(g_shapeVerts.size());
+        for (const auto& kv : g_shapeVerts) {
+            ShapeRadial sr;
+            sr.name = kv.first;
+            for (const auto& v : kv.second) {
+                auto& cell = sr.cells[gkey(v)];
+                cell.first  += radiusOf(v);
+                cell.second += 1;
+            }
+            shapes.push_back(std::move(sr));
+        }
+
+        // Pairwise: for shapes A,B, over shared cells, count how often A is outside B
+        // (and vice versa). The net sign decides which is outer in their overlap.
+        // Build a "beats" tally → topological-ish rank via simple score accumulation.
+        std::unordered_map<std::string, int> score;  // higher = more outer
+        for (auto& kv : g_shapeVerts) score[kv.first] = 0;
+        for (size_t a = 0; a < shapes.size(); ++a) {
+            for (size_t b = a + 1; b < shapes.size(); ++b) {
+                int aOuter = 0, bOuter = 0, shared = 0;
+                for (const auto& ca : shapes[a].cells) {
+                    auto it = shapes[b].cells.find(ca.first);
+                    if (it == shapes[b].cells.end()) continue;
+                    float ra = ca.second.first / (float)ca.second.second;
+                    float rb = it->second.first / (float)it->second.second;
+                    ++shared;
+                    if (ra > rb + 0.5f) ++aOuter;
+                    else if (rb > ra + 0.5f) ++bOuter;
+                }
+                if (shared < 3) continue;  // not meaningfully overlapping
+                if (aOuter > bOuter * 2)      score[shapes[a].name] += 1;
+                else if (bOuter > aOuter * 2) score[shapes[b].name] += 1;
+            }
+        }
+        for (auto& kv : score) g_shapeLayer[kv.first] = kv.second;
+
+        for (const auto& kv : g_shapeLayer)
+            HLog("layer: shape '%s' rank=%d", kv.first.c_str(), kv.second);
+    }
+
     HLog("cache: built weights for %d shape(s), project '%s'", built, proj.c_str());
 }
 
@@ -2738,6 +2823,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                                  const BodyBVH* bodyBVH,
                                  const std::unordered_map<uint16_t, float>& presetMask,
                                  const TargetDataDiffs& rawDiff,
+                                 // Collider BVH built from all INNER (lower-layer) meshes for this
+                                 // slider at their conformed positions (order-independent). This
+                                 // mesh is pushed off it DURING the solve, like the body, so the
+                                 // cloth constraints relax around it. Null if innermost mesh.
+                                 const BodyBVH* innerBVH,
                                  TargetDataDiffs& outDiff,
                                  StaticSolveStats& stats) {
     stats = StaticSolveStats{};
@@ -3034,6 +3124,31 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float kSkirtClear = params.bodyClearance;  // full drape gap
         const float kHugClear   = 0.12f;                 // fitted hugs the body
         const float kRigidClear = 0.08f;                 // rigid trim near-zero
+
+        // ── Hybrid free-hang drape (Loose-Draped meshes only) ──────────────
+        // The bone-based vertDrapeSignal only recognises LOWER-body draping
+        // (pelvis+leg+below-waist torso).  A cloak / cape / tabard hangs from the
+        // UPPER body (spine/shoulder weights) with ~zero pelvis+leg, so its signal
+        // is ~0 and it gets treated as fitted → it collapses to vanilla conform
+        // (twisted clipping) instead of draping.
+        //
+        // Fix (scoped to meshes the USER marked Loose Draped, so no other case
+        // changes): a vert that hangs in FREE SPACE away from the body surface is
+        // draping cloth regardless of its bone weights.  Measure the gap from the
+        // conformed (supportVerts) position to the morphed body via the BVH and
+        // raise the drape signal for far-hanging verts.  Rigid-island verts are
+        // already excluded by the `continue` above (belt stays protected), and a
+        // belt/bodice sits TIGHT to the body (small gap) so it is never caught
+        // here even within a Loose-Draped mesh.
+        const bool kLooseHangEnabled =
+            (NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) &&
+            bodyBVH && bodyBVH->valid;
+        // Gap thresholds: below kGapNear the vert hugs the body (keep bone signal);
+        // above kGapFar it is unambiguously free-hanging cloth (full drape).
+        const float kGapNear = 1.0f;
+        const float kGapFar  = 4.0f;
+        int hangVerts = 0;
+
         for (size_t i = 0; i < n; ++i) {
             int id = islandId[i];
             if (id < 0 || id >= numIslands) { drapeAmount[i] = 0.0f; continue; }
@@ -3042,9 +3157,35 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 vertClearance[i] = kRigidClear;
                 continue;
             }
-            drapeAmount[i]   = vertDrapeSignal(i);
-            vertClearance[i] = kHugClear + drapeAmount[i] * (kSkirtClear - kHugClear);
+            float sig = vertDrapeSignal(i);
+
+            if (kLooseHangEnabled) {
+                // Signed gap from conformed position to nearest body surface.
+                Vec3 cp{0,0,0}, nrm{0,0,1};
+                float d2 = 0.0f;
+                if (BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) {
+                    float dist = std::sqrt(d2);
+                    float sign = Dot(Sub(supportVerts[i], cp), nrm);  // >0 outside
+                    if (sign > 0.0f && dist > kGapNear) {
+                        // Map gap [near..far] → hang factor [0..1].
+                        float hang = ClampRange((dist - kGapNear) / (kGapFar - kGapNear),
+                                                0.0f, 1.0f);
+                        if (hang > 0.0f) {
+                            float boosted = std::max(sig, hang);
+                            if (boosted > sig + 0.01f) ++hangVerts;
+                            sig = boosted;
+                        }
+                    }
+                }
+            }
+
+            drapeAmount[i]   = sig;
+            vertClearance[i] = kHugClear + sig * (kSkirtClear - kHugClear);
         }
+
+        if (kLooseHangEnabled && hangVerts > 0)
+            HLog("  free-hang: %d verts boosted to drape (gap>%.1f) shape='%s'",
+                 hangVerts, kGapNear, shapeName.c_str());
 
     }
 
@@ -3197,13 +3338,30 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // bodyClearance (cloth hangs free), belt/waist verts get a small clearance
     // (stays fitted), so both can live in the same mesh without the belt being
     // pushed out as far as the skirt.
+    // Inner-mesh layer clearance: how far outside an inner garment this mesh must sit.
+    const float kInnerClear = 0.45f;
     auto collideVertex = [&](size_t i, float stiffness) -> bool {
         if (stiffness <= 0.0f) return false;
         float vc = vertClearance[i];
+        bool moved = false;
+        // (1) Inner-mesh collision: push out of any lower-layer garment, like the body.
+        // Skip rigid/pinned verts (belt/medallion shapes stay exact).
+        if (innerBVH && innerBVH->valid && invMass[i] > 0.0f) {
+            int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+            bool rigid = (id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id]);
+            if (!rigid) {
+                Vec3 target = finalVerts[i];
+                if (BVHCollideVertex(*innerBVH, target, kInnerClear)) {
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
+                    moved = true;
+                }
+            }
+        }
+        // (2) Body collision (primary).
         if (bodyBVH && bodyBVH->valid) {
             Vec3 target = finalVerts[i];
             if (!BVHCollideVertex(*bodyBVH, target, vc))
-                return false;
+                return moved;
             finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), Clamp01(stiffness)));
             return true;
         }
@@ -4448,9 +4606,66 @@ static void Detour_GenResult(
             // This is expected behavior; no log entry needed per slider.
             TargetDataDiffs solvedDiff;
             StaticSolveStats stats;
+
+            // Build a collider BVH from all INNER (lower-layer) meshes at their
+            // conformed positions for this slider, so the solve can push this mesh
+            // off them DURING relaxation (like the body). Order-independent: each
+            // inner mesh's conformed shape = its base verts + its OWN conform diff,
+            // available regardless of whether its physics has run yet. We merge all
+            // inner meshes into one vert+tri list and build a single BVH.
+            BodyBVH innerBVH;
+            {
+                int myLayer = 0;
+                auto mlit = g_shapeLayer.find(*shapeName);
+                if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
+                if (myLayer > 0) {
+                    std::vector<Vec3> mergedV;
+                    std::vector<std::array<uint16_t,3>> mergedT;
+                    for (const auto& lv : g_shapeLayer) {
+                        if (lv.second >= myLayer) continue;        // not strictly inner
+                        const std::string& innerName = lv.first;
+                        // Skip BODY meshes (3BBB etc.): they ARE the body, already handled
+                        // by bodyBVH. Including them double-collides every garment off a
+                        // second body copy → catastrophic inflation. Body meshes are the
+                        // ones the user left as Auto (no explicit garment preset).
+                        if (NormalizePreset(PresetForShapeLocked(innerName)) == DRAPE_PRESET_AUTO)
+                            continue;
+                        auto ivIt = g_shapeVerts.find(innerName);
+                        auto itIt = g_shapeTris.find(innerName);
+                        if (ivIt == g_shapeVerts.end() || ivIt->second.empty()) continue;
+                        if (itIt == g_shapeTris.end() || itIt->second.empty()) continue;
+                        TargetDataDiffs innerRaw;
+                        if (!HostGetRawResultDiff(self, &innerName, sliderName, innerRaw))
+                            continue;
+                        const auto& ibase = ivIt->second;
+                        // Merging shifts this mesh's tri indices by the current vert count.
+                        // BVH uses uint16 indices, so cap: skip a mesh that would overflow
+                        // the combined index space (rare; meshes are usually < 64k each).
+                        size_t baseOff = mergedV.size();
+                        if (baseOff + ibase.size() > 0xFFFF) continue;
+                        mergedV.reserve(baseOff + ibase.size());
+                        for (size_t k = 0; k < ibase.size(); ++k) {
+                            Vec3 d = DiffAt(innerRaw, (uint16_t)std::min<size_t>(k, 0xFFFF));
+                            mergedV.push_back(Add(ibase[k], d));
+                        }
+                        for (const auto& t : itIt->second)
+                            mergedT.push_back({ (uint16_t)(t[0] + baseOff),
+                                                (uint16_t)(t[1] + baseOff),
+                                                (uint16_t)(t[2] + baseOff) });
+                    }
+                    if (!mergedV.empty() && !mergedT.empty()) {
+                        BuildBodyBVH(mergedV, mergedT, innerBVH);
+                        HLog("detour: layer-collider shape='%s' layer=%d innerVerts=%zu innerTris=%zu",
+                             shapeName->c_str(), myLayer, mergedV.size(), mergedT.size());
+                    }
+                }
+            }
+
             bool passOk = ApplyStaticClothPass(*shapeName, *sliderName, preset,
                                                vertsIt->second, profiles, edges, bodyShell, bodyBVH,
-                                               presetMask, rawDiff, solvedDiff, stats);
+                                               presetMask, rawDiff,
+                                               innerBVH.valid ? &innerBVH : nullptr,
+                                               solvedDiff, stats);
             if (passOk) {
                 if (HostSetResultDiff(self, shapeName, sliderName, solvedDiff)) {
                     // Log EVERY slider (no deduplication) so we can verify the write path.
