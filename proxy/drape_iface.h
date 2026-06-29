@@ -91,6 +91,7 @@ typedef enum {
 // In-memory hook preset API. These are resolved directly with GetProcAddress
 // by version.dll; they are intentionally kept as plain C functions.
 typedef int (*PfnDrapeGetCurrentShapes)(char* outUtf8, int outSize);
+typedef int (*PfnDrapeGetCurrentSliders)(char* outUtf8, int outSize);
 typedef int (*PfnDrapeClearShapePresets)();
 typedef int (*PfnDrapeSetShapePreset)(const char* shapeNameUtf8, int preset);
 typedef void (*PfnDrapeSetHookEnabled)(int enabled);
@@ -98,6 +99,7 @@ typedef void (*PfnDrapeSetHookEnabled)(int enabled);
 // Processing intensity: 0=Low (fewer passes, faster), 1=Medium (default),
 // 2=High (extra passes, slower, better result on complex morphs).
 typedef void (*PfnDrapeSetProcessingIntensity)(int level);
+typedef int (*PfnDrapeSetSliderFilter)(const char* filterUtf8);
 
 // ── Versioned API struct ───────────────────────────────────────────────
 

@@ -109,3 +109,46 @@ add_custom_command(TARGET drape_algo POST_BUILD
         || ${CMAKE_COMMAND} -E true
     COMMENT "Deploying drape-algo.dll to both OutfitStudio mod folders..."
 )
+
+
+add_executable(drape_harness
+    conform_hook.cpp
+    ../cli/DrapeConformer.cpp
+    ${NIFLY_SRCS}
+    ${BS_SRCS}
+)
+
+set_target_properties(drape_harness PROPERTIES OUTPUT_NAME "drape-harness")
+
+target_include_directories(drape_harness PRIVATE
+    "${MPP_DIR}/wx_stubs"
+    "${BS_ROOT}/lib/nifly/include"
+    "${BS_ROOT}/lib/nifly/external"
+    "${BS_ROOT}/lib/nifly/src"
+    "${BS_ROOT}/src"
+    "${BS_ROOT}/src/components"
+    "${BS_ROOT}/src/utils"
+    "${BS_ROOT}/lib"
+    "${BS_ROOT}/lib/TinyXML-2"
+    "${BS_ROOT}/lib/gli"
+    "${BS_ROOT}/lib/gli/glm"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cli"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../proxy"
+    "${MINHOOK_DIR}/include"
+)
+
+target_compile_definitions(drape_harness PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WIN64
+    DRAPE_HARNESS_BUILD
+)
+
+target_link_libraries(drape_harness PRIVATE
+    kernel32 user32 shell32 comctl32 opengl32
+)
+
+if (MSVC)
+    target_compile_options(drape_algo PRIVATE /bigobj)
+    target_compile_options(drape_harness PRIVATE /bigobj)
+endif()

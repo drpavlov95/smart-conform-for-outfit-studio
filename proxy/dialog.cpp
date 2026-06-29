@@ -1,6 +1,7 @@
 #include "dialog.h"
 #include "../proxy/drape_iface.h"
 
+#include <algorithm>
 #include <array>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -580,12 +581,22 @@ enum : UINT {
     IDC_INT_MED        = 2005,
     IDC_INT_HIGH       = 2006,
     IDC_AUTO_DETECT    = 2007,
+    IDC_SLIDER_LIST    = 2008,
     IDC_SUBTITLE       = 2009,
     IDC_GRP_MESHES     = 2010,
     IDC_GRP_QUALITY    = 2011,
+    IDC_SELECT_ALL_SLIDERS = 2012,
     IDC_QUALITY_DESC   = 2013,
+    IDC_CLEAR_ALL_SLIDERS  = 2014,
+    IDC_GRP_SLIDERS    = 2015,
+    IDC_SLIDER_SEARCH  = 2016,
+    IDC_SLIDER_SORT    = 2017,
+    IDC_SLIDER_COUNT   = 2018,
+    IDC_LBL_SLIDER_SEARCH = 2019,
+    IDC_LBL_SLIDER_SORT   = 2020,
     COL_PRESET_SHAPE   = 0,
     COL_PRESET_VALUE   = 1,
+    COL_SLIDER_NAME    = 0,
 };
 
 struct PresetRow {
@@ -593,14 +604,34 @@ struct PresetRow {
     int preset = DRAPE_PRESET_AUTO;
 };
 
+struct SliderRow {
+    std::string name;
+    int originalIndex = 0;
+    bool checked = false;
+};
+
+enum SliderSortMode {
+    SLIDER_SORT_SIDEBAR = 0,
+    SLIDER_SORT_NAME = 1,
+    SLIDER_SORT_SELECTED_FIRST = 2,
+    SLIDER_SORT_UNSELECTED_FIRST = 3,
+};
+
 struct PresetDlgData {
     DrapeHookApi api{};
     HWND lv     = nullptr;
+    HWND sliders = nullptr;
+    HWND sliderSearch = nullptr;
+    HWND sliderSort = nullptr;
+    HWND sliderCount = nullptr;
     HWND combo  = nullptr;  // inline edit combo (shown over a Behavior cell)
     HWND status = nullptr;
     int  intensity = 1;     // 0=Low 1=Medium 2=High
     int  editRow   = -1;    // row currently being edited inline, or -1
+    bool updatingSliders = false;
     std::vector<PresetRow> rows;
+    std::vector<SliderRow> sliderRows;
+    std::vector<int> sliderView;
 };
 
 // Returns the human-readable description for a quality level.
@@ -702,6 +733,157 @@ static void PopulatePresetRows(HWND lv, std::vector<PresetRow>& rows) {
     }
 }
 
+static std::string WindowTextA(HWND hwnd) {
+    if (!hwnd) return {};
+    int len = GetWindowTextLengthA(hwnd);
+    if (len <= 0) return {};
+    std::vector<char> buf((size_t)len + 1, '\0');
+    GetWindowTextA(hwnd, buf.data(), (int)buf.size());
+    return std::string(buf.data());
+}
+
+static std::vector<std::string> SearchTerms(HWND edit) {
+    std::vector<std::string> terms;
+    std::istringstream ss(toLower(WindowTextA(edit)));
+    std::string term;
+    while (ss >> term)
+        terms.push_back(term);
+    return terms;
+}
+
+static bool SliderMatchesTerms(const SliderRow& row,
+                               const std::vector<std::string>& terms) {
+    if (terms.empty()) return true;
+    std::string name = toLower(row.name);
+    for (const std::string& term : terms) {
+        if (name.find(term) == std::string::npos)
+            return false;
+    }
+    return true;
+}
+
+static int SelectedSliderCount(const PresetDlgData* d) {
+    if (!d) return 0;
+    int count = 0;
+    for (const auto& row : d->sliderRows)
+        if (row.checked) ++count;
+    return count;
+}
+
+static void SyncSliderChecksFromView(PresetDlgData* d) {
+    if (!d || !d->sliders || d->updatingSliders) return;
+    int n = ListView_GetItemCount(d->sliders);
+    for (int i = 0; i < n; ++i) {
+        LVITEMA item{};
+        item.mask = LVIF_PARAM;
+        item.iItem = i;
+        if (!ListView_GetItem(d->sliders, &item)) continue;
+        int modelIndex = (int)item.lParam;
+        if (modelIndex < 0 || modelIndex >= (int)d->sliderRows.size()) continue;
+        d->sliderRows[(size_t)modelIndex].checked =
+            ListView_GetCheckState(d->sliders, i) ? true : false;
+    }
+}
+
+static void UpdateSliderCount(PresetDlgData* d) {
+    if (!d || !d->sliderCount) return;
+    int selected = SelectedSliderCount(d);
+    int total = (int)d->sliderRows.size();
+    int visible = d->sliders ? ListView_GetItemCount(d->sliders) : (int)d->sliderView.size();
+
+    std::string text = std::to_string(selected) + "/" +
+                       std::to_string(total) + " selected";
+    if (visible != total)
+        text += ", " + std::to_string(visible) + " shown";
+    SetWindowTextA(d->sliderCount, text.c_str());
+}
+
+static int CurrentSliderSortMode(const PresetDlgData* d) {
+    int sortMode = d && d->sliderSort
+        ? (int)SendMessageA(d->sliderSort, CB_GETCURSEL, 0, 0)
+        : SLIDER_SORT_SIDEBAR;
+    return sortMode < 0 ? SLIDER_SORT_SIDEBAR : sortMode;
+}
+
+static void RebuildSliderView(PresetDlgData* d, bool syncFirst = true) {
+    if (!d || !d->sliders) return;
+    if (syncFirst)
+        SyncSliderChecksFromView(d);
+
+    std::vector<std::string> terms = SearchTerms(d->sliderSearch);
+    d->sliderView.clear();
+    for (int i = 0; i < (int)d->sliderRows.size(); ++i) {
+        if (SliderMatchesTerms(d->sliderRows[(size_t)i], terms))
+            d->sliderView.push_back(i);
+    }
+
+    int sortMode = CurrentSliderSortMode(d);
+    std::stable_sort(d->sliderView.begin(), d->sliderView.end(),
+        [&](int ai, int bi) {
+            const SliderRow& a = d->sliderRows[(size_t)ai];
+            const SliderRow& b = d->sliderRows[(size_t)bi];
+            switch (sortMode) {
+            case SLIDER_SORT_NAME: {
+                std::string an = toLower(a.name);
+                std::string bn = toLower(b.name);
+                if (an != bn) return an < bn;
+                return a.originalIndex < b.originalIndex;
+            }
+            case SLIDER_SORT_SELECTED_FIRST:
+                if (a.checked != b.checked) return a.checked && !b.checked;
+                return a.originalIndex < b.originalIndex;
+            case SLIDER_SORT_UNSELECTED_FIRST:
+                if (a.checked != b.checked) return !a.checked && b.checked;
+                return a.originalIndex < b.originalIndex;
+            default:
+                return a.originalIndex < b.originalIndex;
+            }
+        });
+
+    d->updatingSliders = true;
+    SendMessageA(d->sliders, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(d->sliders);
+    for (int row = 0; row < (int)d->sliderView.size(); ++row) {
+        int modelIndex = d->sliderView[(size_t)row];
+        SliderRow& slider = d->sliderRows[(size_t)modelIndex];
+        LVITEMA item{};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = row;
+        item.lParam = modelIndex;
+        item.pszText = const_cast<char*>(slider.name.c_str());
+        ListView_InsertItem(d->sliders, &item);
+        ListView_SetCheckState(d->sliders, row, slider.checked ? TRUE : FALSE);
+    }
+    SendMessageA(d->sliders, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(d->sliders, nullptr, TRUE);
+    d->updatingSliders = false;
+    UpdateSliderCount(d);
+}
+
+static void SetVisibleSliderChecks(PresetDlgData* d, bool checked) {
+    if (!d) return;
+    SyncSliderChecksFromView(d);
+    for (int modelIndex : d->sliderView) {
+        if (modelIndex >= 0 && modelIndex < (int)d->sliderRows.size())
+            d->sliderRows[(size_t)modelIndex].checked = checked;
+    }
+    RebuildSliderView(d, false);
+}
+
+static std::string SelectedSliderPayload(PresetDlgData* d) {
+    if (!d) return {};
+    SyncSliderChecksFromView(d);
+    std::string out;
+    for (const auto& row : d->sliderRows) {
+        if (!row.checked)
+            continue;
+        if (!out.empty())
+            out += '\n';
+        out += row.name;
+    }
+    return out;
+}
+
 static int SelectedPresetRow(HWND lv) {
     return ListView_GetNextItem(lv, -1, LVNI_SELECTED);
 }
@@ -709,7 +891,12 @@ static int SelectedPresetRow(HWND lv) {
 static void UpdatePresetStatus(PresetDlgData* d) {
     if (!d || !d->status) return;
     size_t n = d->rows.size();
+    size_t m = d->sliderRows.size();
     std::string s = std::to_string(n) + (n == 1 ? " mesh ready." : " meshes ready.");
+    s += "  ";
+    s += std::to_string(m) + (m == 1 ? " slider found." : " sliders found.");
+    s += "  ";
+    s += std::to_string(SelectedSliderCount(d)) + " selected.";
     s += "  Click a Behavior cell to change it.";
     SetWindowTextA(d->status, s.c_str());
 }
@@ -756,13 +943,32 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         SetWindowLongPtrA(dlg, GWLP_USERDATA, lp);
         SetWindowTextA(dlg, "Smart Conform");
 
-        d->lv     = GetDlgItem(dlg, IDC_PRESET_LIST);
-        d->combo  = GetDlgItem(dlg, IDC_EDIT_COMBO);
-        d->status = GetDlgItem(dlg, IDC_PRESET_STATUS);
+        d->lv           = GetDlgItem(dlg, IDC_PRESET_LIST);
+        d->sliders      = GetDlgItem(dlg, IDC_SLIDER_LIST);
+        d->sliderSearch = GetDlgItem(dlg, IDC_SLIDER_SEARCH);
+        d->sliderSort   = GetDlgItem(dlg, IDC_SLIDER_SORT);
+        d->sliderCount  = GetDlgItem(dlg, IDC_SLIDER_COUNT);
+        d->combo        = GetDlgItem(dlg, IDC_EDIT_COMBO);
+        d->status       = GetDlgItem(dlg, IDC_PRESET_STATUS);
 
         SetWindowTextA(GetDlgItem(dlg, IDC_SUBTITLE),
-                       "Set how each mesh should drape against the body morph. "
-                       "Click a Behavior cell to change it.");
+                       "Choose sliders to process and set how each mesh should drape.");
+
+        SendMessageW(d->sliderSearch, EM_SETCUEBANNER, TRUE,
+                     (LPARAM)L"Filter by slider name");
+        SendMessageA(d->sliderSort, CB_ADDSTRING, 0, (LPARAM)"Default");
+        SendMessageA(d->sliderSort, CB_ADDSTRING, 0, (LPARAM)"Name A-Z");
+        SendMessageA(d->sliderSort, CB_ADDSTRING, 0, (LPARAM)"Selected first");
+        SendMessageA(d->sliderSort, CB_ADDSTRING, 0, (LPARAM)"Unselected first");
+        SendMessageA(d->sliderSort, CB_SETCURSEL, SLIDER_SORT_SIDEBAR, 0);
+
+        ListView_SetExtendedListViewStyle(d->sliders,
+            LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        RECT sr{};
+        GetClientRect(d->sliders, &sr);
+        LVCOLUMNA sc{LVCF_TEXT | LVCF_WIDTH, 0, std::max<int>(120, sr.right - sr.left - 24),
+                     const_cast<char*>("Slider")};
+        ListView_InsertColumn(d->sliders, COL_SLIDER_NAME, &sc);
 
         ListView_SetExtendedListViewStyle(d->lv,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
@@ -779,6 +985,26 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         d->intensity = 1;
         SendMessageA(GetDlgItem(dlg, IDC_INT_MED), BM_SETCHECK, BST_CHECKED, 0);
         SetWindowTextA(GetDlgItem(dlg, IDC_QUALITY_DESC), QualityDesc(1));
+
+        std::array<char, 65536> sliderBuf{};
+        int sliderCount = d->api.getCurrentSliders
+            ? d->api.getCurrentSliders(sliderBuf.data(), (int)sliderBuf.size())
+            : -1;
+        std::istringstream sliderStream(sliderBuf.data());
+        std::string sliderLine;
+        int sliderOriginalIndex = 0;
+        while (std::getline(sliderStream, sliderLine)) {
+            while (!sliderLine.empty() && (sliderLine.back() == '\r' || sliderLine.back() == '\n'))
+                sliderLine.pop_back();
+            if (!sliderLine.empty()) {
+                SliderRow row;
+                row.name = sliderLine;
+                row.originalIndex = sliderOriginalIndex++;
+                row.checked = (toLower(sliderLine) == "rm_heavy"); // Dev default; clear before release.
+                d->sliderRows.push_back(std::move(row));
+            }
+        }
+        RebuildSliderView(d, false);
 
         std::array<char, 65536> buf{};
         int count = d->api.getCurrentShapes ? d->api.getCurrentShapes(buf.data(), (int)buf.size()) : -1;
@@ -801,6 +1027,9 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
             SetWindowTextA(d->status, "No meshes found. Check %TEMP%\\drape_debug.log.");
             EnableWindow(GetDlgItem(dlg, IDOK), FALSE);
             EnableWindow(GetDlgItem(dlg, IDC_AUTO_DETECT), FALSE);
+        } else if (sliderCount <= 0 || d->sliderRows.empty()) {
+            SetWindowTextA(d->status, "No sliders found. Check %TEMP%\\drape_debug.log.");
+            EnableWindow(GetDlgItem(dlg, IDOK), FALSE);
         } else {
             ListView_SetItemState(d->lv, 0, LVIS_SELECTED | LVIS_FOCUSED,
                                   LVIS_SELECTED | LVIS_FOCUSED);
@@ -821,6 +1050,18 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
                 BeginInlineEdit(d, row);
             else
                 CommitInlineEdit(d);
+        } else if (nm->idFrom == IDC_SLIDER_LIST && nm->code == LVN_ITEMCHANGED) {
+            if (!d->updatingSliders) {
+                SyncSliderChecksFromView(d);
+                int sortMode = CurrentSliderSortMode(d);
+                if (sortMode == SLIDER_SORT_SELECTED_FIRST ||
+                    sortMode == SLIDER_SORT_UNSELECTED_FIRST) {
+                    RebuildSliderView(d, false);
+                } else {
+                    UpdateSliderCount(d);
+                }
+                UpdatePresetStatus(d);
+            }
         }
         break;
     }
@@ -843,6 +1084,17 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
             return TRUE;
         }
 
+        if (id == IDC_SLIDER_SEARCH && code == EN_CHANGE && d) {
+            RebuildSliderView(d);
+            UpdatePresetStatus(d);
+            return TRUE;
+        }
+
+        if (id == IDC_SLIDER_SORT && code == CBN_SELCHANGE && d) {
+            RebuildSliderView(d);
+            return TRUE;
+        }
+
         if (id == IDC_AUTO_DETECT && d) {
             CommitInlineEdit(d);
             for (int i = 0; i < (int)d->rows.size(); ++i) {
@@ -853,11 +1105,31 @@ static INT_PTR CALLBACK PresetDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
             return TRUE;
         }
 
+        if (id == IDC_SELECT_ALL_SLIDERS && d) {
+            SetVisibleSliderChecks(d, true);
+            UpdatePresetStatus(d);
+            return TRUE;
+        }
+
+        if (id == IDC_CLEAR_ALL_SLIDERS && d) {
+            SetVisibleSliderChecks(d, false);
+            UpdatePresetStatus(d);
+            return TRUE;
+        }
+
         if (id == IDOK && d) {
+            std::string sliderPayload = SelectedSliderPayload(d);
+            if (sliderPayload.empty()) {
+                MessageBoxA(dlg, "Select at least one slider.", "Smart Conform",
+                            MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
             if (d->api.setProcessingIntensity)
                 d->api.setProcessingIntensity(d->intensity);
             if (d->api.clearShapePresets)
                 d->api.clearShapePresets();
+            if (d->api.setSliderFilter)
+                d->api.setSliderFilter(sliderPayload.c_str());
             for (const auto& row : d->rows) {
                 if (d->api.setShapePreset)
                     d->api.setShapePreset(row.shape.c_str(), row.preset);
@@ -884,15 +1156,23 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
     // ── Layout grid (dialog units) ────────────────────────────────────────
     // Native Windows look: standard dialog surface, group boxes for chunking,
     // edit-in-place behavior column (no redundant editor row). Clear rhythm.
-    const short DW = 392, DH = 322;
+    const short DW = 430, DH = 472;
     const short PAD = 10;
     const short CW  = DW - PAD * 2;
 
     const short ySub     = 8;                  // one-line instruction
-    const short yMeshGrp = ySub + 16;
-    const short meshGrpH = 170;
+    const short ySliderGrp = ySub + 16;
+    const short sliderGrpH = 138;
+    const short ySliderTools = ySliderGrp + 14;
+    const short ySliderList = ySliderTools + 18;
+    const short sliderListH = 82;
+    const short ySliderBtns = ySliderGrp + sliderGrpH - 16;
+
+    const short yMeshGrp = ySliderGrp + sliderGrpH + 8;
+    const short meshGrpH = 150;
     const short yList    = yMeshGrp + 13;
-    const short listH    = meshGrpH - 21;
+    const short yMeshBtns = yMeshGrp + meshGrpH - 17;
+    const short listH    = yMeshBtns - yList - 5;
 
     const short yQualGrp  = yMeshGrp + meshGrpH + 8;
     const short qualGrpH  = 42;
@@ -903,9 +1183,7 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
     const short yButtons = DH - 24;
 
     DlgBuilder b;
-    // subtitle(1) meshGrp(1) list(1) editCombo(1) auto(1) qualGrp(1)
-    //   + 3 radios + qualDesc(1) status(1) Conform(1) Cancel(1) = 13
-    const WORD nControls = 13;
+    const WORD nControls = 22;
     b.dw(DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_CAPTION | WS_SYSMENU | WS_POPUP);
     b.dw(0); b.w(nControls);
     b.w(0); b.w(0); b.w(DW); b.w(DH);
@@ -914,6 +1192,33 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
 
     // ── Instruction line ──────────────────────────────────────────────────
     b.control(SS_LEFT | SS_NOPREFIX, PAD, ySub, CW, 11, IDC_SUBTITLE, L"STATIC", L"");
+
+    b.control(BS_GROUPBOX, PAD, ySliderGrp, CW, sliderGrpH, IDC_GRP_SLIDERS,
+              L"BUTTON", L"Sliders");
+    b.control(SS_LEFT | SS_NOPREFIX,
+              PAD + 10, ySliderTools + 2, 34, 10,
+              IDC_LBL_SLIDER_SEARCH, L"STATIC", L"Search:");
+    b.control(ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+              PAD + 47, ySliderTools, 126, 13,
+              IDC_SLIDER_SEARCH, L"EDIT", L"");
+    b.control(SS_LEFT | SS_NOPREFIX,
+              PAD + 181, ySliderTools + 2, 24, 10,
+              IDC_LBL_SLIDER_SORT, L"STATIC", L"Sort:");
+    b.control(CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+              PAD + 207, ySliderTools - 1, 102, 90,
+              IDC_SLIDER_SORT, L"COMBOBOX", L"");
+    b.control(SS_RIGHT | SS_NOPREFIX,
+              PAD + 314, ySliderTools + 2, CW - 321, 10,
+              IDC_SLIDER_COUNT, L"STATIC", L"");
+    b.control(LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
+              PAD + 7, ySliderList, CW - 14, sliderListH,
+              IDC_SLIDER_LIST, L"SysListView32", L"");
+    b.control(BS_PUSHBUTTON | WS_TABSTOP,
+              DW - PAD - 188, ySliderBtns, 84, 13,
+              IDC_SELECT_ALL_SLIDERS, L"BUTTON", L"Select visible");
+    b.control(BS_PUSHBUTTON | WS_TABSTOP,
+              DW - PAD - 96, ySliderBtns, 84, 13,
+              IDC_CLEAR_ALL_SLIDERS, L"BUTTON", L"Clear visible");
 
     // ── Meshes group ──────────────────────────────────────────────────────
     b.control(BS_GROUPBOX, PAD, yMeshGrp, CW, meshGrpH, IDC_GRP_MESHES,
@@ -925,7 +1230,7 @@ bool ShowDrapePresetDialog(HWND parent, const DrapeHookApi& api) {
               PAD + 7, yList, 160, 200, IDC_EDIT_COMBO, L"COMBOBOX", L"");
     // Auto-detect button sits just under the list, right-aligned.
     b.control(BS_PUSHBUTTON | WS_TABSTOP,
-              DW - PAD - 92, yMeshGrp + meshGrpH - 16, 84, 13,
+              DW - PAD - 92, yMeshBtns, 84, 13,
               IDC_AUTO_DETECT, L"BUTTON", L"Auto-detect all");
 
     // ── Quality group ─────────────────────────────────────────────────────

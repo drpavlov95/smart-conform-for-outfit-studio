@@ -18,9 +18,11 @@ UINT           g_conformAllId  = 0;        // WM_COMMAND ID for "Conform All"
 // for the duration of a Smart Conform, so the vanilla Conform All stays vanilla.
 static std::atomic<PfnDrapeSetHookEnabled> g_setHookEnabled{nullptr};
 static std::atomic<PfnDrapeGetCurrentShapes> g_getCurrentShapes{nullptr};
+static std::atomic<PfnDrapeGetCurrentSliders> g_getCurrentSliders{nullptr};
 static std::atomic<PfnDrapeClearShapePresets> g_clearShapePresets{nullptr};
 static std::atomic<PfnDrapeSetShapePreset> g_setShapePreset{nullptr};
 static std::atomic<PfnDrapeSetProcessingIntensity> g_setProcessingIntensity{nullptr};
+static std::atomic<PfnDrapeSetSliderFilter> g_setSliderFilter{nullptr};
 static std::atomic_bool g_hookReady{false};
 
 // ── Debug logging (pure Win32, safe in DllMain context) ───────────────
@@ -235,12 +237,15 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         DrapeHookApi api;
         api.setHookEnabled = setHookEnabled;
         api.getCurrentShapes = g_getCurrentShapes.load(std::memory_order_acquire);
+        api.getCurrentSliders = g_getCurrentSliders.load(std::memory_order_acquire);
         api.clearShapePresets = g_clearShapePresets.load(std::memory_order_acquire);
         api.setShapePreset = g_setShapePreset.load(std::memory_order_acquire);
         api.setProcessingIntensity = g_setProcessingIntensity.load(std::memory_order_acquire);
+        api.setSliderFilter = g_setSliderFilter.load(std::memory_order_acquire);
 
         if (g_hookReady.load(std::memory_order_acquire) && setHookEnabled &&
-            api.getCurrentShapes && api.clearShapePresets && api.setShapePreset &&
+            api.getCurrentShapes && api.getCurrentSliders &&
+            api.clearShapePresets && api.setShapePreset && api.setSliderFilter &&
             g_conformAllId) {
             if (!ShowDrapePresetDialog(hw, api)) {
                 DbgLog("Smart Conform All canceled in preset dialog");
@@ -389,33 +394,43 @@ static DWORD WINAPI InjectThread(LPVOID) {
                 GetProcAddress(hAlgo, "DrapeSetHookEnabled"));
             auto pGetCurrentShapes = reinterpret_cast<PfnDrapeGetCurrentShapes>(
                 GetProcAddress(hAlgo, "DrapeGetCurrentShapes"));
+            auto pGetCurrentSliders = reinterpret_cast<PfnDrapeGetCurrentSliders>(
+                GetProcAddress(hAlgo, "DrapeGetCurrentSliders"));
             auto pClearShapePresets = reinterpret_cast<PfnDrapeClearShapePresets>(
                 GetProcAddress(hAlgo, "DrapeClearShapePresets"));
             auto pSetShapePreset = reinterpret_cast<PfnDrapeSetShapePreset>(
                 GetProcAddress(hAlgo, "DrapeSetShapePreset"));
             auto pSetIntensity = reinterpret_cast<PfnDrapeSetProcessingIntensity>(
                 GetProcAddress(hAlgo, "DrapeSetProcessingIntensity"));
+            auto pSetSliderFilter = reinterpret_cast<PfnDrapeSetSliderFilter>(
+                GetProcAddress(hAlgo, "DrapeSetSliderFilter"));
             if (pInstall) {
                 int rc = pInstall(hw, ExeDir().c_str(), 0.5f, 8.0f);
                 if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
-                    pClearShapePresets && pSetShapePreset) {
+                    pGetCurrentSliders && pClearShapePresets && pSetShapePreset &&
+                    pSetSliderFilter) {
                     g_setHookEnabled.store(pSetHookEnabled, std::memory_order_release);
                     g_getCurrentShapes.store(pGetCurrentShapes, std::memory_order_release);
+                    g_getCurrentSliders.store(pGetCurrentSliders, std::memory_order_release);
                     g_clearShapePresets.store(pClearShapePresets, std::memory_order_release);
                     g_setShapePreset.store(pSetShapePreset, std::memory_order_release);
                     g_setProcessingIntensity.store(pSetIntensity, std::memory_order_release);
+                    g_setSliderFilter.store(pSetSliderFilter, std::memory_order_release);
                     g_hookReady.store(true, std::memory_order_release);
                 } else {
                     g_setHookEnabled.store(nullptr, std::memory_order_release);
                     g_getCurrentShapes.store(nullptr, std::memory_order_release);
+                    g_getCurrentSliders.store(nullptr, std::memory_order_release);
                     g_clearShapePresets.store(nullptr, std::memory_order_release);
                     g_setShapePreset.store(nullptr, std::memory_order_release);
                     g_setProcessingIntensity.store(nullptr, std::memory_order_release);
+                    g_setSliderFilter.store(nullptr, std::memory_order_release);
                     g_hookReady.store(false, std::memory_order_release);
                 }
-                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p getShapes=%p clearPresets=%p setPreset=%p ready=%d",
+                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p getShapes=%p getSliders=%p clearPresets=%p setPreset=%p setSliderFilter=%p ready=%d",
                        rc, (void*)pSetHookEnabled, (void*)pGetCurrentShapes,
-                       (void*)pClearShapePresets, (void*)pSetShapePreset,
+                       (void*)pGetCurrentSliders, (void*)pClearShapePresets,
+                       (void*)pSetShapePreset, (void*)pSetSliderFilter,
                        g_hookReady.load(std::memory_order_relaxed) ? 1 : 0);
             } else {
                 DbgLog("InjectThread: DrapeInstallConformHook not found");

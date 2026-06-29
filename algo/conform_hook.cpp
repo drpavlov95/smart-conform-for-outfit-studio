@@ -1,5 +1,5 @@
 /*
- * conform_hook.cpp — in-memory "Smart Conform" via function hooking.
+ * conform_hook.cpp â€” in-memory "Smart Conform" via function hooking.
  *
  * Hooks Automorph::GenerateResultDiff in OutfitStudio x64.exe. After the vanilla
  * conform computes a slider's result diff for a shape, we scale each vertex's
@@ -7,7 +7,7 @@
  * engine's own Automorph::ZeroVertDiff(shape, slider, nullptr, &mask).
  *
  * Result: the normal "Conform All" produces a cloth-aware result in memory and
- * the view refreshes itself — feels like a native, smarter conform. No disk
+ * the view refreshes itself â€” feels like a native, smarter conform. No disk
  * round-trip, no save/reload.
  *
  * Geometry for the weights is loaded from the open project's NIF on disk (same
@@ -15,7 +15,7 @@
  *
  * ABI note: we read const std::string* args and pass a std::unordered_map by
  * pointer to the host. This relies on host + DLL sharing the MSVC STL ABI
- * (true for all VS2015–2022 builds). Both are MSVC, so layouts match.
+ * (true for all VS2015â€“2022 builds). Both are MSVC, so layouts match.
  */
 
 #include "conform_offsets.h"
@@ -36,20 +36,24 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace nifly;
 
-// ── Debug log (shared file) ────────────────────────────────────────────
+// â”€â”€ Debug log (shared file) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 static void HLog(const char* fmt, ...) {
     char msg[1024];
     va_list ap; va_start(ap, fmt);
@@ -69,7 +73,30 @@ static void HLog(const char* fmt, ...) {
     DWORD w; WriteFile(h, line, (DWORD)n, &w, nullptr); CloseHandle(h);
 }
 
-// ── Hooked function signatures ─────────────────────────────────────────
+// â”€â”€ Hooked function signatures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+static std::string SafeFilePart(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.')
+            out.push_back((char)ch);
+        else
+            out.push_back('_');
+    }
+    if (out.empty())
+        out = "unnamed";
+    if (out.size() > 80)
+        out.resize(80);
+    return out;
+}
+
+static fs::path TempDrapePath(const std::string& fileName) {
+    char path[MAX_PATH] = {};
+    if (!GetTempPathA(MAX_PATH, path))
+        return fs::path(fileName);
+    return fs::path(path) / fileName;
+}
+
 typedef void (*PfnGenResult)(
     void* self,
     const std::string* shapeName,
@@ -78,7 +105,7 @@ typedef void (*PfnGenResult)(
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
     bool axisX, bool axisY, bool axisZ);
 
-// DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) — scales each diff
+// DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) â€” scales each diff
 // vertex by mask[vert]; erases verts with weight 0 or absent from mask.
 typedef void (*PfnDiffZeroVert)(
     void* diffDataSets,
@@ -111,7 +138,7 @@ static PfnDiffGetDiffSet   g_diffGetDiffSet    = nullptr;
 static PfnGetRawResultDiff g_getRawResultDiff  = nullptr;
 static PfnSetResultDiff    g_setResultDiff     = nullptr;
 
-// ── Config from version.dll ────────────────────────────────────────────
+// â”€â”€ Config from version.dll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 static HWND        g_osHwnd = nullptr;
 static std::string g_bsDir;
 static DrapeOptions g_opts;        // tight/loose distances
@@ -158,17 +185,17 @@ struct BodyShell {
     bool valid = false;
 };
 
-// ── 3D body collider: BVH over the morphed body triangles ──────────────────
+// â”€â”€ 3D body collider: BVH over the morphed body triangles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Real geometric collision (closest point on the actual body surface), the
 // foundation that replaces the radial shell approximation. Built once per body
 // morph (keyed by refDataName) and cached. Answers "where does the body actually
 // push the cloth out?" using point-to-triangle closest-point queries + the real
-// surface normal — works for belly, hips, sides, bust, and limbs alike.
+// surface normal â€” works for belly, hips, sides, bust, and limbs alike.
 struct BodyBVH {
     struct Node {
         Vec3 bmin{0.0f, 0.0f, 0.0f};
         Vec3 bmax{0.0f, 0.0f, 0.0f};
-        int  left  = -1;   // child node index; -1 ⇒ leaf
+        int  left  = -1;   // child node index; -1 â‡’ leaf
         int  start = 0;    // [start,start+count) into triIndex for a leaf
         int  count = 0;
     };
@@ -181,7 +208,7 @@ struct BodyBVH {
     bool valid = false;
 };
 
-// ── Per-shape weight cache (rebuilt when the open project changes) ─────
+// â”€â”€ Per-shape weight cache (rebuilt when the open project changes) â”€â”€â”€â”€â”€
 static std::mutex g_cacheMx;
 static std::string g_projectKey;   // current resolved project name
 static std::unordered_map<std::string, std::vector<float>> g_shapeWeights;
@@ -194,17 +221,24 @@ static std::unordered_map<std::string, int> g_shapeGeometryPresets;
 // per project in RebuildCacheLocked by sampling base-mesh overlaps. An outer mesh
 // is pushed out to clear any inner (lower-layer) mesh during the solve.
 static std::unordered_map<std::string, int> g_shapeLayer;
-// Per-shape triangles (base topology) — used to build a per-mesh collider BVH so an
+static std::unordered_map<std::string, std::unordered_set<std::string>> g_shapeOutersByInner;
+// Per-shape triangles (base topology) â€” used to build a per-mesh collider BVH so an
 // outer garment can be pushed off an inner one DURING the solve (like the body).
 static std::unordered_map<std::string, std::vector<std::array<uint16_t, 3>>> g_shapeTris;
+static std::unordered_map<std::string, BodyBVH> g_shapeBaseBVH;
 // Cache of each mesh's SOLVED (physics-final) positions, keyed by slider THEN shape,
 // so a later-solved mesh can collide against an earlier-solved one's actual draped
 // shape (not just its conformed position). OutfitStudio iterates mesh-outer /
 // slider-inner (all sliders for Cloak, then all for Clothes), so we must keep results
-// for EVERY slider — a single-slider cache would be wiped before the inner mesh runs.
-struct SolvedMesh { std::vector<Vec3> verts; int layer = 0; };
+// for EVERY slider â€” a single-slider cache would be wiped before the inner mesh runs.
+struct SolvedMesh { std::vector<Vec3> verts; BodyBVH bvh; int layer = 0; };
 static std::unordered_map<std::string,
                           std::unordered_map<std::string, SolvedMesh>> g_solvedShapes; // [slider][shape]
+static std::mutex g_sliderFilterMx;
+static std::vector<std::string> g_sliderFilter;
+static std::unordered_set<std::string> g_sliderFilterSkipLogged;
+static int g_sliderFilterSkippedCalls = 0;
+static std::vector<std::string> g_sliderFilterSkipExamples;
 static std::vector<Vec3> g_refVerts;
 static std::vector<std::array<uint16_t, 3>> g_refTris;  // body triangles (for BVH)
 static BodyBVH g_refBodyBVH;                            // base-body BVH for base-order tests
@@ -212,6 +246,11 @@ static std::unordered_map<std::string, BodyShell> g_bodyShellCache;
 static std::unordered_map<std::string, BodyBVH> g_bodyBVHCache;
 // Pre-built masks (vert -> weight) reused across a shape's sliders.
 static std::unordered_map<std::string, std::unordered_map<uint16_t, float>> g_shapeMask;
+struct CachedPresetMask {
+    int preset = DRAPE_PRESET_AUTO;
+    std::unordered_map<uint16_t, float> mask;
+};
+static std::unordered_map<std::string, CachedPresetMask> g_shapePresetMaskCache;
 static std::unordered_map<std::string, int> g_shapePresets;
 static std::unordered_set<std::string> g_missingShapesLogged;
 static std::unordered_set<std::string> g_appliedShapesLogged;
@@ -228,7 +267,7 @@ static float g_refMaxZ = 0.0f;
 // host Automorph methods with confirmed RVAs.
 static constexpr bool kEnableDirectDiffRewrite = false;
 
-// ── WRITE-PATH DIAGNOSTIC ──────────────────────────────────────────────
+// â”€â”€ WRITE-PATH DIAGNOSTIC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // When true, ApplyStaticClothPass ignores the physics result and instead writes
 // an UNMISTAKABLE deformation (drape-eligible verts shoved 15 units down). If the
 // outfit visibly drops/stretches in OutfitStudio after Smart Conform, the
@@ -238,7 +277,7 @@ static constexpr bool kEnableDirectDiffRewrite = false;
 static constexpr bool kDiagWritePathTest = false;
 static constexpr float kDiagDropZ = 15.0f;
 
-// ── Compact project resolver (title -> .osp -> NIF) ────────────────────
+// â”€â”€ Compact project resolver (title -> .osp -> NIF) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static std::string ProjFromTitle() {
     if (!g_osHwnd) return {};
@@ -304,7 +343,7 @@ static std::vector<EdgeConstraint> BuildEdgeConstraints(NiShape* shape,
 
 // Bending constraint: for each pair of triangles sharing edge (a,b),
 // store the two opposite vertices (c, d) and their rest distance.
-// Resists folding along the shared edge — gives cloth a smooth, fabric-like
+// Resists folding along the shared edge â€” gives cloth a smooth, fabric-like
 // appearance instead of the "chain mail" look from stretch-only solvers.
 static std::vector<BendingConstraint> BuildBendingConstraints(
     NiShape* shape, const std::vector<Vec3>& verts)
@@ -316,8 +355,8 @@ static std::vector<BendingConstraint> BuildBendingConstraints(
     shape->GetTriangles(tris);
     if (tris.empty()) return bending;
 
-    // Map each edge key → list of triangles that contain it (identified by
-    // the opposite vertex — the vertex NOT on the shared edge).
+    // Map each edge key â†’ list of triangles that contain it (identified by
+    // the opposite vertex â€” the vertex NOT on the shared edge).
     std::unordered_map<uint32_t, std::pair<int16_t, int16_t>> edgeToOpposite;
     edgeToOpposite.reserve(tris.size() * 3);
 
@@ -341,7 +380,13 @@ static std::vector<BendingConstraint> BuildBendingConstraints(
     }
 
     bending.reserve(edgeToOpposite.size() / 2);
-    for (const auto& kv : edgeToOpposite) {
+    std::vector<uint32_t> edgeKeys;
+    edgeKeys.reserve(edgeToOpposite.size());
+    for (const auto& kv : edgeToOpposite)
+        edgeKeys.push_back(kv.first);
+    std::sort(edgeKeys.begin(), edgeKeys.end());
+    for (uint32_t key : edgeKeys) {
+        const auto& kv = *edgeToOpposite.find(key);
         if (kv.second.second < 0) continue;  // boundary edge (only one triangle)
         uint16_t c = static_cast<uint16_t>(kv.second.first);
         uint16_t d = static_cast<uint16_t>(kv.second.second);
@@ -478,7 +523,7 @@ static float BoneProfileFollowWeight(int preset,
     case DRAPE_PRESET_LOOSE_DRAPED:
         // Draped cloth: reduce follow weight by limb influence so lower body
         // verts become loose (small follow weight). Physics will then position
-        // them. NO forced minimum here — let limbs reduce w to near-zero.
+        // them. NO forced minimum here â€” let limbs reduce w to near-zero.
         // (The anchorStiffness parameter later applies waist-anchoring to tight verts.)
         w = w * (1.0f - 0.55f * limb);
         break;
@@ -614,6 +659,105 @@ static std::string trim(std::string s) {
     return s;
 }
 
+static bool WildcardMatchLower(const char* pat, const char* text) {
+    const char* star = nullptr;
+    const char* retry = nullptr;
+    while (*text) {
+        if (*pat == '?' || *pat == *text) {
+            ++pat;
+            ++text;
+            continue;
+        }
+        if (*pat == '*') {
+            star = pat++;
+            retry = text;
+            continue;
+        }
+        if (star) {
+            pat = star + 1;
+            text = ++retry;
+            continue;
+        }
+        return false;
+    }
+    while (*pat == '*')
+        ++pat;
+    return *pat == '\0';
+}
+
+static std::vector<std::string> SplitSliderFilter(const char* filterUtf8) {
+    std::vector<std::string> out;
+    if (!filterUtf8)
+        return out;
+
+    std::string token;
+    auto flush = [&]() {
+        std::string t = lower(trim(token));
+        token.clear();
+        if (!t.empty())
+            out.push_back(std::move(t));
+    };
+
+    for (const char* p = filterUtf8; *p; ++p) {
+        char ch = *p;
+        if (ch == ',' || ch == ';' || ch == '\n' || ch == '\r' || ch == '\t')
+            flush();
+        else
+            token.push_back(ch);
+    }
+    flush();
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+static bool SliderAllowedForSmartConform(const std::string& sliderName) {
+    std::string s = lower(sliderName);
+    std::lock_guard<std::mutex> lk(g_sliderFilterMx);
+    if (g_sliderFilter.empty())
+        return true;
+
+    for (const std::string& pat : g_sliderFilter) {
+        if (pat == s || WildcardMatchLower(pat.c_str(), s.c_str()))
+            return true;
+    }
+    return false;
+}
+
+static void RecordSliderFilterSkip(const std::string& sliderName) {
+    std::string key = lower(sliderName);
+    std::lock_guard<std::mutex> lk(g_sliderFilterMx);
+    ++g_sliderFilterSkippedCalls;
+    if (g_sliderFilterSkipLogged.insert(key).second && g_sliderFilterSkipExamples.size() < 8) {
+        g_sliderFilterSkipExamples.push_back(sliderName);
+    }
+}
+
+static void LogSliderFilterSummary() {
+    int skipped = 0;
+    std::vector<std::string> examples;
+    {
+        std::lock_guard<std::mutex> lk(g_sliderFilterMx);
+        skipped = g_sliderFilterSkippedCalls;
+        examples = g_sliderFilterSkipExamples;
+        g_sliderFilterSkippedCalls = 0;
+        g_sliderFilterSkipLogged.clear();
+        g_sliderFilterSkipExamples.clear();
+    }
+
+    if (skipped <= 0)
+        return;
+
+    std::string joined;
+    for (const std::string& ex : examples) {
+        if (!joined.empty())
+            joined += ", ";
+        joined += ex;
+    }
+    HLog("detour: slider filter skipped=%d example(s)=[%s]", skipped, joined.c_str());
+}
+
 static float Clamp01(float v) {
     return std::max(0.0f, std::min(1.0f, v));
 }
@@ -636,6 +780,33 @@ static const char* PresetName(int preset) {
     case DRAPE_PRESET_RIGID_ACCESSORY: return "Rigid Accessory";
     default: return "Auto";
     }
+}
+
+static int LayerTieBreakPriority(int preset) {
+    switch (NormalizePreset(preset)) {
+    case DRAPE_PRESET_RIGID_ACCESSORY: return 60;
+    case DRAPE_PRESET_BELT:            return 55;
+    case DRAPE_PRESET_RIGID_ARMOR:     return 50;
+    case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 45;
+    case DRAPE_PRESET_LOOSE_DRAPED:    return 35;
+    case DRAPE_PRESET_FITTED_CLOTH:    return 25;
+    case DRAPE_PRESET_TUBULAR:         return 10;
+    case DRAPE_PRESET_SKIN_TIGHT:      return 0;
+    default:                           return 0;
+    }
+}
+
+static bool PresetTieBreaksOuter(int outerPreset, int innerPreset) {
+    int inner = NormalizePreset(innerPreset);
+    if (inner != DRAPE_PRESET_TUBULAR && inner != DRAPE_PRESET_FITTED_CLOTH)
+        return false;
+    return LayerTieBreakPriority(outerPreset) > LayerTieBreakPriority(innerPreset);
+}
+
+static bool ShapeCoversInnerLocked(const std::string& outer, const std::string& inner) {
+    auto it = g_shapeOutersByInner.find(inner);
+    return it != g_shapeOutersByInner.end() &&
+           it->second.find(outer) != it->second.end();
 }
 
 static bool NameHas(const std::string& lowerName, const char* token) {
@@ -732,9 +903,15 @@ static void BuildPresetMaskLocked(const std::string& shapeName,
                                   const std::vector<float>& weights,
                                   const std::vector<VertexBoneProfile>* profiles,
                                   const std::vector<EdgeConstraint>* edges,
-                                  std::unordered_map<uint16_t, float>& outMask,
-                                  int& outPreset) {
+                                   std::unordered_map<uint16_t, float>& outMask,
+                                   int& outPreset) {
     outPreset = PresetForShapeLocked(shapeName);
+    auto cacheIt = g_shapePresetMaskCache.find(shapeName);
+    if (cacheIt != g_shapePresetMaskCache.end() && cacheIt->second.preset == outPreset) {
+        outMask = cacheIt->second.mask;
+        return;
+    }
+
     outMask.clear();
     outMask.reserve(weights.size());
     for (size_t i = 0; i < weights.size() && i <= 0xFFFF; ++i) {
@@ -784,6 +961,11 @@ static void BuildPresetMaskLocked(const std::string& shapeName,
 
     if (edges)
         SmoothMaskOnEdges(outMask, *edges, smoothIterations, smoothStrength);
+
+    CachedPresetMask cached;
+    cached.preset = outPreset;
+    cached.mask = outMask;
+    g_shapePresetMaskCache[shapeName] = std::move(cached);
 }
 
 static Vec3 ToVec3(const Vector3& v) {
@@ -836,7 +1018,7 @@ static float Comp(const Vec3& v, int axis) {
     return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }
 
-// ── BVH build (iterative median split over triangle centroids) ─────────────
+// â”€â”€ BVH build (iterative median split over triangle centroids) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 static void BuildBodyBVH(const std::vector<Vec3>& verts,
                          const std::vector<std::array<uint16_t, 3>>& tris,
                          BodyBVH& bvh) {
@@ -1041,6 +1223,24 @@ static Vec3 TriPointBary(const BodyBVH& bvh, int tri, float u, float v, float w)
     const auto& t = bvh.tris[(size_t)tri];
     return Add(Scale(bvh.verts[t[0]], u),
                Add(Scale(bvh.verts[t[1]], v), Scale(bvh.verts[t[2]], w)));
+}
+
+struct TriangleSample {
+    float a, b, c;
+};
+
+static const TriangleSample kTriangleSamples[] = {
+    {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+    {0.5f, 0.5f, 0.0f},
+    {0.5f, 0.0f, 0.5f},
+    {0.0f, 0.5f, 0.5f},
+};
+
+static Vec3 SampleTrianglePoint(const std::vector<Vec3>& verts,
+                                const std::array<uint16_t, 3>& t,
+                                const TriangleSample& s) {
+    return Add(Scale(verts[t[0]], s.a),
+               Add(Scale(verts[t[1]], s.b), Scale(verts[t[2]], s.c)));
 }
 
 static bool BVHSignedGap(const BodyBVH& bvh, const Vec3& p, float& outGap, Vec3* outNrm) {
@@ -1301,6 +1501,7 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
 struct ResolvedProject {
     std::string nifPath;
     std::string referenceShape;
+    fs::path ospPath;
 };
 
 // Resolve the open project's NIF path and the actual OutfitStudio reference
@@ -1330,7 +1531,7 @@ static ResolvedProject ResolveProject(const std::string& proj) {
                 HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
                 HLog("resolve: reference shape '%s'", referenceShape.c_str());
                 HLog("resolve: NIF found in same mod '%s'", sameMod.string().c_str());
-                return {sameMod.string(), referenceShape};
+                return {sameMod.string(), referenceShape, ref.ospPath};
             }
 
             for (const auto& shapeRoot : roots) {
@@ -1339,7 +1540,7 @@ static ResolvedProject ResolveProject(const std::string& proj) {
                     HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
                     HLog("resolve: reference shape '%s'", referenceShape.c_str());
                     HLog("resolve: NIF found via VFS-style search '%s'", candidate.string().c_str());
-                    return {candidate.string(), referenceShape};
+                    return {candidate.string(), referenceShape, ref.ospPath};
                 }
             }
 
@@ -1363,6 +1564,56 @@ static ResolvedProject ResolveProject(const std::string& proj) {
     return {};
 }
 
+static std::string XmlAttrValue(const std::string& line, const char* attr) {
+    std::string needle = std::string(attr) + "=\"";
+    auto p = line.find(needle);
+    if (p == std::string::npos)
+        return {};
+    p += needle.size();
+    auto q = line.find('"', p);
+    return q == std::string::npos ? std::string{} : line.substr(p, q - p);
+}
+
+static std::vector<std::string> ParseSliderNamesFromOsp(const fs::path& ospPath,
+                                                        const std::string& proj) {
+    std::ifstream f(ospPath);
+    std::vector<std::string> exact;
+    std::vector<std::string> fallback;
+    if (!f)
+        return exact;
+
+    std::string projL = lower(trim(proj));
+    std::string line;
+    bool inSet = false;
+    bool inExactSet = false;
+    while (std::getline(f, line)) {
+        if (line.find("<SliderSet") != std::string::npos) {
+            inSet = true;
+            inExactSet = (lower(trim(XmlAttrValue(line, "name"))) == projL);
+            continue;
+        }
+        if (line.find("</SliderSet>") != std::string::npos) {
+            inSet = false;
+            inExactSet = false;
+            continue;
+        }
+        if (!inSet || line.find("<Slider ") == std::string::npos)
+            continue;
+
+        std::string name = trim(XmlAttrValue(line, "name"));
+        if (name.empty())
+            continue;
+        fallback.push_back(name);
+        if (inExactSet)
+            exact.push_back(name);
+    }
+
+    std::vector<std::string> out = exact.empty() ? fallback : exact;
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 // (Re)build per-shape weights for the currently open project. Caller holds lock.
 static void RebuildCacheLocked() {
     g_shapeWeights.clear();
@@ -1372,7 +1623,9 @@ static void RebuildCacheLocked() {
     g_shapeBending.clear();
     g_shapeGeometryPresets.clear();
     g_shapeLayer.clear();
+    g_shapeOutersByInner.clear();
     g_shapeTris.clear();
+    g_shapeBaseBVH.clear();
     g_solvedShapes.clear();
     g_refVerts.clear();
     g_refTris.clear();
@@ -1380,6 +1633,7 @@ static void RebuildCacheLocked() {
     g_bodyShellCache.clear();
     g_bodyBVHCache.clear();
     g_shapeMask.clear();
+    g_shapePresetMaskCache.clear();
     g_missingShapesLogged.clear();
     g_appliedShapesLogged.clear();
     g_staticShapesLogged.clear();
@@ -1510,7 +1764,7 @@ static void RebuildCacheLocked() {
         float avgLimbBone = boneProfiles.empty() ? 0.0f : limbSum / (float)boneProfiles.size();
 
         g_shapeWeights[name] = std::move(w);
-        // Pass boneProfiles before moving it — needed for TUBULAR/DRAPED detection.
+        // Pass boneProfiles before moving it â€” needed for TUBULAR/DRAPED detection.
         int geometryPreset = GuessPresetFromGeometry(outVerts, g_shapeWeights[name], &boneProfiles);
         if (geometryPreset != DRAPE_PRESET_AUTO)
             g_shapeGeometryPresets[name] = geometryPreset;
@@ -1535,7 +1789,20 @@ static void RebuildCacheLocked() {
              PresetName(geometryPreset));
     }
 
-    // ── Inter-mesh layer order pre-pass ──────────────────────────────────────
+    // â”€â”€ Inter-mesh layer order pre-pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    for (const auto& kv : g_shapeVerts) {
+        auto triIt = g_shapeTris.find(kv.first);
+        if (triIt == g_shapeTris.end() || triIt->second.empty() ||
+            kv.second.empty() || kv.second.size() > 0xFFFF)
+            continue;
+
+        BodyBVH bvh;
+        BuildBodyBVH(kv.second, triIt->second, bvh);
+        if (bvh.valid)
+            g_shapeBaseBVH.emplace(kv.first, std::move(bvh));
+    }
+    HLog("cache: built base garment BVHs=%zu", g_shapeBaseBVH.size());
+
     // For every pair of garment meshes, sample where they overlap (same vertical
     // column near the body) in the BASE mesh and record which sits farther from the
     // body's central axis there (outer). Aggregate into a per-shape layer rank so
@@ -1581,9 +1848,24 @@ static void RebuildCacheLocked() {
         // a strict winner per pair. We accumulate a per-shape score (higher = outer).
         // A simple majority (>60% of decisive cells) wins the pair, so two garments in
         // the same vertical band (pants under a long dress) get separated even with
-        // modest overlap — the previous 2x ratio + shared<3 gate left them tied.
+        // modest overlap â€” the previous 2x ratio + shared<3 gate left them tied.
         std::unordered_map<std::string, int> score;  // higher = more outer
         for (auto& kv : g_shapeVerts) score[kv.first] = 0;
+        auto recordOuter = [&](const std::string& outer,
+                               const std::string& inner,
+                               int weight) {
+            if (outer == inner)
+                return;
+            auto reverseIt = g_shapeOutersByInner.find(outer);
+            if (reverseIt != g_shapeOutersByInner.end() &&
+                reverseIt->second.erase(inner) > 0 &&
+                score[inner] > 0) {
+                --score[inner];
+            }
+
+            bool inserted = g_shapeOutersByInner[inner].insert(outer).second;
+            score[outer] += inserted ? weight : std::max(0, weight - 1);
+        };
         for (size_t a = 0; a < shapes.size(); ++a) {
             for (size_t b = a + 1; b < shapes.size(); ++b) {
                 int aOuter = 0, bOuter = 0, shared = 0;
@@ -1600,10 +1882,79 @@ static void RebuildCacheLocked() {
                 int decisive = aOuter + bOuter;
                 if (decisive < 1) continue;               // no clear winner anywhere
                 // Simple majority of decisive cells wins the pair.
-                if (aOuter * 5 > decisive * 3)      score[shapes[a].name] += 1;  // a outside >60%
-                else if (bOuter * 5 > decisive * 3) score[shapes[b].name] += 1;  // b outside >60%
+                if (aOuter * 5 > decisive * 3)      recordOuter(shapes[a].name, shapes[b].name, 1);  // a outside >60%
+                else if (bOuter * 5 > decisive * 3) recordOuter(shapes[b].name, shapes[a].name, 1);  // b outside >60%
             }
         }
+
+        if (g_refBodyBVH.valid && !g_shapeBaseBVH.empty()) {
+            const float kPairNear2 = 4.50f * 4.50f;
+            const float kGapMargin = 0.08f;
+            auto sampleAgainst = [&](const std::vector<Vec3>& sourceVerts,
+                                     const BodyBVH& targetBvh,
+                                     bool sourceIsA,
+                                     int& aOuter,
+                                     int& bOuter,
+                                     int& nearSamples) {
+                if (sourceVerts.empty() || !targetBvh.valid)
+                    return;
+                size_t stride = std::max<size_t>(1, sourceVerts.size() / 384);
+                size_t sampled = 0;
+                for (size_t i = 0; i < sourceVerts.size(); i += stride) {
+                    if (++sampled > 512)
+                        break;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(targetBvh, sourceVerts[i], cp, nrm, d2))
+                        continue;
+                    if (d2 > kPairNear2)
+                        continue;
+                    float sourceGap = 0.0f, targetGap = 0.0f;
+                    if (!BVHSignedGap(g_refBodyBVH, sourceVerts[i], sourceGap, nullptr) ||
+                        !BVHSignedGap(g_refBodyBVH, cp, targetGap, nullptr))
+                        continue;
+
+                    ++nearSamples;
+                    if (sourceGap > targetGap + kGapMargin) {
+                        if (sourceIsA) ++aOuter; else ++bOuter;
+                    } else if (targetGap > sourceGap + kGapMargin) {
+                        if (sourceIsA) ++bOuter; else ++aOuter;
+                    }
+                }
+            };
+
+            for (size_t a = 0; a < shapes.size(); ++a) {
+                for (size_t b = a + 1; b < shapes.size(); ++b) {
+                    const std::string& aName = shapes[a].name;
+                    const std::string& bName = shapes[b].name;
+                    auto avIt = g_shapeVerts.find(aName);
+                    auto bvIt = g_shapeVerts.find(bName);
+                    auto abvhIt = g_shapeBaseBVH.find(aName);
+                    auto bbvhIt = g_shapeBaseBVH.find(bName);
+                    if (avIt == g_shapeVerts.end() || bvIt == g_shapeVerts.end() ||
+                        abvhIt == g_shapeBaseBVH.end() || bbvhIt == g_shapeBaseBVH.end())
+                        continue;
+
+                    int aOuter = 0, bOuter = 0, nearSamples = 0;
+                    sampleAgainst(avIt->second, bbvhIt->second, true,  aOuter, bOuter, nearSamples);
+                    sampleAgainst(bvIt->second, abvhIt->second, false, aOuter, bOuter, nearSamples);
+                    int decisive = aOuter + bOuter;
+                    if (nearSamples < 8 || decisive < 3)
+                        continue;
+
+                    if (aOuter * 5 > decisive * 3) {
+                        recordOuter(aName, bName, 2);
+                        HLog("layer-pair: outer='%s' inner='%s' source='body-gap' votes=%d/%d near=%d",
+                             aName.c_str(), bName.c_str(), aOuter, decisive, nearSamples);
+                    } else if (bOuter * 5 > decisive * 3) {
+                        recordOuter(bName, aName, 2);
+                        HLog("layer-pair: outer='%s' inner='%s' source='body-gap' votes=%d/%d near=%d",
+                             bName.c_str(), aName.c_str(), bOuter, decisive, nearSamples);
+                    }
+                }
+            }
+        }
+
         for (auto& kv : score) g_shapeLayer[kv.first] = kv.second;
 
         for (const auto& kv : g_shapeLayer)
@@ -1783,7 +2134,7 @@ static bool ApplyVerticalEnvelopeDrape(void* resultDiffData,
     return true;
 }
 
-// ── Detour ─────────────────────────────────────────────────────────────
+// â”€â”€ Detour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static bool HostGetRawResultDiff(void* self,
                                  const std::string* shapeName,
@@ -1892,6 +2243,12 @@ struct StaticSolveParams {
     float relaxPerUnitZ = 0.08f;
     float layerStrength = 0.30f;
     int layerIterations = 1;
+    // Experimental layer-order constraint. Disabled for the stable baseline:
+    // it did not solve no-room covered clipping and should not affect production
+    // conforms until validated on normal outfits.
+    float orderConstraintStrength = 0.0f;
+    float orderConstraintMaxStep = 0.10f;
+    float orderConstraintBodyFloor = 0.08f;
     int constraintIterations = 2;
     float stretchStiffness = 0.35f;
     int surfaceSmoothIterations = 1;
@@ -1913,7 +2270,7 @@ struct StaticSolveParams {
     float physicsDrapeInitPushStiffness = 0.80f;
     int   physicsDrapeInitPushPasses    = 8;
     // Bending constraints: resist folding along shared edges (fabric stiffness).
-    // 0 = disabled (stretch only → chain-mail look). ~0.001 = soft cloth.
+    // 0 = disabled (stretch only â†’ chain-mail look). ~0.001 = soft cloth.
     float bendingStiffness = 0.0f;
     int   bendingIterations = 1;    // extra bending passes per PBD iteration
     // Real Verlet cloth solve (physicsDrape only). pbdIterations is reused as the
@@ -2003,26 +2360,26 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // pbdIterations = relaxation steps; constraintIterations = passes/step;
         // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
         // The monotonic radial envelope (run last) is the dominant shaper for
-        // loose. The Verlet here is only a gentle settle — kept weak so it doesn't
+        // loose. The Verlet here is only a gentle settle â€” kept weak so it doesn't
         // melt the hem with uneven vertical sag.
         p.verletCloth = true;
         p.collisionStiffness = 0.85f;
-        // Tuned drape (2026-06-05): moderate values — visibly looser than the body
+        // Tuned drape (2026-06-05): moderate values â€” visibly looser than the body
         // (clearance 0.9) with a real but bounded sag. gravity is PER-SUBSTEP and
-        // there are ~50 substeps, so keep it small (0.06 × 50 ≈ 3 units of pull);
+        // there are ~50 substeps, so keep it small (0.06 Ã— 50 â‰ˆ 3 units of pull);
         // clothMaxDrop bounds the total sag so the hem can't melt/tear.
         p.bodyClearance = 0.90f;       // looser than 0.65, not the 2.0 overdrive
-        p.bendingStiffness = 0.10f;    // a touch stiffer → fewer jagged folds
+        p.bendingStiffness = 0.10f;    // a touch stiffer â†’ fewer jagged folds
         p.bendingIterations = 2;
-        p.surfaceSmoothIterations = 4; // extra smoothing → less jagged hem
+        p.surfaceSmoothIterations = 4; // extra smoothing â†’ less jagged hem
         p.surfaceSmoothStrength = 0.18f;
         p.anchorStiffness = 0.50f;
         p.drapeReturnRate = 0.028f;
         p.drapeEnvelopeStrength = 1.0f;
         p.drapeEnvelopeBins = 96;
-        p.gravity = 0.07f;             // per-substep; ×50 ≈ 3.5 units total sag
-        p.clothMaxDrop = 8.0f;         // bounded sag — prevents melt/tear at hem
-        p.stretchStiffness = 0.75f;    // stiffer cloth → resists tearing
+        p.gravity = 0.07f;             // per-substep; Ã—50 â‰ˆ 3.5 units total sag
+        p.clothMaxDrop = 8.0f;         // bounded sag â€” prevents melt/tear at hem
+        p.stretchStiffness = 0.75f;    // stiffer cloth â†’ resists tearing
         // Processing intensity: Low=faster/fewer passes, Medium=default,
         // High=extra iterations for difficult extreme morphs.
         switch (g_processingIntensity.load(std::memory_order_relaxed)) {
@@ -2394,7 +2751,7 @@ static void ApplyClothDrapeEnvelopePass(
 {
     size_t n = finalVerts.size();
     // returnRate == 0 is valid: pure monotonic envelope (radius never decreases
-    // going down) — the hardcoded "loose" rule. Only negative is invalid.
+    // going down) â€” the hardcoded "loose" rule. Only negative is invalid.
     if (n == 0 || radialBins <= 0 || returnRatePerUnitZ < 0.0f || strength <= 0.0f)
         return;
 
@@ -2451,14 +2808,14 @@ static void ApplyClothDrapeEnvelopePass(
     }
 }
 
-// ── Body-shell monotonic drape envelope (the hardcoded LOOSE rule) ──────────
+// â”€â”€ Body-shell monotonic drape envelope (the hardcoded LOOSE rule) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Implements the user's rule using the dense, smooth BODY SHELL instead of the
 // sparse cloth verts: going DOWN, the cloth radius per angular sector can never
 // fall below the maximum body radius seen from the top of the drape region down
 // to that height (+ clearance). So the cloth bulges out at protrusions (breast,
 // belly, butt) and hangs straight down (vertical) across the recessed parts
-// (under-belly, waist, groin) — it never tucks back toward the center. Because
-// the body shell is dense (48×96) and smooth, this is smooth and acts on EVERY
+// (under-belly, waist, groin) â€” it never tucks back toward the center. Because
+// the body shell is dense (48Ã—96) and smooth, this is smooth and acts on EVERY
 // drape vert regardless of how few cloth verts fall in a bin (the flaw that made
 // the cloth-vert envelope weak and jagged).
 static void ApplyBodyEnvelopeDrapePass(
@@ -2473,7 +2830,7 @@ static void ApplyBodyEnvelopeDrapePass(
     bool twoSided,             // false: only push verts that are INSIDE out to the
                                //   floor (one-sided minimum).
                                // true: also pull OUTWARD bumps in to the envelope
-                               //   surface → flattens the cloth onto the smooth
+                               //   surface â†’ flattens the cloth onto the smooth
                                //   monotonic envelope. This is the radial collision
                                //   AND the de-jagger in one; the result is the
                                //   monotonic surface, so it still obeys the loose
@@ -2506,15 +2863,15 @@ static void ApplyBodyEnvelopeDrapePass(
 
     // Seed the running max at the top of the drape region (belt/waist). Seeding
     // higher (to capture the belly overhang) was tried but on a heavy body it
-    // forced the whole skirt to the belly/hip width down to the hem → a stiff
+    // forced the whole skirt to the belly/hip width down to the hem â†’ a stiff
     // wide bell. The belly-overhang problem needs a different fix (per-contact
     // vertical drop, not a global radius floor), so keep the seed at the belt.
     int seedTopZb = drapeTopZb;
 
     // Per angular bin: envelope scans DOWN from seedTopZb (above the belly).
     // envelopeR = max(bodyR, prev_envelopeR - returnRate * dzPerBin).
-    // returnRate=0  → strict column (never narrows below the widest point).
-    // returnRate>0  → slow taper (hangs gradually inward after a protrusion).
+    // returnRate=0  â†’ strict column (never narrows below the widest point).
+    // returnRate>0  â†’ slow taper (hangs gradually inward after a protrusion).
     std::vector<float> envR((size_t)RB * ZB, -1.0f);
     for (int rb = 0; rb < RB; ++rb) {
         float runEnv = -1.0f;
@@ -2570,16 +2927,16 @@ static void ApplyBodyEnvelopeDrapePass(
     }
 }
 
-// ── Hanging-chain pass (user spec item 5) ──────────────────────────────────
+// â”€â”€ Hanging-chain pass (user spec item 5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Instead of reading the body shell only at each vertex's own Z (which is blind
 // to a protrusion ABOVE the drape region, e.g. a belly that overhangs the belt),
 // propagate the contact radius DOWN through the cloth's own edge graph:
-//   process verts top→bottom; each drape vert's radius is at least the radius of
+//   process verts topâ†’bottom; each drape vert's radius is at least the radius of
 //   the connected vert ABOVE it (minus a tiny per-Z taper) and at least the body
-//   radius at its position. Anchored verts (drapeEl<0.2) are NOT moved — they are
+//   radius at its position. Anchored verts (drapeEl<0.2) are NOT moved â€” they are
 //   the seeds/contacts (the bodice carries the belly/bust radius into the chain).
 // Effect: once a vert is pushed out by a contact, everything hanging below it in
-// the same cloth column stays out and falls vertical — it never returns inward
+// the same cloth column stays out and falls vertical â€” it never returns inward
 // unless a new (wider) contact appears. Two-sided projection also de-jags.
 static void ApplyHangingChainPass(
     std::vector<Vec3>& finalVerts,
@@ -2895,9 +3252,449 @@ static void ApplyEdgeConstraintPass(std::vector<Vec3>& finalVerts,
 struct OuterCollider {
     BodyBVH base;
     BodyBVH current;
+    const BodyBVH* baseRef = nullptr;
+    const BodyBVH* currentRef = nullptr;
     int     preset = 0;
     std::string name;
+
+    const BodyBVH& Base() const { return baseRef ? *baseRef : base; }
+    const BodyBVH& Current() const { return currentRef ? *currentRef : current; }
 };
+
+struct SolverCapture {
+    std::string shapeName;
+    std::string sliderName;
+    std::string projectKey;
+    int preset = DRAPE_PRESET_AUTO;
+    int processingIntensity = 1;
+    float refCenterX = 0.0f;
+    float refCenterY = 0.0f;
+    float refMinZ = 0.0f;
+    float refMaxZ = 0.0f;
+    std::vector<Vec3> baseVerts;
+    std::vector<VertexBoneProfile> profiles;
+    std::vector<EdgeConstraint> edges;
+    std::vector<BendingConstraint> bending;
+    std::vector<std::array<uint16_t, 3>> tris;
+    bool hasBodyShell = false;
+    BodyShell bodyShell;
+    bool hasBodyBVH = false;
+    std::vector<Vec3> bodyBVHVerts;
+    std::vector<std::array<uint16_t, 3>> bodyBVHTris;
+    bool hasRefBodyBVH = false;
+    std::vector<Vec3> refBodyBVHVerts;
+    std::vector<std::array<uint16_t, 3>> refBodyBVHTris;
+    std::unordered_map<uint16_t, float> presetMask;
+    TargetDataDiffs rawDiff;
+    std::vector<OuterCollider> outerColliders;
+    std::vector<OuterCollider> innerColliders;
+    bool hasExpected = false;
+    bool expectedPassOk = false;
+    TargetDataDiffs expectedDiff;
+    std::vector<Vec3> expectedSolvedVerts;
+};
+
+static fs::path CaptureFlagPath() {
+    return fs::path("E:/SkyrimDev/Drape/captures/enable_capture.flag");
+}
+
+static fs::path CaptureDefaultDir() {
+    return fs::path("E:/SkyrimDev/Drape/captures/yarl");
+}
+
+static bool EnvFlagEnabled(const char* name) {
+    // Capture writes large replay files and is expensive. Keep it file-gated so
+    // a stale PowerShell/MO2 environment cannot accidentally slow production runs.
+    return name && std::string(name) == "DRAPE_CAPTURE" && fs::exists(CaptureFlagPath());
+}
+
+static fs::path EnvPathOrDefault(const char* name, const fs::path& fallback) {
+    if (name && std::string(name) == "DRAPE_CAPTURE_DIR" && !fs::exists(CaptureFlagPath()))
+        return fallback;
+    char buf[MAX_PATH * 4] = {};
+    size_t len = 0;
+    if (getenv_s(&len, buf, sizeof(buf), name) == 0 && len > 1)
+        return fs::path(buf);
+    if (name && std::string(name) == "DRAPE_CAPTURE_DIR" && fs::exists(CaptureFlagPath()))
+        return CaptureDefaultDir();
+    return fallback;
+}
+
+struct CaptureWriter {
+    std::ofstream out;
+    bool ok = false;
+
+    explicit CaptureWriter(const fs::path& path)
+        : out(path, std::ios::binary | std::ios::trunc), ok(out.good()) {}
+
+    template <class T>
+    void pod(const T& v) {
+        if (!ok) return;
+        out.write(reinterpret_cast<const char*>(&v), sizeof(T));
+        ok = out.good();
+    }
+
+    void str(const std::string& s) {
+        uint32_t n = (uint32_t)std::min<size_t>(s.size(), std::numeric_limits<uint32_t>::max());
+        pod(n);
+        if (!ok || n == 0) return;
+        out.write(s.data(), n);
+        ok = out.good();
+    }
+
+    template <class T, class Fn>
+    void vec(const std::vector<T>& v, Fn fn) {
+        uint32_t n = (uint32_t)std::min<size_t>(v.size(), std::numeric_limits<uint32_t>::max());
+        pod(n);
+        for (uint32_t i = 0; ok && i < n; ++i)
+            fn(v[i]);
+    }
+};
+
+struct CaptureReader {
+    std::ifstream in;
+    bool ok = false;
+
+    explicit CaptureReader(const fs::path& path)
+        : in(path, std::ios::binary), ok(in.good()) {}
+
+    template <class T>
+    void pod(T& v) {
+        if (!ok) return;
+        in.read(reinterpret_cast<char*>(&v), sizeof(T));
+        ok = in.good();
+    }
+
+    void str(std::string& s) {
+        uint32_t n = 0;
+        pod(n);
+        if (!ok) return;
+        s.assign(n, '\0');
+        if (n == 0) return;
+        in.read(&s[0], n);
+        ok = in.good();
+    }
+
+    template <class T, class Fn>
+    void vec(std::vector<T>& v, Fn fn) {
+        uint32_t n = 0;
+        pod(n);
+        if (!ok) return;
+        v.clear();
+        v.resize(n);
+        for (uint32_t i = 0; ok && i < n; ++i)
+            fn(v[i]);
+    }
+};
+
+static void WriteVec3(CaptureWriter& w, const Vec3& v) {
+    w.pod(v.x); w.pod(v.y); w.pod(v.z);
+}
+
+static void ReadVec3(CaptureReader& r, Vec3& v) {
+    r.pod(v.x); r.pod(v.y); r.pod(v.z);
+}
+
+static void WriteTri(CaptureWriter& w, const std::array<uint16_t, 3>& t) {
+    w.pod(t[0]); w.pod(t[1]); w.pod(t[2]);
+}
+
+static void ReadTri(CaptureReader& r, std::array<uint16_t, 3>& t) {
+    r.pod(t[0]); r.pod(t[1]); r.pod(t[2]);
+}
+
+static void WriteProfile(CaptureWriter& w, const VertexBoneProfile& p) {
+    w.pod(p.torso); w.pod(p.pelvis); w.pod(p.leg); w.pod(p.arm);
+    w.pod(p.handFoot); w.pod(p.head); w.pod(p.custom); w.pod(p.maxWeight);
+    w.pod(p.influences);
+}
+
+static void ReadProfile(CaptureReader& r, VertexBoneProfile& p) {
+    r.pod(p.torso); r.pod(p.pelvis); r.pod(p.leg); r.pod(p.arm);
+    r.pod(p.handFoot); r.pod(p.head); r.pod(p.custom); r.pod(p.maxWeight);
+    r.pod(p.influences);
+}
+
+static void WriteEdge(CaptureWriter& w, const EdgeConstraint& e) {
+    w.pod(e.a); w.pod(e.b); w.pod(e.restLength);
+}
+
+static void ReadEdge(CaptureReader& r, EdgeConstraint& e) {
+    r.pod(e.a); r.pod(e.b); r.pod(e.restLength);
+}
+
+static void WriteBending(CaptureWriter& w, const BendingConstraint& b) {
+    w.pod(b.c); w.pod(b.d); w.pod(b.restLength);
+}
+
+static void ReadBending(CaptureReader& r, BendingConstraint& b) {
+    r.pod(b.c); r.pod(b.d); r.pod(b.restLength);
+}
+
+static void WriteBodyShell(CaptureWriter& w, const BodyShell& s) {
+    w.pod(s.radialBins); w.pod(s.zBins); w.pod(s.minZ); w.pod(s.maxZ); w.pod(s.invDz);
+    w.vec(s.baseR, [&](float v) { w.pod(v); });
+    w.vec(s.morphR, [&](float v) { w.pod(v); });
+    w.vec(s.occupied, [&](uint8_t v) { w.pod(v); });
+    w.pod(s.valid);
+}
+
+static void ReadBodyShell(CaptureReader& r, BodyShell& s) {
+    r.pod(s.radialBins); r.pod(s.zBins); r.pod(s.minZ); r.pod(s.maxZ); r.pod(s.invDz);
+    r.vec(s.baseR, [&](float& v) { r.pod(v); });
+    r.vec(s.morphR, [&](float& v) { r.pod(v); });
+    r.vec(s.occupied, [&](uint8_t& v) { r.pod(v); });
+    r.pod(s.valid);
+}
+
+static void WriteMask(CaptureWriter& w, const std::unordered_map<uint16_t, float>& m) {
+    std::vector<std::pair<uint16_t, float>> items(m.begin(), m.end());
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    uint32_t n = (uint32_t)items.size();
+    w.pod(n);
+    for (const auto& kv : items) {
+        w.pod(kv.first);
+        w.pod(kv.second);
+    }
+}
+
+static void ReadMask(CaptureReader& r, std::unordered_map<uint16_t, float>& m) {
+    uint32_t n = 0;
+    r.pod(n);
+    m.clear();
+    m.reserve(n);
+    for (uint32_t i = 0; r.ok && i < n; ++i) {
+        uint16_t k = 0; float v = 0.0f;
+        r.pod(k); r.pod(v);
+        m[k] = v;
+    }
+}
+
+static void WriteDiff(CaptureWriter& w, const TargetDataDiffs& d) {
+    std::vector<std::pair<uint16_t, Vector3>> items(d.begin(), d.end());
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    uint32_t n = (uint32_t)items.size();
+    w.pod(n);
+    for (const auto& kv : items) {
+        w.pod(kv.first);
+        w.pod(kv.second.x);
+        w.pod(kv.second.y);
+        w.pod(kv.second.z);
+    }
+}
+
+static void ReadDiff(CaptureReader& r, TargetDataDiffs& d) {
+    uint32_t n = 0;
+    r.pod(n);
+    d.clear();
+    d.reserve(n);
+    for (uint32_t i = 0; r.ok && i < n; ++i) {
+        uint16_t k = 0; Vector3 v{};
+        r.pod(k); r.pod(v.x); r.pod(v.y); r.pod(v.z);
+        d[k] = v;
+    }
+}
+
+static void WriteCollider(CaptureWriter& w, const OuterCollider& oc) {
+    w.str(oc.name);
+    w.pod(oc.preset);
+    w.vec(oc.Base().verts, [&](const Vec3& v) { WriteVec3(w, v); });
+    w.vec(oc.Base().tris, [&](const std::array<uint16_t, 3>& t) { WriteTri(w, t); });
+    w.vec(oc.Current().verts, [&](const Vec3& v) { WriteVec3(w, v); });
+    w.vec(oc.Current().tris, [&](const std::array<uint16_t, 3>& t) { WriteTri(w, t); });
+}
+
+static void ReadCollider(CaptureReader& r, OuterCollider& oc) {
+    std::vector<Vec3> baseVerts, curVerts;
+    std::vector<std::array<uint16_t, 3>> baseTris, curTris;
+    r.str(oc.name);
+    r.pod(oc.preset);
+    r.vec(baseVerts, [&](Vec3& v) { ReadVec3(r, v); });
+    r.vec(baseTris, [&](std::array<uint16_t, 3>& t) { ReadTri(r, t); });
+    r.vec(curVerts, [&](Vec3& v) { ReadVec3(r, v); });
+    r.vec(curTris, [&](std::array<uint16_t, 3>& t) { ReadTri(r, t); });
+    BuildBodyBVH(baseVerts, baseTris, oc.base);
+    BuildBodyBVH(curVerts, curTris, oc.current);
+}
+
+static bool WriteSolverCapture(const fs::path& path, const SolverCapture& c) {
+    CaptureWriter w(path);
+    if (!w.ok) return false;
+    const uint32_t magic = 0x43505244u; // DRPC
+    const uint32_t version = 3;
+    w.pod(magic);
+    w.pod(version);
+    w.str(c.shapeName);
+    w.str(c.sliderName);
+    w.str(c.projectKey);
+    w.pod(c.preset);
+    w.pod(c.processingIntensity);
+    w.pod(c.refCenterX); w.pod(c.refCenterY); w.pod(c.refMinZ); w.pod(c.refMaxZ);
+    w.vec(c.baseVerts, [&](const Vec3& v) { WriteVec3(w, v); });
+    w.vec(c.profiles, [&](const VertexBoneProfile& p) { WriteProfile(w, p); });
+    w.vec(c.edges, [&](const EdgeConstraint& e) { WriteEdge(w, e); });
+    w.vec(c.bending, [&](const BendingConstraint& b) { WriteBending(w, b); });
+    w.vec(c.tris, [&](const std::array<uint16_t, 3>& t) { WriteTri(w, t); });
+    w.pod(c.hasBodyShell);
+    if (c.hasBodyShell) WriteBodyShell(w, c.bodyShell);
+    w.pod(c.hasBodyBVH);
+    if (c.hasBodyBVH) {
+        w.vec(c.bodyBVHVerts, [&](const Vec3& v) { WriteVec3(w, v); });
+        w.vec(c.bodyBVHTris, [&](const std::array<uint16_t, 3>& t) { WriteTri(w, t); });
+    }
+    w.pod(c.hasRefBodyBVH);
+    if (c.hasRefBodyBVH) {
+        w.vec(c.refBodyBVHVerts, [&](const Vec3& v) { WriteVec3(w, v); });
+        w.vec(c.refBodyBVHTris, [&](const std::array<uint16_t, 3>& t) { WriteTri(w, t); });
+    }
+    WriteMask(w, c.presetMask);
+    WriteDiff(w, c.rawDiff);
+    w.vec(c.outerColliders, [&](const OuterCollider& oc) { WriteCollider(w, oc); });
+    w.vec(c.innerColliders, [&](const OuterCollider& oc) { WriteCollider(w, oc); });
+    w.pod(c.hasExpected);
+    if (c.hasExpected) {
+        w.pod(c.expectedPassOk);
+        WriteDiff(w, c.expectedDiff);
+        w.vec(c.expectedSolvedVerts, [&](const Vec3& v) { WriteVec3(w, v); });
+    }
+    return w.ok;
+}
+
+static bool ReadSolverCapture(const fs::path& path, SolverCapture& c) {
+    CaptureReader r(path);
+    if (!r.ok) return false;
+    uint32_t magic = 0, version = 0;
+    r.pod(magic);
+    r.pod(version);
+    if (!r.ok || magic != 0x43505244u || (version < 1 || version > 3)) return false;
+    r.str(c.shapeName);
+    r.str(c.sliderName);
+    r.str(c.projectKey);
+    r.pod(c.preset);
+    r.pod(c.processingIntensity);
+    r.pod(c.refCenterX); r.pod(c.refCenterY); r.pod(c.refMinZ); r.pod(c.refMaxZ);
+    r.vec(c.baseVerts, [&](Vec3& v) { ReadVec3(r, v); });
+    r.vec(c.profiles, [&](VertexBoneProfile& p) { ReadProfile(r, p); });
+    r.vec(c.edges, [&](EdgeConstraint& e) { ReadEdge(r, e); });
+    if (version >= 2)
+        r.vec(c.bending, [&](BendingConstraint& b) { ReadBending(r, b); });
+    else
+        c.bending.clear();
+    r.vec(c.tris, [&](std::array<uint16_t, 3>& t) { ReadTri(r, t); });
+    r.pod(c.hasBodyShell);
+    if (c.hasBodyShell) ReadBodyShell(r, c.bodyShell);
+    r.pod(c.hasBodyBVH);
+    if (c.hasBodyBVH) {
+        r.vec(c.bodyBVHVerts, [&](Vec3& v) { ReadVec3(r, v); });
+        r.vec(c.bodyBVHTris, [&](std::array<uint16_t, 3>& t) { ReadTri(r, t); });
+    }
+    r.pod(c.hasRefBodyBVH);
+    if (c.hasRefBodyBVH) {
+        r.vec(c.refBodyBVHVerts, [&](Vec3& v) { ReadVec3(r, v); });
+        r.vec(c.refBodyBVHTris, [&](std::array<uint16_t, 3>& t) { ReadTri(r, t); });
+    }
+    ReadMask(r, c.presetMask);
+    ReadDiff(r, c.rawDiff);
+    r.vec(c.outerColliders, [&](OuterCollider& oc) { ReadCollider(r, oc); });
+    if (version >= 3)
+        r.vec(c.innerColliders, [&](OuterCollider& oc) { ReadCollider(r, oc); });
+    else
+        c.innerColliders.clear();
+    r.pod(c.hasExpected);
+    if (c.hasExpected) {
+        r.pod(c.expectedPassOk);
+        ReadDiff(r, c.expectedDiff);
+        r.vec(c.expectedSolvedVerts, [&](Vec3& v) { ReadVec3(r, v); });
+    }
+    return r.ok;
+}
+
+static SolverCapture MakeSolverCapture(const std::string& shapeName,
+                                       const std::string& sliderName,
+                                       int preset,
+                                       const std::vector<Vec3>& baseVerts,
+                                       const std::vector<VertexBoneProfile>* profiles,
+                                       const std::vector<EdgeConstraint>* edges,
+                                       const std::vector<std::array<uint16_t, 3>>* tris,
+                                       const BodyShell* bodyShell,
+                                       const BodyBVH* bodyBVH,
+                                       const std::unordered_map<uint16_t, float>& presetMask,
+                                       const TargetDataDiffs& rawDiff,
+                                       const std::vector<OuterCollider>* outerColliders,
+                                       const std::vector<OuterCollider>* innerColliders) {
+    SolverCapture c;
+    c.shapeName = shapeName;
+    c.sliderName = sliderName;
+    c.projectKey = g_projectKey;
+    c.preset = preset;
+    c.processingIntensity = g_processingIntensity.load(std::memory_order_relaxed);
+    c.refCenterX = g_refCenterX;
+    c.refCenterY = g_refCenterY;
+    c.refMinZ = g_refMinZ;
+    c.refMaxZ = g_refMaxZ;
+    c.baseVerts = baseVerts;
+    if (profiles) c.profiles = *profiles;
+    if (edges) c.edges = *edges;
+    if (tris) c.tris = *tris;
+    {
+        auto bendingIt = g_shapeBending.find(shapeName);
+        if (bendingIt != g_shapeBending.end()) c.bending = bendingIt->second;
+    }
+    if (bodyShell) {
+        c.hasBodyShell = true;
+        c.bodyShell = *bodyShell;
+    }
+    if (bodyBVH && bodyBVH->valid) {
+        c.hasBodyBVH = true;
+        c.bodyBVHVerts = bodyBVH->verts;
+        c.bodyBVHTris = bodyBVH->tris;
+    }
+    if (g_refBodyBVH.valid) {
+        c.hasRefBodyBVH = true;
+        c.refBodyBVHVerts = g_refBodyBVH.verts;
+        c.refBodyBVHTris = g_refBodyBVH.tris;
+    }
+    c.presetMask = presetMask;
+    c.rawDiff = rawDiff;
+    if (outerColliders) c.outerColliders = *outerColliders;
+    if (innerColliders) c.innerColliders = *innerColliders;
+    return c;
+}
+
+static fs::path CaptureOutputDir() {
+    return EnvPathOrDefault("DRAPE_CAPTURE_DIR", TempDrapePath("drape_captures"));
+}
+
+static void MaybeWriteSolverCapture(SolverCapture capture,
+                                    bool passOk,
+                                    const TargetDataDiffs& solvedDiff,
+                                    const std::vector<Vec3>& solvedVerts) {
+    if (!EnvFlagEnabled("DRAPE_CAPTURE"))
+        return;
+    capture.hasExpected = true;
+    capture.expectedPassOk = passOk;
+    capture.expectedDiff = solvedDiff;
+    capture.expectedSolvedVerts = solvedVerts;
+
+    fs::path dir = CaptureOutputDir();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) {
+        HLog("capture: failed to create '%s' (%s)", dir.string().c_str(), ec.message().c_str());
+        return;
+    }
+
+    std::string name = "drape_capture__" + SafeFilePart(g_projectKey) + "__" +
+        SafeFilePart(capture.shapeName) + "__" + SafeFilePart(capture.sliderName) + ".drcap";
+    fs::path path = dir / name;
+    if (WriteSolverCapture(path, capture)) {
+        HLog("capture: wrote '%s' verts=%zu raw=%zu solved=%zu outers=%zu inners=%zu",
+             path.string().c_str(), capture.baseVerts.size(), capture.rawDiff.size(),
+             solvedDiff.size(), capture.outerColliders.size(), capture.innerColliders.size());
+    } else {
+        HLog("capture: failed to write '%s'", path.string().c_str());
+    }
+}
 
 static bool ApplyStaticClothPass(const std::string& shapeName,
                                  const std::string& sliderName,
@@ -2914,10 +3711,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                                  // nearest-point can't silently jump between cloak/belt/pants). Each
                                  // holds the outer mesh's base + current surface and its preset (for
                                  // adaptive clearance). The anti-clip is ONE-DIRECTIONAL: it only PULLS
-                                 // THIS mesh IN under each outer one — never pushes the outer mesh out,
+                                 // THIS mesh IN under each outer one â€” never pushes the outer mesh out,
                                  // so the outermost layer (fur cloak) is never deformed (it gets an
                                  // empty list). Empty/null if this is the outermost mesh.
                                  const std::vector<OuterCollider>* outerColliders,
+                                 // INNER-mesh colliders for external structured pieces (belts,
+                                 // straps, rigid accessories). These push THIS outer piece away
+                                 // from already-solved lower layers, instead of pulling cloth inward.
+                                 const std::vector<OuterCollider>* innerColliders,
                                  // Receives this mesh's final solved positions, for the caller to
                                  // cache as an outerBVH source for later-solved inner meshes.
                                  std::vector<Vec3>* outSolvedVerts,
@@ -2933,7 +3734,8 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         return false;
     stats.physicsDrapeActive = params.physicsDrape;
 
-    const bool isLoosePreset = NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED;
+    const int normPreset = NormalizePreset(preset);
+    const bool isLoosePreset = normPreset == DRAPE_PRESET_LOOSE_DRAPED;
 
     size_t n = std::min<size_t>(baseVerts.size(), 0x10000);
     std::vector<Vec3> supportVerts(n);
@@ -2951,7 +3753,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
         supportVerts[i] = Add(baseVerts[i], raw);
         // Start from the conformed fit (supportVerts) in all modes. The Verlet
-        // cloth solve then hangs the drape region down from this fitted start —
+        // cloth solve then hangs the drape region down from this fitted start â€”
         // matching the diagnostic drop that looked correct. Starting from the slim
         // base mesh forced an unstable re-inflate that fought the body.
         finalVerts[i]   = supportVerts[i];
@@ -2977,7 +3779,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             break;
         }
 
-        // Physics drape: loose verts have no anchor — physics determines their
+        // Physics drape: loose verts have no anchor â€” physics determines their
         // position. Only tight verts (high follow) are anchored to vanilla conform.
         if (params.physicsDrape && f < 0.35f) {
             anchor   = 0.0f;
@@ -2991,18 +3793,18 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     static const std::vector<EdgeConstraint> kNoEdges;
     const std::vector<EdgeConstraint>& useEdges = edges ? *edges : kNoEdges;
 
-    // ════════════════════════════════════════════════════════════════════════
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // UNIFIED VERTEX CLASSIFICATION
-    // ════════════════════════════════════════════════════════════════════════
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // ONE pass decides each vertex's behavior. Everything downstream (invMass,
     // anchorWeight, vertClearance, gravity participation) derives from a single
     // continuous value:
     //
-    //   drapeAmount[i] ∈ [0,1] — how much this vertex behaves like free-hanging
+    //   drapeAmount[i] âˆˆ [0,1] â€” how much this vertex behaves like free-hanging
     //                            cloth vs. anchored-to-body.
-    //     ~0.0  → anchored: bodice/collar/sleeve/cuff. Follows vanilla conform,
+    //     ~0.0  â†’ anchored: bodice/collar/sleeve/cuff. Follows vanilla conform,
     //             stays fitted to the body, no gravity.
-    //     ~1.0  → free drape: skirt/robe panel. Gravity + collision determine it.
+    //     ~1.0  â†’ free drape: skirt/robe panel. Gravity + collision determine it.
     //
     // This REPLACES the three previously-conflicting systems (the old drapeEl
     // bone formula, the island-clearance pass, and the anchor-boost loop) that
@@ -3019,7 +3821,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     std::vector<float> drapeAmount(n, 0.0f);
     std::vector<float> vertClearance(n, params.bodyClearance);
     // Surfaced to the rigid-island pass below: per-vert island id + per-island
-    // "rigid plate/accessory" flag (medallion/buckle/chain → translate, keep shape).
+    // "rigid plate/accessory" flag (medallion/buckle/chain â†’ translate, keep shape).
     std::vector<int>     islandIdOut;
     std::vector<uint8_t> islandRigidOut;
     if (params.verletCloth) {
@@ -3077,9 +3879,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             }
         }
 
-        // ── Geometric descriptors per island (validated in the Python prototype:
+        // â”€â”€ Geometric descriptors per island (validated in the Python prototype:
         //    bbox flatness + extents discriminate plates/chains from drape far
-        //    better than SDF/raycast, which collapse on thin shell garments). ──
+        //    better than SDF/raycast, which collapse on thin shell garments). â”€â”€
         std::vector<Vec3> islMin((size_t)numIslands, Vec3{ 1e30f, 1e30f, 1e30f});
         std::vector<Vec3> islMax((size_t)numIslands, Vec3{-1e30f,-1e30f,-1e30f});
         std::vector<int>  islandSize(numIslands, 0);
@@ -3098,14 +3900,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             meshDiag = std::max(1e-3f, Len(Sub(gmax, gmin)));
         }
 
-        // ── STEP A: detect RIGID islands + per-island drape amount ──────────
-        // islandRigid[id]: rigid plate/accessory (medallion/buckle/chain) → handled
-        // by the rigid-island translate pass. islandDrape[id] ∈ [0,1]: how much the
+        // â”€â”€ STEP A: detect RIGID islands + per-island drape amount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // islandRigid[id]: rigid plate/accessory (medallion/buckle/chain) â†’ handled
+        // by the rigid-island translate pass. islandDrape[id] âˆˆ [0,1]: how much the
         // island behaves as free-hanging cloth, from its aggregate bone profile.
         std::vector<uint8_t> islandRigid((size_t)numIslands, 0);
         std::vector<float>   islandDrape((size_t)numIslands, 1.0f);
 
-        // Largest island vert count → used to gate "small" relative to the mesh.
+        // Largest island vert count â†’ used to gate "small" relative to the mesh.
         int maxIslandSize = 1;
         for (int id = 0; id < numIslands; ++id)
             maxIslandSize = std::max(maxIslandSize, islandSize[(size_t)id]);
@@ -3145,7 +3947,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             std::sort(e, e + 3);                       // e[0]<=e[1]<=e[2]
             float maxExt   = e[2];
 
-            // RIGID plate / accessory → translate, keep shape. Conservative gate:
+            // RIGID plate / accessory â†’ translate, keep shape. Conservative gate:
             // SMALL (few verts, absolute + relative) AND COMPACT (small extent) AND
             // NOT-CLOTH (low pelvis/leg). Avoids rigidifying cloth panels (white slab).
             bool small   = islandSize[(size_t)id] < 250 &&
@@ -3158,17 +3960,29 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 continue;
             }
 
-            // WAISTBAND / sculpted belt → rigid translate. These islands sit at the
+            // WAISTBAND / sculpted belt â†’ rigid translate. These islands sit at the
             // waist Z-range, have strong pelvis+torso, but very low leg weight (unlike
             // the skirt). They form the ] cross-section of a belt and collapse under
             // cloth physics. Vanilla conform preserves their shape by translating them
-            // with the body morph diff — we replicate that by flagging them as rigid.
+            // with the body morph diff â€” we replicate that by flagging them as rigid.
             // Gate: pelvis+torso strong, leg weak, narrow Z-span (not a full skirt panel).
             {
                 float zSpan = islMax[(size_t)id].z - islMin[(size_t)id].z;
                 bool waistSig  = (ip.pelvis > 0.25f) && (ip.torso > 0.15f) && (ip.leg < 0.12f);
                 bool narrowBand = zSpan < (meshDiag * 0.08f);
-                if (waistSig && narrowBand) {
+                // A real waistband/belt WRAPS the waist: it is a large island spanning a
+                // wide horizontal arc. A small localized island with the same bone
+                // signature is a decorative FLAP (e.g. the hip leather flap) that should
+                // DRAPE with the body, not rigid-translate. Rigid-locking a flap pins it
+                // to vanilla conform while the cloth beside it moves with physics â†’ the
+                // two split open into a visible hole in the morph (user-reported, the
+                // circled gap). Require a real band size so flaps are excluded.
+                float xSpan = islMax[(size_t)id].x - islMin[(size_t)id].x;
+                float ySpan = islMax[(size_t)id].y - islMin[(size_t)id].y;
+                float horizSpan = std::sqrt(xSpan*xSpan + ySpan*ySpan);
+                bool wrapsWaist = (islandSize[(size_t)id] >= 80) &&
+                                  (horizSpan > meshDiag * 0.30f);
+                if (waistSig && narrowBand && wrapsWaist) {
                     islandRigid[(size_t)id] = 1;
                     islandDrape[(size_t)id] = 0.0f;
                     continue;
@@ -3177,7 +3991,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
             // Island drape level = mean per-vertex drape signal over the island.
             // (Sleeves are handled per-vertex by the sleeve-suppress term in
-            // vertDrapeSignal — NOT by a whole-island sleeve gate, which would wrongly
+            // vertDrapeSignal â€” NOT by a whole-island sleeve gate, which would wrongly
             // fitted-ify a large dress island that has sleeves merged into it.)
             float islMeanSignal = islandSignalCnt[(size_t)id] > 0
                 ? islandSignalSum[(size_t)id] / (float)islandSignalCnt[(size_t)id] : 0.0f;
@@ -3208,11 +4022,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             (void)drapeW;
         }
 
-        // ── STEP B: per-vertex drapeAmount ─────────────────────────────────
+        // â”€â”€ STEP B: per-vertex drapeAmount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // PURELY per-vertex: drape is decided by the vertex's own lower-body bone
         // signal + height (vertDrapeSignal). This distinguishes bodice from skirt
         // WITHIN a single connected island (a dress where bodice+skirt+belt are one
-        // topological piece — the common case; the "belt" is not its own island).
+        // topological piece â€” the common case; the "belt" is not its own island).
         // We deliberately do NOT blend in the island mean here: a whole-dress island
         // has a low mean (dominated by the bodice) that would wrongly drag the skirt
         // verts toward anchor. The island pass is used ONLY to flag rigid plates.
@@ -3220,11 +4034,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float kHugClear   = 0.12f;                 // fitted hugs the body
         const float kRigidClear = 0.08f;                 // rigid trim near-zero
 
-        // ── Hybrid free-hang drape (Loose-Draped meshes only) ──────────────
+        // â”€â”€ Hybrid free-hang drape (Loose-Draped meshes only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // The bone-based vertDrapeSignal only recognises LOWER-body draping
         // (pelvis+leg+below-waist torso).  A cloak / cape / tabard hangs from the
         // UPPER body (spine/shoulder weights) with ~zero pelvis+leg, so its signal
-        // is ~0 and it gets treated as fitted → it collapses to vanilla conform
+        // is ~0 and it gets treated as fitted â†’ it collapses to vanilla conform
         // (twisted clipping) instead of draping.
         //
         // Fix (scoped to meshes the USER marked Loose Draped, so no other case
@@ -3261,7 +4075,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     float dist = std::sqrt(d2);
                     float sign = Dot(Sub(supportVerts[i], cp), nrm);  // >0 outside
                     if (sign > 0.0f && dist > kGapNear) {
-                        // Map gap [near..far] → hang factor [0..1].
+                        // Map gap [near..far] â†’ hang factor [0..1].
                         float hang = ClampRange((dist - kGapNear) / (kGapFar - kGapNear),
                                                 0.0f, 1.0f);
                         if (hang > 0.0f) {
@@ -3284,7 +4098,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
     }
 
-    // ── Non-verlet presets: per-vertex drape from bones (Z fallback if none) ──
+    // â”€â”€ Non-verlet presets: per-vertex drape from bones (Z fallback if none) â”€â”€
     if (!params.verletCloth) {
         for (size_t i = 0; i < n; ++i) {
             if (profiles && i < profiles->size()) {
@@ -3313,26 +4127,26 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // Reduce anchor for loose drape verts — let stretch + collision settle them.
+    // Reduce anchor for loose drape verts â€” let stretch + collision settle them.
     // BUT: enforce a minimum anchor (0.15) to prevent unrestricted drift, which
     // would propagate corrections to areas with no vanilla conform diff (ghost diffs).
     for (size_t i = 0; i < n; ++i) {
         if (drapeEl[i] > 0.25f) {
             float drapeScale = 1.0f - drapeEl[i] * (1.0f - follow[i]);
-            // physicsDrape: loose drape verts must have anchor=0 — pure physics.
+            // physicsDrape: loose drape verts must have anchor=0 â€” pure physics.
             // The 0.15 minimum was preventing physicsDrape from working at all:
-            // 0.15 × anchorStiffness per iter × 80 iter ≈ full pull to supportVerts.
+            // 0.15 Ã— anchorStiffness per iter Ã— 80 iter â‰ˆ full pull to supportVerts.
             float minAnchor = params.physicsDrape ? 0.0f : 0.15f;
             anchorWeight[i]  = std::max(Clamp01(anchorWeight[i] * drapeScale), minAnchor);
         }
     }
 
-    // ── Slider-source locality ───────────────────────────────────────────
+    // â”€â”€ Slider-source locality â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Compute per-vert influence: how much did the body actually change at this
     // outfit vert's 3D location for this specific slider?
     //
-    // Belly slider  → large change at abdomen, near-zero at ankles/sleeves
-    // RM_Heavy      → large change everywhere → solver runs on all verts
+    // Belly slider  â†’ large change at abdomen, near-zero at ankles/sleeves
+    // RM_Heavy      â†’ large change everywhere â†’ solver runs on all verts
     //
     // directInfluence[i]: normalised |morphR - baseR| from body shell
     // effectiveInfluence[i]: direct + mesh propagation (decays with hops)
@@ -3351,7 +4165,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
 
         if (maxChange < 1.0e-4f) {
-            // Slider barely moves the body → skip cloth pass entirely
+            // Slider barely moves the body â†’ skip cloth pass entirely
             outDiff.clear();
             return false;
         }
@@ -3361,7 +4175,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             directInfluence[i] = Clamp01(directInfluence[i] * invMax);
 
         // Propagate through cloth mesh (only through drape-eligible verts).
-        // Upper-body anchor verts (drapeEl ≈ 0) block propagation so belly
+        // Upper-body anchor verts (drapeEl â‰ˆ 0) block propagation so belly
         // influence cannot reach sleeves through the upper torso.
         effectiveInfluence = directInfluence;
         static constexpr float kPropDecay = 0.82f;
@@ -3387,19 +4201,19 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Inward suppression ────────────────────────────────────────────────
+    // â”€â”€ Inward suppression â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Only used in correction mode (physicsDrape=false).
     // In physicsDrape mode the initial body-push (after collideVertex) handles it.
     // For drape-eligible loose verts: cancel the inward radial component of
     // the vanilla conform delta proportional to looseness.
     //
     // Concept: vanilla conform may follow body concavities (waist pull-in, inner
-    // thigh, etc.). A loose skirt/hem should NOT follow inward — it should stay
+    // thigh, etc.). A loose skirt/hem should NOT follow inward â€” it should stay
     // at or outside its current radius. Outward conform moves (body expanding) are
     // always kept as-is. Only inward moves are selectively suppressed.
     //
     // For sliders that expand the body (RM_Heavy, BigHips, etc.), ALL diffs are
-    // outward → no suppression → result equals vanilla conform. For concave sliders
+    // outward â†’ no suppression â†’ result equals vanilla conform. For concave sliders
     // (belly curve-in below a bulge) the inward component is cancelled.
     if (!params.physicsDrape && params.inwardSuppressionStrength > 0.0f) {
         for (size_t i = 0; i < n; ++i) {
@@ -3439,7 +4253,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         float vc = vertClearance[i];
         // Inter-garment ordering is handled entirely by the bidirectional per-vertex
         // anti-clip post-pass (local order from the base mesh). The in-solve collider
-        // only handles the BODY — pushing off other garments here would be one-
+        // only handles the BODY â€” pushing off other garments here would be one-
         // directional and could shove a vert to the wrong side of the local order.
         // Body collision (primary).
         if (bodyBVH && bodyBVH->valid) {
@@ -3469,6 +4283,133 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     const float stretchK = Clamp01(params.stretchStiffness);
     const float stretchStep = 1.0f - std::pow(1.0f - stretchK, 1.0f / (float)iterations);
     static constexpr float kLenEps = 1.0e-6f;
+
+    // New architecture, step 2: in-solve layer order constraints.
+    // This only handles the fixable case: this vertex was under an outer garment in
+    // the base mesh AND the current outer garment still leaves enough room above
+    // the body. No-room coverage is intentionally left to the later collapse pass.
+    struct OrderConstraint {
+        uint16_t idx = 0;
+        float allowedGap = 0.0f;    // max signed distance from body surface
+    };
+    std::vector<OrderConstraint> orderConstraints;
+
+    auto orderMarginFor = [](int outerPreset) -> float {
+        switch (NormalizePreset(outerPreset)) {
+        case DRAPE_PRESET_LOOSE_DRAPED:    return 0.12f;
+        case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.24f;
+        case DRAPE_PRESET_RIGID_ARMOR:     return 0.28f;
+        case DRAPE_PRESET_BELT:            return 0.20f;
+        case DRAPE_PRESET_RIGID_ACCESSORY: return 0.18f;
+        default:                           return 0.14f;
+        }
+    };
+
+    const int orderSelfPreset = NormalizePreset(preset);
+    const bool orderSelfCanMove =
+        orderSelfPreset != DRAPE_PRESET_RIGID_ARMOR &&
+        orderSelfPreset != DRAPE_PRESET_RIGID_ACCESSORY;
+
+    if (orderSelfCanMove &&
+        params.orderConstraintStrength > 0.0f &&
+        params.orderConstraintMaxStep > 0.0f &&
+        outerColliders && !outerColliders->empty() &&
+        bodyBVH && bodyBVH->valid) {
+        const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
+        const float kOrderOverlap = 2.75f;
+        const float kOrderOverlap2 = kOrderOverlap * kOrderOverlap;
+        const float kBaseUnderSlack = 0.06f;
+
+        orderConstraints.reserve(n / 8);
+        for (size_t i = 0; i < n; ++i) {
+            if (invMass[i] <= 0.0f) continue;
+            if (!islandIdOut.empty() && i < islandIdOut.size()) {
+                int id = islandIdOut[i];
+                if (id >= 0 && id < (int)islandRigidOut.size() &&
+                    islandRigidOut[(size_t)id]) {
+                    continue;
+                }
+            }
+
+            float myBaseGap = 0.0f;
+            Vec3 tmpNrm{0.0f, 0.0f, 1.0f};
+            if (!BVHSignedGap(*baseBodyBVH, baseVerts[i], myBaseGap, &tmpNrm))
+                continue;
+
+            bool found = false;
+            float bestAllowed = 1.0e30f;
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.Base().valid || !oc.Current().valid) continue;
+
+                Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                float bd2 = 0.0f;
+                int baseTri = -1;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
+                                        &baseTri, &bu, &bv, &bw)) {
+                    continue;
+                }
+                if (bd2 > kOrderOverlap2) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+
+                float outerBaseGap = 0.0f;
+                if (!BVHSignedGap(*baseBodyBVH, bcp, outerBaseGap, &tmpNrm))
+                    continue;
+                if (myBaseGap >= outerBaseGap + kBaseUnderSlack)
+                    continue; // base mesh says this vertex is not below this outer.
+
+                Vec3 currentOuterPoint = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                float outerGap = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, currentOuterPoint, outerGap, &tmpNrm))
+                    continue;
+
+                float allowed = outerGap - orderMarginFor(oc.preset);
+                float feasibleFloor = std::max(params.orderConstraintBodyFloor,
+                                               vertClearance[i] + 0.03f);
+                if (allowed < feasibleFloor)
+                    continue; // Problem B: no room to solve by position.
+
+                bestAllowed = std::min(bestAllowed, allowed);
+                found = true;
+            }
+
+            if (found)
+                orderConstraints.push_back(OrderConstraint{static_cast<uint16_t>(i), bestAllowed});
+        }
+
+        if (!orderConstraints.empty()) {
+            HLog("detour: order-constraints shape='%s' verts=%zu outers=%zu",
+                 shapeName.c_str(), orderConstraints.size(), outerColliders->size());
+        }
+    }
+
+    auto solveOrderConstraints = [&](const std::vector<float>& mass, float strength) {
+        if (orderConstraints.empty() || !bodyBVH || !bodyBVH->valid || strength <= 0.0f)
+            return;
+
+        const float kMinViolation = 0.01f;
+        const float maxStep = std::max(0.0f, params.orderConstraintMaxStep);
+        for (const OrderConstraint& c : orderConstraints) {
+            size_t i = (size_t)c.idx;
+            if (i >= n) continue;
+            float w = (i < mass.size()) ? Clamp01(mass[i]) : 1.0f;
+            if (w <= 0.0f) continue;
+
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            float myGap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, finalVerts[i], myGap, &nrm))
+                continue;
+            float violation = myGap - c.allowedGap;
+            if (violation <= kMinViolation)
+                continue;
+
+            float step = std::min(violation * Clamp01(strength) * w, maxStep);
+            if (step <= 0.0f)
+                continue;
+            finalVerts[i] = Add(finalVerts[i], Scale(nrm, -step));
+            ++stats.layerAdjusted;
+        }
+    };
 
     // Support rest lengths: edge lengths in the VANILLA CONFORM result (supportVerts),
     // not the base mesh. This prevents stretch constraints from fighting body-induced
@@ -3505,7 +4446,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Physics drape: initial body-push ─────────────────────────────────
+    // â”€â”€ Physics drape: initial body-push â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Starting from base mesh (slim body), push all verts outside the morphed
     // body BEFORE the PBD loop. This establishes the cloth's initial position
     // on the morphed body surface, after which gravity + stretch + envelope
@@ -3520,21 +4461,91 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Proximity constraints (synthetic edges for near-touching cross-island verts) ──
+    // â”€â”€ Proximity constraints (synthetic edges for near-touching cross-island verts) â”€â”€
     // Problem: a belt or trim esculpted as part of a single dress mesh has no separate
     // island. Its vertices are topologically connected to the surrounding cloth and
     // move with it, but the belt straps can straddle seams where adjacent vert pairs
-    // have NO edge between them (different UV islands → no shared edge in the mesh).
+    // have NO edge between them (different UV islands â†’ no shared edge in the mesh).
     // During the Verlet solve those pairs drift freely, tearing the belt apart.
     //
     // Solution: before the solve, find all base-mesh vertex pairs that are physically
     // close (< kProxDist) but have NO topological edge connecting them (different islands
     // OR simply not in useEdges). Add them as synthetic stretch constraints with the
     // VANILLA rest length. They resist ONLY over-stretching (like all stretch constraints),
-    // so the cloth can still drape — they just prevent the strap from tearing open.
+    // so the cloth can still drape â€” they just prevent the strap from tearing open.
     std::vector<EdgeConstraint> proxEdges;
     std::vector<float>          proxRestLen;
-    if (params.verletCloth && n <= 0xFFFF) {
+    std::vector<uint8_t>        proxIsBoundarySeam;
+    struct SeamVectorPair {
+        uint16_t a = 0;
+        uint16_t b = 0;
+        Vec3 supportOffset{0.0f, 0.0f, 0.0f};
+        uint8_t boundary = 0;
+    };
+    std::vector<SeamVectorPair> seamVectorPairs;
+    std::unordered_set<uint64_t> seamVectorSeen;
+    std::vector<std::vector<uint32_t>> weldGroups;
+    std::vector<std::vector<uint32_t>> exactSeamGroups;
+    const bool needsExactSeamWeld =
+        params.verletCloth ||
+        normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
+        normPreset == DRAPE_PRESET_FITTED_CLOTH ||
+        normPreset == DRAPE_PRESET_TUBULAR;
+    if (needsExactSeamWeld && n <= 0xFFFF) {
+        std::unordered_map<std::string, std::vector<uint32_t>> coincidence;
+        coincidence.reserve(n);
+        auto quantKey = [](const Vec3& p) -> std::string {
+            auto q = [](float v) -> int32_t {
+                return (int32_t)std::llround(v * 1000.0f);
+            };
+            return std::to_string(q(p.x)) + "|" +
+                   std::to_string(q(p.y)) + "|" +
+                   std::to_string(q(p.z));
+        };
+        for (size_t i = 0; i < n; ++i)
+            coincidence[quantKey(baseVerts[i])].push_back((uint32_t)i);
+
+        std::vector<std::string> coincidenceKeys;
+        coincidenceKeys.reserve(coincidence.size());
+        for (const auto& kv : coincidence)
+            coincidenceKeys.push_back(kv.first);
+        std::sort(coincidenceKeys.begin(), coincidenceKeys.end());
+
+        const float kExactBaseDist2 = 0.003f * 0.003f;
+        for (const std::string& key : coincidenceKeys) {
+            auto& group = coincidence[key];
+            if (group.size() <= 1) continue;
+            std::sort(group.begin(), group.end());
+            std::vector<std::vector<uint32_t>> clusters;
+            for (uint32_t vi : group) {
+                bool placed = false;
+                for (auto& cluster : clusters) {
+                    if (!cluster.empty() &&
+                        Len2(Sub(baseVerts[vi], baseVerts[cluster.front()])) <= kExactBaseDist2) {
+                        cluster.push_back(vi);
+                        placed = true;
+                        break;
+                    }
+                }
+                if (!placed)
+                    clusters.push_back({ vi });
+            }
+            for (auto& cluster : clusters) {
+                if (cluster.size() <= 1) continue;
+                exactSeamGroups.push_back(cluster);
+                if (params.verletCloth)
+                    weldGroups.push_back(cluster);
+            }
+        }
+        if (!exactSeamGroups.empty())
+            HLog("detour: exact-seam-groups shape='%s' groups=%zu",
+                 shapeName.c_str(), exactSeamGroups.size());
+    }
+    const bool needsNonTopoSeamCaps =
+        params.verletCloth ||
+        normPreset == DRAPE_PRESET_FITTED_CLOTH ||
+        normPreset == DRAPE_PRESET_TUBULAR;
+    if (needsNonTopoSeamCaps && n <= 0xFFFF) {
         const float kProxDist  = 0.50f;
         const float kProxDist2 = kProxDist * kProxDist;
         const float pcell = kProxDist;
@@ -3555,6 +4566,39 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             uint32_t hi = std::max((uint32_t)e.a, (uint32_t)e.b);
             edgeSet.insert(((uint64_t)lo << 32) | hi);
         }
+        std::unordered_set<uint64_t> proxSeen;
+        proxSeen.reserve(n * 2);
+        auto addProxEdge = [&](uint32_t a, uint32_t b, bool boundarySeam) -> bool {
+            if (a >= n || b >= n || a == b) return false;
+            uint32_t lo = std::min(a, b);
+            uint32_t hi = std::max(a, b);
+            uint64_t key = ((uint64_t)lo << 32) | hi;
+            if (edgeSet.count(key)) return false;
+            if (!proxSeen.insert(key).second) return false;
+            float vLen = Len(Sub(baseVerts[hi], baseVerts[lo]));
+            if (vLen < 1.0e-4f) return false;
+            EdgeConstraint ec;
+            ec.a = (uint16_t)lo; ec.b = (uint16_t)hi; ec.restLength = vLen;
+            proxEdges.push_back(ec);
+            proxRestLen.push_back(vLen);
+            proxIsBoundarySeam.push_back(boundarySeam ? 1 : 0);
+            return true;
+        };
+        seamVectorSeen.reserve(n * 2);
+        auto addSeamVectorPair = [&](uint32_t a, uint32_t b, bool boundarySeam) -> bool {
+            if (a >= n || b >= n || a == b) return false;
+            uint32_t lo = std::min(a, b);
+            uint32_t hi = std::max(a, b);
+            uint64_t key = ((uint64_t)lo << 32) | hi;
+            if (!seamVectorSeen.insert(key).second) return false;
+            SeamVectorPair sv;
+            sv.a = (uint16_t)a;
+            sv.b = (uint16_t)b;
+            sv.supportOffset = Sub(supportVerts[b], supportVerts[a]);
+            sv.boundary = boundarySeam ? 1 : 0;
+            seamVectorPairs.push_back(sv);
+            return true;
+        };
 
         for (size_t i = 0; i < n; ++i) {
             const Vec3& p = baseVerts[i];
@@ -3565,34 +4609,122 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     if (j <= (uint32_t)i) continue;
                     if (Len2(Sub(baseVerts[j], p)) > kProxDist2) continue;
                     // Skip if there's already a real edge between i and j.
-                    uint64_t key = ((uint64_t)i << 32) | j;
-                    if (edgeSet.count(key)) continue;
                     // Rest length from BASE mesh (not support/morphed): this preserves
                     // the sculpted 3D shape (e.g. belt ] cross-section thickness).
-                    // Using support rest length was wrong — on body morph the support
+                    // Using support rest length was wrong â€” on body morph the support
                     // already collapses the belt sides together, so the constraint
                     // then actively flattened the belt to match that morphed distance.
-                    float vLen = Len(Sub(baseVerts[j], baseVerts[i]));
-                    if (vLen < 1.0e-4f) continue;  // degenerate pair
-                    EdgeConstraint ec;
-                    ec.a = (uint16_t)i; ec.b = (uint16_t)j; ec.restLength = vLen;
-                    proxEdges.push_back(ec);
-                    proxRestLen.push_back(vLen);
+                    addProxEdge((uint32_t)i, j, false);
                 }
             }
+        }
+        int boundarySeamPairs = 0;
+        const bool buildBoundarySeams =
+            normPreset == DRAPE_PRESET_LOOSE_DRAPED &&
+            params.verletCloth &&
+            tris && !tris->empty() &&
+            n <= 2500;
+        if (buildBoundarySeams) {
+            std::unordered_map<uint32_t, int> edgeUseCount;
+            edgeUseCount.reserve(tris->size() * 3);
+            auto countTriEdge = [&](uint16_t a, uint16_t b) {
+                if (a >= n || b >= n || a == b) return;
+                ++edgeUseCount[EdgeKey(a, b)];
+            };
+            for (const auto& t : *tris) {
+                countTriEdge(t[0], t[1]);
+                countTriEdge(t[1], t[2]);
+                countTriEdge(t[2], t[0]);
+            }
+
+            struct BoundaryEdge {
+                uint16_t a, b;
+                Vec3 mid;
+                float len;
+            };
+            std::vector<BoundaryEdge> boundaryEdges;
+            boundaryEdges.reserve(edgeUseCount.size());
+            auto addBoundaryEdge = [&](uint16_t a, uint16_t b) {
+                if (a >= n || b >= n || a == b) return;
+                auto it = edgeUseCount.find(EdgeKey(a, b));
+                if (it == edgeUseCount.end() || it->second != 1) return;
+                float len = Len(Sub(baseVerts[a], baseVerts[b]));
+                if (len < 0.08f) return;
+                boundaryEdges.push_back({a, b, Scale(Add(baseVerts[a], baseVerts[b]), 0.5f), len});
+            };
+            for (const auto& t : *tris) {
+                addBoundaryEdge(t[0], t[1]);
+                addBoundaryEdge(t[1], t[2]);
+                addBoundaryEdge(t[2], t[0]);
+            }
+
+            struct BoundaryCandidate {
+                int a, b;
+                float score;
+                bool flip;
+            };
+            std::vector<BoundaryCandidate> candidates;
+            const float kMidNear2 = 0.90f * 0.90f;
+            for (size_t ai = 0; ai < boundaryEdges.size(); ++ai) {
+                const auto& ea = boundaryEdges[ai];
+                for (size_t bi = ai + 1; bi < boundaryEdges.size(); ++bi) {
+                    const auto& eb = boundaryEdges[bi];
+                    if (ea.a == eb.a || ea.a == eb.b || ea.b == eb.a || ea.b == eb.b) continue;
+                    float lenRatio = std::min(ea.len, eb.len) / std::max(ea.len, eb.len);
+                    if (lenRatio < 0.55f) continue;
+                    if (Len2(Sub(ea.mid, eb.mid)) > kMidNear2) continue;
+                    float same = Len(Sub(baseVerts[ea.a], baseVerts[eb.a])) +
+                                 Len(Sub(baseVerts[ea.b], baseVerts[eb.b]));
+                    float flipped = Len(Sub(baseVerts[ea.a], baseVerts[eb.b])) +
+                                    Len(Sub(baseVerts[ea.b], baseVerts[eb.a]));
+                    bool useFlip = flipped < same;
+                    float score = useFlip ? flipped : same;
+                    float maxScore = 1.10f + 0.35f * std::max(ea.len, eb.len);
+                    if (score > maxScore) continue;
+                    candidates.push_back({(int)ai, (int)bi, score, useFlip});
+                }
+            }
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const BoundaryCandidate& a, const BoundaryCandidate& b) {
+                          return a.score < b.score;
+                      });
+
+            std::vector<uint8_t> usedBoundaryEdge(boundaryEdges.size(), 0);
+            for (const auto& c : candidates) {
+                if (usedBoundaryEdge[(size_t)c.a] || usedBoundaryEdge[(size_t)c.b]) continue;
+                usedBoundaryEdge[(size_t)c.a] = 1;
+                usedBoundaryEdge[(size_t)c.b] = 1;
+                const auto& ea = boundaryEdges[(size_t)c.a];
+                const auto& eb = boundaryEdges[(size_t)c.b];
+                if (c.flip) {
+                    addSeamVectorPair(ea.a, eb.b, true);
+                    addSeamVectorPair(ea.b, eb.a, true);
+                    boundarySeamPairs += addProxEdge(ea.a, eb.b, true) ? 1 : 0;
+                    boundarySeamPairs += addProxEdge(ea.b, eb.a, true) ? 1 : 0;
+                } else {
+                    addSeamVectorPair(ea.a, eb.a, true);
+                    addSeamVectorPair(ea.b, eb.b, true);
+                    boundarySeamPairs += addProxEdge(ea.a, eb.a, true) ? 1 : 0;
+                    boundarySeamPairs += addProxEdge(ea.b, eb.b, true) ? 1 : 0;
+                }
+            }
+
+            HLog("detour: boundary-seam-constraints shape='%s' boundaryEdges=%zu candidates=%zu proxPairs=%d vectorPairs=%zu",
+                 shapeName.c_str(), boundaryEdges.size(), candidates.size(),
+                 boundarySeamPairs, seamVectorPairs.size());
         }
         if (!proxEdges.empty())
             HLog("detour: prox-constraints shape='%s' synthetic=%zu",
                  shapeName.c_str(), proxEdges.size());
     }
 
-    // ── Cloth drape solve (momentum-free relaxation) ───────────────────────
-    // Keeps the key idea from johnBuffer/ClothSimulation — distance constraints
+    // â”€â”€ Cloth drape solve (momentum-free relaxation) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Keeps the key idea from johnBuffer/ClothSimulation â€” distance constraints
     // that resist ONLY stretching, so the cloth folds and hangs instead of
-    // shrink-wrapping the body — but WITHOUT Verlet momentum. Momentum let the
+    // shrink-wrapping the body â€” but WITHOUT Verlet momentum. Momentum let the
     // constraint corrections feed back into velocity and accumulate energy, which
     // tore the mesh apart (hem verts reached escape velocity). Pure Gauss-Seidel
-    // relaxation toward a gravity-loaded equilibrium always converges → no tears.
+    // relaxation toward a gravity-loaded equilibrium always converges â†’ no tears.
     // A hard per-vert max-drop and a hard edge-length cap make it unconditionally
     // stable. Pinned verts (low drape eligibility) hold the garment at the waist.
     if (params.verletCloth) {
@@ -3602,28 +4734,17 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             m[i] = pinned ? 0.0f : Clamp01(invMass[i]);
         }
 
-        // ── Seam welding ───────────────────────────────────────────────────
+        // â”€â”€ Seam welding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Game meshes split vertices at UV/material seams: two (or more) verts
         // share a 3D position but have different indices and NO edge between them.
         // Vanilla conform moves them identically; our physics moves each one based
-        // on its own edge fan, so they drift apart → visible slits with the body
+        // on its own edge fan, so they drift apart â†’ visible slits with the body
         // poking through, and detached hem-trim flapping. Group verts that are
         // coincident in the base mesh and force them to move as one each pass.
-        std::unordered_map<uint64_t, std::vector<uint32_t>> coincidence;
-        coincidence.reserve(n);
-        auto quantKey = [](const Vec3& p) -> uint64_t {
-            auto q = [](float v) -> uint64_t {
-                return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
-            };
-            return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
-        };
-        for (size_t i = 0; i < n; ++i)
-            coincidence[quantKey(baseVerts[i])].push_back((uint32_t)i);
-        std::vector<std::vector<uint32_t>> weldGroups;
-        for (auto& kv : coincidence)
-            if (kv.second.size() > 1) weldGroups.push_back(std::move(kv.second));
+        // Exact UV/material seam groups are built once before this branch and
+        // already included in weldGroups for the cloth solve.
 
-        // ── Inter-island junction stitching ─────────────────────────────────
+        // â”€â”€ Inter-island junction stitching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // The dress bodice (fitted, stays put) and the skirt (drape, falls) are
         // SEPARATE islands that merely TOUCH at the waist with no shared edges
         // (verified in the log: bodice z=[0.63-0.97], skirt z=[0.05-0.64]). When
@@ -3633,7 +4754,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // coincident. Here we explicitly pair near-touching verts from DIFFERENT
         // islands and weld them so the skirt top tracks the bodice bottom.
         if (!islandIdOut.empty() && islandIdOut.size() == n) {
-            // Spatial hash for O(n) neighbour lookup (cell ≈ kStitchDist).
+            // Spatial hash for O(n) neighbour lookup (cell â‰ˆ kStitchDist).
             const float kStitchDist  = 1.50f;
             const float kStitchDist2 = kStitchDist * kStitchDist;
             const float cell = kStitchDist;
@@ -3649,10 +4770,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 grid[cellKey(baseVerts[i])].push_back((uint32_t)i);
 
             // For each vert, find the NEAREST vert in a DIFFERENT island within
-            // kStitchDist and weld that PAIR (2 verts only — never a blob, so the
+            // kStitchDist and weld that PAIR (2 verts only â€” never a blob, so the
             // skirt border can't collapse to a point). Each pair is its own group;
             // the existing weldSeams keeps them coincident every substep.
-            // Gate: the horizontal (XY) offset must be small — a bodice→skirt junction
+            // Gate: the horizontal (XY) offset must be small â€” a bodiceâ†’skirt junction
             // is verts at the same circumference but different Z. This lets a large
             // VERTICAL gap stitch (the real hole) without pulling front-to-back.
             const float kStitchXY2 = 0.45f * 0.45f;
@@ -3661,7 +4782,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             for (size_t i = 0; i < n; ++i) {
                 int idi = islandIdOut[i];
                 if (idi < 0) continue;
-                // Never stitch FROM a rigid island — rigid islands use translate pass,
+                // Never stitch FROM a rigid island â€” rigid islands use translate pass,
                 // not the PBD solver, so welding them to cloth verts drags the cloth
                 // border to the rigid position and creates a crease at the boundary.
                 if (idi < (int)islandRigidOut.size() && islandRigidOut[(size_t)idi]) continue;
@@ -3677,7 +4798,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     for (uint32_t j : it->second) {
                         if ((size_t)j == i) continue;
                         if (islandIdOut[j] == idi) continue;     // same island: skip
-                        // Also skip if partner is rigid — same reason.
+                        // Also skip if partner is rigid â€” same reason.
                         int idj = islandIdOut[j];
                         if (idj >= 0 && idj < (int)islandRigidOut.size() && islandRigidOut[(size_t)idj]) continue;
                         float ddx = baseVerts[j].x - p.x, ddy = baseVerts[j].y - p.y;
@@ -3742,7 +4863,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 float len = Len(dir);
                 if (len <= kLenEps) continue;
                 float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
-                if (len <= rest) continue;            // slack/compressed → fold freely
+                if (len <= rest) continue;            // slack/compressed â†’ fold freely
                 Vec3 delta = Scale(dir, ((len - rest) / len) * k / wSum);
                 finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
                 finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
@@ -3753,7 +4874,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // Proximity constraints: bidirectional distance-preserving for vert pairs
         // that are near-touching in the base mesh but have no topological edge.
         // Bidirectional (resist BOTH stretch and compression) so belt straps can't
-        // drift apart OR bunch together — they hold their vanilla relative position.
+        // drift apart OR bunch together â€” they hold their vanilla relative position.
         auto solveProxStretch = [&](float k) {
             for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
                 const auto& e = proxEdges[ei];
@@ -3784,7 +4905,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             for (int it = 0; it < cIters; ++it) {
                 solveStretch(stretchK2);                 // asymmetric: resist stretch only
                 // Proxy constraints run at higher stiffness (1.0) to act as structural
-                // braces — they preserve sculpted shapes (belt ] cross-section) which
+                // braces â€” they preserve sculpted shapes (belt ] cross-section) which
                 // are NOT topological edges and would otherwise collapse under gravity.
                 if (!proxEdges.empty()) solveProxStretch(1.0f);
 
@@ -3817,6 +4938,8 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.bodySamples;
                 }
 
+                solveOrderConstraints(m, params.orderConstraintStrength);
+
                 // Re-pin pinned verts to the conformed fit.
                 for (size_t i = 0; i < n; ++i)
                     if (m[i] <= 0.0f) finalVerts[i] = supportVerts[i];
@@ -3826,7 +4949,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             }
 
             // 3) Hard stretch cap: no edge may exceed rest*kMaxStretch. This is the
-            //    definitive anti-tear — even if relaxation under-converges, edges
+            //    definitive anti-tear â€” even if relaxation under-converges, edges
             //    can never blow up. Two strong asymmetric passes against the cap.
             //    Also enforce proxy constraints so belt straps don't exceed cap either.
             if (!proxEdges.empty()) solveProxStretch(1.0f);
@@ -3834,14 +4957,21 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                     const auto& e = useEdges[ei];
                     if (e.a >= n || e.b >= n) continue;
-                    float w1 = m[e.a], w2 = m[e.b];
-                    float wSum = w1 + w2;
-                    if (wSum <= kLenEps) continue;
                     Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                     float len = Len(dir);
                     float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
                     float cap = rest * kMaxStretch;
                     if (len <= cap || len <= kLenEps) continue;
+                    // Weights: use inverse-mass when available, but if BOTH verts are
+                    // pinned (m==0) the edge would otherwise ESCAPE the cap entirely and
+                    // could be stretched arbitrarily (measured 15x on the cloak collar,
+                    // where most verts are anchored). A blown-up edge is a visible tear
+                    // regardless of pinning, so cap it anyway by splitting the correction
+                    // 50/50. Pinned verts only define the conformed fit â€” if that fit is
+                    // itself torn (slim garment on a heavy body), it must still be capped.
+                    float w1 = m[e.a], w2 = m[e.b];
+                    float wSum = w1 + w2;
+                    if (wSum <= kLenEps) { w1 = 0.5f; w2 = 0.5f; wSum = 1.0f; }
                     Vec3 delta = Scale(dir, ((len - cap) / len) / wSum);
                     finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
                     finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));
@@ -3860,6 +4990,22 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
             // Final weld after the hard caps so seams end the step closed.
             weldSeams();
+        }
+
+        // TEAR DIAGNOSTIC: worst stretch right after the verlet cap, to isolate it.
+        {
+            float worst = 1.0f; int over = 0;
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const auto& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                if (rest <= 1e-6f) continue;
+                float ratio = Len(Sub(finalVerts[e.a], finalVerts[e.b])) / rest;
+                if (ratio > 1.5f) ++over;
+                if (ratio > worst) worst = ratio;
+            }
+            HLog("detour: TEAR shape='%s' stage='post-verlet-cap' worstStretch=%.2f over1.5=%d",
+                 shapeName.c_str(), worst, over);
         }
     }
 
@@ -3918,13 +5064,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 float eff = (i < effectiveInfluence.size()) ? effectiveInfluence[i] : 1.0f;
                 // In physics drape, collision is the ONLY force holding the cloth on
                 // the body against gravity. It must stay active for every slider, even
-                // ones with low slider-source influence — otherwise the cloth sinks in.
+                // ones with low slider-source influence â€” otherwise the cloth sinks in.
                 if (params.physicsDrape) eff = std::max(eff, 0.60f);
                 if (collideVertex(i, collisionStep * freeMass * eff))
                     ++stats.bodyAdjusted;
                 ++stats.bodySamples;
             }
         }
+
+        solveOrderConstraints(invMass, params.orderConstraintStrength);
 
         if (params.anchorStiffness > 0.0f) {
             for (size_t i = 0; i < n; ++i) {
@@ -4007,7 +5155,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
     // Post-PBD shape-level passes.
     // drapeFollow: override follow=1.0 for non-drape (upper body / sleeve) verts
-    // so envelope and body-column passes leave them untouched (loose=0 → strength≈0).
+    // so envelope and body-column passes leave them untouched (loose=0 â†’ strengthâ‰ˆ0).
     std::vector<float> drapeFollow(follow);
     for (size_t i = 0; i < n; ++i)
         if (drapeEl[i] < 0.20f) drapeFollow[i] = 1.0f;
@@ -4030,7 +5178,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
 
     // Slider-source influence blend (CORRECTION MODE ONLY).
-    // In physicsDrape mode, physics determines cloth position — no blend-back.
+    // In physicsDrape mode, physics determines cloth position â€” no blend-back.
     // Blending back to supportVerts (vanilla conform) would kill the drape effect.
     if (!params.physicsDrape) {
         for (size_t i = 0; i < n; ++i) {
@@ -4069,7 +5217,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── WRITE-PATH DIAGNOSTIC ──────────────────────────────────────────────
+    // â”€â”€ WRITE-PATH DIAGNOSTIC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Overrides the physics result with a brutal, obvious deformation so we can
     // visually confirm whether our SetResultDiff write actually reaches the mesh.
     if (kDiagWritePathTest) {
@@ -4089,10 +5237,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
     }
 
-    // ── Finishing (verletCloth) ────────────────────────────────────────────
+    // â”€â”€ Finishing (verletCloth) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Primary collider is now the 3D BVH: smooth, then push every drape vert onto
     // the REAL body surface (closest point + normal). This replaces the radial
-    // shell envelope as the shaper — the result follows the actual belly/hip/bust
+    // shell envelope as the shaper â€” the result follows the actual belly/hip/bust
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
@@ -4121,11 +5269,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     ++stats.collisionAdjusted;
         }
 
-        // ── Loose anti-tuck rule (BVH-based) ─────────────────────────────────
+        // â”€â”€ Loose anti-tuck rule (BVH-based) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Going DOWN the garment, dist-to-body can only INCREASE (new contact)
         // or hold steady (vertical fall), never decrease abruptly (tuck-in).
         // Per angular bin: running max of dist-to-body; verts below the floor are
-        // pushed back out along the direction (vert→body) inverted — NOT along the
+        // pushed back out along the direction (vertâ†’body) inverted â€” NOT along the
         // body face normal, which over-extrapolates at large distances.
         if (params.drapeReturnRate >= 0.0f) {
             struct DVert { size_t i; float z, dist; Vec3 cp, awayDir; };
@@ -4139,7 +5287,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 float dist = std::sqrt(d2);
                 Vec3 toVert = Sub(finalVerts[i], cp);
                 float tl = Len(toVert);
-                // Direction FROM body surface TOWARD vert — stable at any distance,
+                // Direction FROM body surface TOWARD vert â€” stable at any distance,
                 // unlike the face normal which diverges when extrapolated far away.
                 Vec3 awayDir = (tl > 1.0e-5f) ? Scale(toVert, 1.0f / tl) : nrm;
                 dv2.push_back({i, finalVerts[i].z, dist, cp, awayDir});
@@ -4186,6 +5334,43 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+    // â”€â”€ Post-finishing stretch cap (THE TEAR FIX) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // The finishing passes above (BVH push-out, loose anti-tuck) move verts to
+    // absolute distances from the body WITHOUT any edge-length limit. On a slim
+    // garment over a heavy body this blew edges up to 15Ã— rest (measured: cloak went
+    // from 1.7Ã— right after the verlet cap to 15Ã— by here). The verlet cap in the
+    // solve loop can't help â€” these passes run AFTER it. Re-apply the SAME hard cap
+    // here so no edge can leave this function over-stretched. Symmetric 50/50 split so
+    // it works even between anchored verts (which have invMass 0). Global fix: any
+    // garment, any preset that uses the finishing path.
+    if (params.verletCloth && !useEdges.empty()) {
+        const float kPostCap = 1.12f;     // tight cap, close to the solve cap (1.10)
+        // Many iterations: a 10Ã—+ stretched cluster needs the correction to PROPAGATE
+        // across the mesh (Gauss-Seidel), and 4 passes left the cloak at 11Ã— (28 torn
+        // edges). 24 passes converge it down to the cap.
+        for (int it = 0; it < 24; ++it) {
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const auto& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                if (rest <= 1e-6f) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                float cap = rest * kPostCap;
+                if (len <= cap || len <= 1e-6f) continue;
+                // Don't move a PINNED vert if its partner is free (let the free one take
+                // it); only split 50/50 when both are pinned (else the edge escapes).
+                float wa = (e.a < invMass.size() && invMass[e.a] > 0.0f) ? 1.0f : 0.0f;
+                float wb = (e.b < invMass.size() && invMass[e.b] > 0.0f) ? 1.0f : 0.0f;
+                if (wa + wb <= 0.0f) { wa = 0.5f; wb = 0.5f; }
+                float wSum = wa + wb;
+                Vec3 delta = Scale(dir, ((len - cap) / len) / wSum);
+                finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, wa));
+                finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, wb));
+            }
+        }
+    }
+
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
     // drape envelope, layer order) move coincident verts independently and can
     // re-open seams the solver welded. Close them once more before writing.
@@ -4200,8 +5385,13 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         };
         for (size_t i = 0; i < n; ++i)
             coin[qk(baseVerts[i])].push_back((uint32_t)i);
-        for (auto& kv : coin) {
-            auto& g = kv.second;
+        std::vector<uint64_t> coinKeys;
+        coinKeys.reserve(coin.size());
+        for (const auto& kv : coin)
+            coinKeys.push_back(kv.first);
+        std::sort(coinKeys.begin(), coinKeys.end());
+        for (uint64_t key : coinKeys) {
+            auto& g = coin[key];
             if (g.size() < 2) continue;
             int pinned = -1;
             for (uint32_t vi : g)
@@ -4218,9 +5408,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Final anti-clip pass (all verts, verletCloth + BVH) ──────────────────
+    // â”€â”€ Final anti-clip pass (all verts, verletCloth + BVH) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Anchored verts (drapeEl < 0.20) return to supportVerts (vanilla conform),
-    // which can be inside the morphed body — they're never touched by the drape
+    // which can be inside the morphed body â€” they're never touched by the drape
     // collision. A small-clearance BVH push on every vert catches these without
     // disturbing verts that are already correctly positioned outside the body.
     // Clearance is intentionally smaller (0.15) than bodyClearance so it only
@@ -4235,28 +5425,48 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // NOTE: the per-vertex anti-clip pass runs LATER, AFTER seam-close — see below.
+    // TEAR DIAGNOSTIC: measure worst edge over-stretch (current / rest) so we can see
+    // WHICH stage rips the mesh. Logged here (after the solve, BEFORE post-passes) and
+    // again at the very end. If it's already high here, the solve tears, not anti-clip.
+    auto worstStretch = [&](const char* stage) {
+        if (useEdges.empty()) return;
+        float worst = 1.0f; int over = 0; size_t worstEi = 0;
+        for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+            const auto& e = useEdges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+            if (rest <= 1e-6f) continue;
+            float len = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+            float ratio = len / rest;
+            if (ratio > 1.5f) ++over;
+            if (ratio > worst) { worst = ratio; worstEi = ei; }
+        }
+        HLog("detour: TEAR shape='%s' stage='%s' worstStretch=%.2f over1.5=%d/%zu",
+             shapeName.c_str(), stage, worst, over, useEdges.size());
+    };
+    worstStretch("after-solve");
+
+    // NOTE: the per-vertex anti-clip pass runs LATER, AFTER seam-close â€” see below.
     // Running it here let seam-close drag the tucked verts back to a clipping position
     // (seam-close restores cross-island vanilla offsets and was undoing the anti-clip).
 
-    // ── Rigid-island pass ────────────────────────────────────────────────────
+    // â”€â”€ Rigid-island pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // A medallion, buckle or plate should TRANSLATE with the morphing body but
-    // keep its own shape — vanilla conform deforms it vertex-by-vertex (the
+    // keep its own shape â€” vanilla conform deforms it vertex-by-vertex (the
     // medallion bulges with the breast under it). Replace each rigid island's
     // per-vertex motion with a single rigid translation: the average
     // (supportVert - baseVert) over the island. Shape is preserved exactly.
     //
     // Two triggers:
-    //   (a) Whole-mesh Rigid preset → every island is rigid.
+    //   (a) Whole-mesh Rigid preset â†’ every island is rigid.
     //   (b) Loose/Fitted mesh with geometry-detected rigid islands (islandRigidOut)
-    //       → only those islands (the merged medallion/buckle) are rigidified; the
+    //       â†’ only those islands (the merged medallion/buckle) are rigidified; the
     //       skirt/sleeves keep their cloth solve. This is the "merged accessory"
     //       case the prototype validated.
-    int normPreset = NormalizePreset(preset);
     bool wholeMeshRigid = (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
                            normPreset == DRAPE_PRESET_RIGID_ARMOR);
     // haveMergedRigid: geometry-detected rigid plates inside a Loose/Fitted mesh
-    // (merged medallion case). Disabled for now — causes arm shrinkage regression
+    // (merged medallion case). Disabled for now â€” causes arm shrinkage regression
     // when the island BFS labelling doesn't perfectly match the rigid pass's view.
     // Re-enable once per-island logging confirms correct island identification.
     // bool haveMergedRigid = false;
@@ -4298,7 +5508,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             if (id < 0 || !islandIsRigid(id)) continue;
             // Include ALL verts in the average, not just rawDiff-touched ones.
             // Chain links and other accessories with near-zero skin weight produce
-            // rawDiff ≈ 0, making islandCount stay 0 and the island get no shift.
+            // rawDiff â‰ˆ 0, making islandCount stay 0 and the island get no shift.
             // For rigid translate, every vert contributes its supportVert displacement.
             islandShift[(size_t)id] = Add(islandShift[(size_t)id], Sub(supportVerts[i], baseVerts[i]));
             ++islandCount[(size_t)id];
@@ -4349,10 +5559,10 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                 islandShift[(size_t)id] = islandShift[(size_t)bestSrc];
         }
 
-        // ── Chain/cordão per-vert IDW shift ─────────────────────────────────
+        // â”€â”€ Chain/cordÃ£o per-vert IDW shift â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // A necklace chain (isl#10 in Medallions) is a single large island that
         // spans between multiple medallion islands.  Applying one mean shift to all
-        // 153 chain verts translates the whole chain as a block → chain floats away
+        // 153 chain verts translates the whole chain as a block â†’ chain floats away
         // from the medallions when the body morphs.
         //
         // Fix: identify "chain" islands (large rigid islands whose mean shift is
@@ -4365,7 +5575,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // In practice for this mesh: 153-vert chain vs 13/26-vert medallions.
         const int kChainVertThresh = 60;  // islands larger than this are chain candidates
 
-        // Collect "anchor" islands: rigid, small (≤ kChainVertThresh verts), real shift.
+        // Collect "anchor" islands: rigid, small (â‰¤ kChainVertThresh verts), real shift.
         struct AnchorIsl { int id; Vec3 centroid; Vec3 shift; };
         std::vector<AnchorIsl> anchors;
         for (int id = 0; id < nIsl; ++id) {
@@ -4376,15 +5586,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
 
         // For each chain island, build a per-vert shift table via IDW from anchors.
-        // Key: island id → vector<Vec3> indexed by position in the full vert array.
-        // We store as a flat map vertIdx→shift.
+        // Key: island id â†’ vector<Vec3> indexed by position in the full vert array.
+        // We store as a flat map vertIdxâ†’shift.
         std::unordered_map<size_t, Vec3> chainVertShift;
         if (!anchors.empty()) {
             for (size_t i = 0; i < n; ++i) {
                 int id = island[i];
                 if (id < 0 || !islandIsRigid(id)) continue;
                 if (islandSizeR[(size_t)id] <= kChainVertThresh) continue;  // not a chain island
-                // IDW: weight = 1/dist² to each anchor centroid.
+                // IDW: weight = 1/distÂ² to each anchor centroid.
                 Vec3 sumShift{0,0,0};
                 float sumW = 0.0f;
                 for (const auto& a : anchors) {
@@ -4425,7 +5635,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
         stats.collisionAdjusted += rigidVerts;
 
-        // ── Rigid-border seam closure ───────────────────────────────────────
+        // â”€â”€ Rigid-border seam closure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // After rigid translate, the border verts of rigid islands (belt, buckle)
         // sit at their correct translated positions. The adjacent cloth verts (bodice
         // bottom edge, skirt top edge) were placed by the PBD solver independently
@@ -4461,7 +5671,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                             if ((size_t)j == i) continue;
                             int idj = islandIdOut[j];
                             if (idj == idi) continue;           // same island
-                            if (islandIsRigid(idj)) continue;   // both rigid — skip
+                            if (islandIsRigid(idj)) continue;   // both rigid â€” skip
                             if (Len2(Sub(baseVerts[j],p)) > kBorderNear2) continue;
                             // Pull cloth vert j to restore vanilla offset from rigid vert i.
                             Vec3 vanOff = Sub(supportVerts[j], supportVerts[i]);
@@ -4479,14 +5689,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Cross-island seam closure (ROOT-CAUSE FIX for the back hole) ─────────
+    // â”€â”€ Cross-island seam closure (ROOT-CAUSE FIX for the back hole) â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Root cause (proven by gap-diag instrumentation): the garment has separate
     // islands that BUTT against each other at the waist with NO triangle spanning
     // the join and only a small (~0.4u) vanilla separation. Vanilla conform moves
     // both sides by the same body diff, so the unmodeled seam stays sub-pixel. Our
     // physics moves each side independently (no edge links them, and the welds only
     // catch EXACTLY-coincident verts at 0.01u, not these 0.4u seams), so the sides
-    // drift apart — measured up to 4.0u — opening the seam into a visible hole.
+    // drift apart â€” measured up to 4.0u â€” opening the seam into a visible hole.
     //
     // Fix: for each near-touching cross-island base pair, restore the VANILLA
     // relative offset (supportVerts[j]-supportVerts[i]). Both sides keep the drape
@@ -4497,11 +5707,19 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     if (params.verletCloth && !islandIdOut.empty() && islandIdOut.size() == n) {
         // near-touching radius: 0.65u catches the back butt-joint (vanSep~0.4) AND
         // the belt-strap mini-island gaps (slightly wider). Front-to-back false
-        // pairs are impossible — those are >5u apart (body width). Cell ≥ radius so
+        // pairs are impossible â€” those are >5u apart (body width). Cell â‰¥ radius so
         // the 27-cell neighbour search covers the radius.
         const float kNear  = 0.65f;
         const float kNear2 = kNear * kNear;
-        const float cell   = 0.70f;
+        // RIGID-edge seams open WIDER: a rigid plate (the hip leather flap) has a step/
+        // thickness, so its border verts and the adjacent cloth start farther apart than
+        // 0.65u in the base mesh â€” the seam-close never even considered them, leaving a
+        // visible gap when the plate rigid-translates away from the cloth in the morph
+        // (the hole the user circled). Use a larger radius when ONE side is rigid so the
+        // plate-to-cloth seam is caught and pinned to its vanilla offset. Cell scales up.
+        const float kNearRigid  = 1.6f;
+        const float kNearRigid2 = kNearRigid * kNearRigid;
+        const float cell   = 1.65f;     // >= largest search radius
         auto ckey = [&](const Vec3& p) -> uint64_t {
             auto q = [&](float v) -> uint64_t { return (uint64_t)(uint32_t)(int32_t)std::llround(v / cell); };
             return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
@@ -4522,15 +5740,17 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     for (uint32_t j : it->second) {
                         if ((size_t)j<=i) continue;
                         if (islandIdOut[j]==islandIdOut[i]) continue;     // same island
-                        if (Len2(Sub(baseVerts[j], p)) > kNear2) continue; // near-touching only
-                        // Rigid-island verts (medallion/buckle) must keep their exact
-                        // translated shape — never move them. If BOTH sides are rigid,
-                        // skip; if ONE is rigid, the loose side takes the full fix.
+                        // Rigid-island verts (medallion/buckle/hip-plate) must keep their
+                        // exact translated shape â€” never move them. If BOTH sides are
+                        // rigid, skip; if ONE is rigid, the loose side takes the full fix.
                         bool ri = (islandIdOut[i] >= 0 && islandIdOut[i] < (int)islandRigidOut.size()
                                    && islandRigidOut[(size_t)islandIdOut[i]]);
                         bool rj = (islandIdOut[j] >= 0 && islandIdOut[j] < (int)islandRigidOut.size()
                                    && islandRigidOut[(size_t)islandIdOut[j]]);
                         if (ri && rj) continue;
+                        // Wider radius when one side is a rigid plate (stepped seam).
+                        float near2 = (ri || rj) ? kNearRigid2 : kNear2;
+                        if (Len2(Sub(baseVerts[j], p)) > near2) continue;  // near-touching only
                         // Target: keep the exact vanilla offset between the pair.
                         Vec3 vanOff = Sub(supportVerts[j], supportVerts[i]);
                         Vec3 curOff = Sub(finalVerts[j], finalVerts[i]);
@@ -4544,12 +5764,12 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                         // Distribute the correction: a rigid side never moves; otherwise
                         // the looser (higher drape) vert yields more.
                         float wi, wj;
-                        if (ri)      { wi = 0.0f; wj = 1.0f; }   // i rigid → only j moves
-                        else if (rj) { wi = 1.0f; wj = 0.0f; }   // j rigid → only i moves
+                        if (ri)      { wi = 0.0f; wj = 1.0f; }   // i rigid â†’ only j moves
+                        else if (rj) { wi = 1.0f; wj = 0.0f; }   // j rigid â†’ only i moves
                         else {
                             float di = drapeAmount[i], dj = drapeAmount[j];
                             float sum = di + dj;
-                            wi = (sum > 1e-4f) ? dj / sum : 0.5f; // i takes share ∝ other's drape
+                            wi = (sum > 1e-4f) ? dj / sum : 0.5f; // i takes share âˆ other's drape
                             wj = 1.0f - wi;
                         }
                         finalVerts[i] = Add(finalVerts[i], Scale(err, wi));
@@ -4593,25 +5813,626 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
-    // ── Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes ────
+    // â”€â”€ Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes â”€â”€â”€â”€
     // MUST run AFTER seam-close (which restores cross-island offsets and would undo it).
-    // This is the LAST geometry pass — its corrections are the final word.
+    // This is the LAST geometry pass â€” its corrections are the final word.
     //
     // ONE-DIRECTIONAL by layer rank (addresses the review): the collider is built ONLY
     // from garments ABOVE this one (strictly higher rank). The rule only ever PULLS THIS
-    // mesh IN under them — it never pushes the outer mesh out, so the outermost layer (a
-    // fur cloak) is never deformed (it gets no collider at all → untouched).
+    // mesh IN under them â€” it never pushes the outer mesh out, so the outermost layer (a
+    // fur cloak) is never deformed (it gets no collider at all â†’ untouched).
     //
     // REAL CLEARANCE, not just order-sign inversion (addresses the review): a vert is
-    // corrected whenever it fails to sit at least kClearance UNDER the outer surface —
+    // corrected whenever it fails to sit at least kClearance UNDER the outer surface â€”
     // i.e. it has popped outside, is coincident, OR is merely grazing within the margin.
     //
     // Metric = signed body-gap (distance to the body surface along the body normal),
     // which is well-defined on shoulders/back where radial-from-axis was degenerate.
     // BUT only act where the BASE mesh had THIS vert genuinely UNDER the outer mesh
-    // (myBaseGap < otherBaseGap) — so we never invert a region where this mesh is
+    // (myBaseGap < otherBaseGap) â€” so we never invert a region where this mesh is
     // legitimately the outer one locally (dress-over-pants-at-hip etc. stays correct).
-    if (NormalizePreset(preset) != DRAPE_PRESET_AUTO &&
+    // DISABLED: re-enabling the tuck made tearing WORSE on a second outfit (Yarl
+    // Clothes 1) â€” generalized vertical rips across the dress. Moving inner-garment
+    // verts along the body normal is fundamentally a tearing operation, no matter how
+    // soft. The tuck is OFF until replaced by a non-moving approach (collapse-to-
+    // neighbour suppression). Layer clipping is left to the user's zap slider for now.
+    // Redesign step 3: final covered-region collapse.
+    //
+    // This is for the no-room case that movement constraints cannot solve: an inner
+    // garment is covered by an outer garment in the base outfit, but the outer garment
+    // sits too close to the body (or is a gappy fur sheet), so "move the inner cloth
+    // under it while staying outside the body" has no valid position. Hide only the
+    // covered connected regions, once, after all body recollision/seam passes.
+    const bool kCoverCollapseEnabled = false;
+    if (kCoverCollapseEnabled &&
+        NormalizePreset(preset) != DRAPE_PRESET_AUTO &&
+        NormalizePreset(preset) != DRAPE_PRESET_RIGID_ARMOR &&
+        NormalizePreset(preset) != DRAPE_PRESET_RIGID_ACCESSORY &&
+        outerColliders && !outerColliders->empty() &&
+        bodyBVH && bodyBVH->valid &&
+        !useEdges.empty()) {
+        const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
+        const float kCoverOverlap = 4.25f;
+        const float kCoverOverlap2 = kCoverOverlap * kCoverOverlap;
+        const float kLooseCoverOverlap2 = 3.75f * 3.75f;
+        const float kBaseUnderSlack = 0.10f;
+        const float kCollapseDepth = 1.20f;
+
+        auto coverMarginFor = [](int outerPreset) -> float {
+            switch (NormalizePreset(outerPreset)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.18f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.36f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.42f;
+            case DRAPE_PRESET_BELT:            return 0.34f;
+            case DRAPE_PRESET_RIGID_ACCESSORY: return 0.30f;
+            default:                           return 0.24f;
+            }
+        };
+
+        auto signedGap = [](const BodyBVH& bvh, const Vec3& p, float& gap) -> bool {
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            return BVHSignedGap(bvh, p, gap, &nrm);
+        };
+
+        auto isRigidVertex = [&](size_t i) -> bool {
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+
+        int coverDirect = 0;
+        int coverNoRoom = 0;
+        int coverLoose = 0;
+        std::vector<uint8_t> covered(n, 0);
+
+        auto sampleCovered = [&](const Vec3& baseP, const Vec3& curP, float floorGap) -> int {
+            float myBaseGap = 0.0f;
+            if (!signedGap(*baseBodyBVH, baseP, myBaseGap))
+                return 0;
+            float myGap = 0.0f;
+            if (!signedGap(*bodyBVH, curP, myGap))
+                return 0;
+
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.Base().valid || !oc.Current().valid) continue;
+
+                Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                float bd2 = 0.0f;
+                int baseTri = -1;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.Base(), baseP, bcp, bnrm, bd2,
+                                        &baseTri, &bu, &bv, &bw)) {
+                    continue;
+                }
+                if (bd2 > kCoverOverlap2) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+
+                float outerBaseGap = 0.0f;
+                if (!signedGap(*baseBodyBVH, bcp, outerBaseGap))
+                    continue;
+                if (myBaseGap >= outerBaseGap + kBaseUnderSlack)
+                    continue;
+
+                Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                float outerGap = 0.0f;
+                if (!signedGap(*bodyBVH, outerCur, outerGap))
+                    continue;
+
+                float margin = coverMarginFor(oc.preset);
+                float allowed = outerGap - margin;
+                bool noRoom = allowed < floorGap;
+                bool poking = myGap > allowed - 0.05f;
+                bool looseCover =
+                    NormalizePreset(oc.preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+                    bd2 <= kLooseCoverOverlap2;
+
+                if (noRoom || poking || looseCover)
+                    return looseCover ? 3 : (noRoom ? 2 : 1);
+            }
+            return 0;
+        };
+
+        for (size_t i = 0; i < n; ++i) {
+            if (isRigidVertex(i)) continue;
+            float floorGap = std::max(0.08f, vertClearance[i] + 0.02f);
+            int reason = sampleCovered(baseVerts[i], finalVerts[i], floorGap);
+            if (!reason) continue;
+            covered[i] = 1;
+            if (reason == 3) ++coverLoose;
+            else if (reason == 2) ++coverNoRoom;
+            else ++coverDirect;
+        }
+
+        // Face samples catch the visible case where a triangle crosses the cover even
+        // though no single corner is the worst point. Mark the whole triangle; the
+        // component erosion below protects the visible boundary.
+        if (tris && !tris->empty()) {
+            struct SampleBary { float a, b, c; };
+            static const SampleBary kTriSamples[] = {
+                {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                {0.5f, 0.5f, 0.0f},
+                {0.5f, 0.0f, 0.5f},
+                {0.0f, 0.5f, 0.5f},
+            };
+            auto triPoint = [](const std::vector<Vec3>& verts,
+                               const std::array<uint16_t, 3>& t,
+                               const SampleBary& s) -> Vec3 {
+                return Add(Scale(verts[t[0]], s.a),
+                           Add(Scale(verts[t[1]], s.b), Scale(verts[t[2]], s.c)));
+            };
+
+            int faceMarked = 0;
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                if (isRigidVertex(t[0]) || isRigidVertex(t[1]) || isRigidVertex(t[2]))
+                    continue;
+                bool mark = false;
+                for (const SampleBary& sb : kTriSamples) {
+                    Vec3 bp = triPoint(baseVerts, t, sb);
+                    Vec3 cp = triPoint(finalVerts, t, sb);
+                    if (sampleCovered(bp, cp, std::max(0.08f, params.orderConstraintBodyFloor))) {
+                        mark = true;
+                        break;
+                    }
+                }
+                if (!mark) continue;
+                covered[t[0]] = covered[t[1]] = covered[t[2]] = 1;
+                ++faceMarked;
+            }
+            coverDirect += faceMarked;
+        }
+
+        int coveredCount = 0;
+        for (uint8_t v : covered) if (v) ++coveredCount;
+
+        if (coveredCount > 0) {
+            std::vector<std::vector<uint32_t>> adj(n);
+            for (const auto& e : useEdges) {
+                if (e.a < n && e.b < n) {
+                    adj[e.a].push_back(e.b);
+                    adj[e.b].push_back(e.a);
+                }
+            }
+
+            std::vector<uint8_t> seen(n, 0);
+            std::vector<int> dist(n, -1);
+            int components = 0;
+            int collapsedVerts = 0;
+            int skippedSmall = 0;
+
+            for (size_t start = 0; start < n; ++start) {
+                if (!covered[start] || seen[start]) continue;
+
+                std::vector<uint32_t> comp;
+                std::vector<uint32_t> q;
+                q.push_back((uint32_t)start);
+                seen[start] = 1;
+                for (size_t qi = 0; qi < q.size(); ++qi) {
+                    uint32_t v = q[qi];
+                    comp.push_back(v);
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb] || seen[nb]) continue;
+                        seen[nb] = 1;
+                        q.push_back(nb);
+                    }
+                }
+
+                if (comp.size() < 3) {
+                    ++skippedSmall;
+                    continue;
+                }
+                ++components;
+
+                std::vector<uint32_t> ringQ;
+                for (uint32_t v : comp) {
+                    dist[v] = -1;
+                    bool boundary = false;
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb]) {
+                            boundary = true;
+                            break;
+                        }
+                    }
+                    if (boundary) {
+                        dist[v] = 0;
+                        ringQ.push_back(v);
+                    }
+                }
+
+                for (size_t qi = 0; qi < ringQ.size(); ++qi) {
+                    uint32_t v = ringQ[qi];
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb] || dist[nb] >= 0) continue;
+                        dist[nb] = dist[v] + 1;
+                        ringQ.push_back(nb);
+                    }
+                }
+
+                int minRing = comp.size() >= 40 ? 1 : 0;
+                std::vector<uint32_t> core;
+                core.reserve(comp.size());
+                for (uint32_t v : comp) {
+                    int d = dist[v];
+                    if (d < 0) d = minRing;
+                    if (d >= minRing)
+                        core.push_back(v);
+                }
+                if (core.size() < 3)
+                    core = comp;
+
+                Vec3 avgCP{0.0f, 0.0f, 0.0f};
+                Vec3 avgNrm{0.0f, 0.0f, 0.0f};
+                int cpCount = 0;
+                for (uint32_t v : core) {
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(*bodyBVH, finalVerts[v], cp, nrm, d2))
+                        continue;
+                    avgCP = Add(avgCP, cp);
+                    avgNrm = Add(avgNrm, nrm);
+                    ++cpCount;
+                }
+                if (cpCount <= 0)
+                    continue;
+
+                avgCP = Scale(avgCP, 1.0f / (float)cpCount);
+                float nl = Len(avgNrm);
+                Vec3 nrm = nl > 1.0e-5f ? Scale(avgNrm, 1.0f / nl) : Vec3{0.0f, 0.0f, 1.0f};
+                Vec3 target = Add(avgCP, Scale(nrm, -kCollapseDepth));
+
+                for (uint32_t v : core) {
+                    finalVerts[v] = target;
+                    ++collapsedVerts;
+                }
+            }
+
+            if (collapsedVerts > 0) {
+                HLog("detour: cover-collapse shape='%s' covered=%d collapsed=%d comps=%d small=%d direct=%d noRoom=%d loose=%d",
+                     shapeName.c_str(), coveredCount, collapsedVerts, components, skippedSmall,
+                     coverDirect, coverNoRoom, coverLoose);
+            }
+        }
+    }
+
+    // Soft occlusion diagnostics only. Mutating a partial set of covered verts
+    // back toward the base mesh opens gaps between neighboring vertices on
+    // layered outfits. Any visual zap/hide solution must live outside vertex
+    // deformation; this path must keep geometry continuous.
+    const bool kCoveredDiffMaskEnabled = false;
+    const bool kCoveredClipDiagnosticEnabled = false;
+    if ((kCoveredDiffMaskEnabled || kCoveredClipDiagnosticEnabled) &&
+        NormalizePreset(preset) != DRAPE_PRESET_AUTO &&
+        NormalizePreset(preset) != DRAPE_PRESET_RIGID_ARMOR &&
+        NormalizePreset(preset) != DRAPE_PRESET_RIGID_ACCESSORY &&
+        outerColliders && !outerColliders->empty() &&
+        bodyBVH && bodyBVH->valid &&
+        !useEdges.empty()) {
+        const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
+        const float kMaskOverlap2 = 4.25f * 4.25f;
+        const float kLooseMaskOverlap2 = 3.75f * 3.75f;
+        const float kBaseUnderSlack = 0.10f;
+
+        struct CoverHit {
+            int reason = 0;       // 1=poking, 2=no-room, 3=loose-cover
+            float myGap = 0.0f;
+            float outerGap = 0.0f;
+            float allowedGap = 0.0f;
+            float myBaseGap = 0.0f;
+            float outerBaseGap = 0.0f;
+            float outerDist = 0.0f;
+            std::string outerName;
+        };
+
+        auto maskMarginFor = [](int outerPreset) -> float {
+            switch (NormalizePreset(outerPreset)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.16f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.34f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.40f;
+            case DRAPE_PRESET_BELT:            return 0.32f;
+            case DRAPE_PRESET_RIGID_ACCESSORY: return 0.28f;
+            default:                           return 0.22f;
+            }
+        };
+
+        auto signedGap = [](const BodyBVH& bvh, const Vec3& p, float& gap) -> bool {
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            return BVHSignedGap(bvh, p, gap, &nrm);
+        };
+
+        auto isRigidVertex = [&](size_t i) -> bool {
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+
+        int maskDirect = 0;
+        int maskNoRoom = 0;
+        int maskLoose = 0;
+        std::vector<uint8_t> covered(n, 0);
+        std::vector<CoverHit> hits(n);
+
+        auto sampleCovered = [&](const Vec3& baseP, const Vec3& curP,
+                                 float floorGap, CoverHit* outHit) -> int {
+            float myBaseGap = 0.0f;
+            if (!signedGap(*baseBodyBVH, baseP, myBaseGap))
+                return 0;
+            float myGap = 0.0f;
+            if (!signedGap(*bodyBVH, curP, myGap))
+                return 0;
+
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.Base().valid || !oc.Current().valid) continue;
+
+                Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                float bd2 = 0.0f;
+                int baseTri = -1;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.Base(), baseP, bcp, bnrm, bd2,
+                                        &baseTri, &bu, &bv, &bw)) {
+                    continue;
+                }
+                if (bd2 > kMaskOverlap2) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+
+                float outerBaseGap = 0.0f;
+                if (!signedGap(*baseBodyBVH, bcp, outerBaseGap))
+                    continue;
+                if (myBaseGap >= outerBaseGap + kBaseUnderSlack)
+                    continue;
+
+                Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                float outerGap = 0.0f;
+                if (!signedGap(*bodyBVH, outerCur, outerGap))
+                    continue;
+
+                float allowed = outerGap - maskMarginFor(oc.preset);
+                bool noRoom = allowed < floorGap;
+                bool poking = myGap > allowed - 0.03f;
+                bool looseCover =
+                    !kCoveredDiffMaskEnabled &&
+                    NormalizePreset(oc.preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+                    bd2 <= kLooseMaskOverlap2;
+
+                if ((noRoom && poking) || looseCover) {
+                    int reason = looseCover ? 3 : 2;
+                    if (outHit) {
+                        outHit->reason = reason;
+                        outHit->myGap = myGap;
+                        outHit->outerGap = outerGap;
+                        outHit->allowedGap = allowed;
+                        outHit->myBaseGap = myBaseGap;
+                        outHit->outerBaseGap = outerBaseGap;
+                        outHit->outerDist = std::sqrt(std::max(0.0f, bd2));
+                        outHit->outerName = oc.name;
+                    }
+                    return reason;
+                }
+            }
+            return 0;
+        };
+
+        for (size_t i = 0; i < n; ++i) {
+            if (isRigidVertex(i)) continue;
+            float floorGap = std::max(0.08f, vertClearance[i] + 0.02f);
+            int reason = sampleCovered(baseVerts[i], finalVerts[i], floorGap, &hits[i]);
+            if (!reason) continue;
+            covered[i] = 1;
+            if (reason == 3) ++maskLoose;
+            else if (reason == 2) ++maskNoRoom;
+            else ++maskDirect;
+        }
+
+        if (tris && !tris->empty()) {
+            struct SampleBary { float a, b, c; };
+            static const SampleBary kTriSamples[] = {
+                {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+                {0.5f, 0.5f, 0.0f},
+                {0.5f, 0.0f, 0.5f},
+                {0.0f, 0.5f, 0.5f},
+            };
+            auto triPoint = [](const std::vector<Vec3>& verts,
+                               const std::array<uint16_t, 3>& t,
+                               const SampleBary& s) -> Vec3 {
+                return Add(Scale(verts[t[0]], s.a),
+                           Add(Scale(verts[t[1]], s.b), Scale(verts[t[2]], s.c)));
+            };
+
+            int faceMarked = 0;
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                if (isRigidVertex(t[0]) || isRigidVertex(t[1]) || isRigidVertex(t[2]))
+                    continue;
+
+                bool mark = false;
+                for (const SampleBary& sb : kTriSamples) {
+                    Vec3 bp = triPoint(baseVerts, t, sb);
+                    Vec3 cp = triPoint(finalVerts, t, sb);
+                    float floorGap = std::max(0.08f, vertClearance[t[0]] + 0.02f);
+                    if (sampleCovered(bp, cp, floorGap, nullptr)) {
+                        mark = true;
+                        break;
+                    }
+                }
+                if (!mark) continue;
+                covered[t[0]] = covered[t[1]] = covered[t[2]] = 1;
+                ++faceMarked;
+            }
+            maskDirect += faceMarked;
+        }
+
+        int coveredCount = 0;
+        for (uint8_t v : covered) if (v) ++coveredCount;
+
+        if (coveredCount > 0) {
+            std::vector<std::vector<uint32_t>> adj(n);
+            for (const auto& e : useEdges) {
+                if (e.a < n && e.b < n) {
+                    adj[e.a].push_back(e.b);
+                    adj[e.b].push_back(e.a);
+                }
+            }
+
+            std::vector<uint8_t> seen(n, 0);
+            std::vector<float> maskWeight(n, 0.0f);
+            std::vector<int> componentId(n, -1);
+            int components = 0;
+            int skippedSmall = 0;
+
+            for (size_t start = 0; start < n; ++start) {
+                if (!covered[start] || seen[start]) continue;
+
+                std::vector<uint32_t> comp;
+                std::vector<uint32_t> q;
+                q.push_back((uint32_t)start);
+                seen[start] = 1;
+                for (size_t qi = 0; qi < q.size(); ++qi) {
+                    uint32_t v = q[qi];
+                    comp.push_back(v);
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb] || seen[nb]) continue;
+                        seen[nb] = 1;
+                        q.push_back(nb);
+                    }
+                }
+
+                if (comp.size() < 4) {
+                    ++skippedSmall;
+                    continue;
+                }
+                ++components;
+                int compId = components;
+                for (uint32_t v : comp)
+                    componentId[v] = compId;
+
+                std::vector<int> dist(n, -1);
+                std::vector<uint32_t> ringQ;
+                for (uint32_t v : comp) {
+                    bool boundary = false;
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb]) {
+                            boundary = true;
+                            break;
+                        }
+                    }
+                    if (boundary) {
+                        dist[v] = 0;
+                        ringQ.push_back(v);
+                    }
+                }
+
+                if (ringQ.empty()) {
+                    for (uint32_t v : comp)
+                        maskWeight[v] = std::max(maskWeight[v], 0.92f);
+                    continue;
+                }
+
+                for (size_t qi = 0; qi < ringQ.size(); ++qi) {
+                    uint32_t v = ringQ[qi];
+                    for (uint32_t nb : adj[v]) {
+                        if (nb >= n || !covered[nb] || dist[nb] >= 0) continue;
+                        dist[nb] = dist[v] + 1;
+                        ringQ.push_back(nb);
+                    }
+                }
+
+                for (uint32_t v : comp) {
+                    int d = dist[v];
+                    float w = 0.0f;
+                    if (d >= 3)      w = 0.95f;
+                    else if (d == 2) w = 0.78f;
+                    else if (d == 1) w = 0.48f;
+                    else             w = 0.16f;  // covered boundary is under an outer garment; slight feather prevents cap pullback.
+                    maskWeight[v] = std::max(maskWeight[v], w);
+                }
+            }
+
+            int weightedVerts = 0;
+            float maxWeight = 0.0f;
+            for (size_t i = 0; i < n; ++i) {
+                float w = Clamp01(maskWeight[i]);
+                if (w <= 0.01f) continue;
+                ++weightedVerts;
+                maxWeight = std::max(maxWeight, w);
+            }
+
+            if (kCoveredClipDiagnosticEnabled) {
+                std::string fileName =
+                    "drape_cover_candidates__" +
+                    SafeFilePart(g_projectKey) + "__" +
+                    SafeFilePart(shapeName) + "__" +
+                    SafeFilePart(sliderName) + ".csv";
+                fs::path csvPath = TempDrapePath(fileName);
+
+                auto csvText = [](const std::string& s) -> std::string {
+                    std::string out = "\"";
+                    for (char ch : s)
+                        out.push_back(ch == '"' ? '\'' : ch);
+                    out.push_back('"');
+                    return out;
+                };
+                auto reasonText = [](int reason) -> const char* {
+                    switch (reason) {
+                    case 1: return "poking";
+                    case 2: return "no_room";
+                    case 3: return "loose_cover";
+                    default: return "face_or_boundary";
+                    }
+                };
+
+                std::ofstream csv(csvPath, std::ios::trunc);
+                if (csv) {
+                    csv << "kind,index,component,weight,reason,outer,"
+                           "x,y,z,base_x,base_y,base_z,"
+                           "my_gap,outer_gap,allowed_gap,my_base_gap,outer_base_gap,outer_distance\n";
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!covered[i]) continue;
+                        const CoverHit& h = hits[i];
+                        csv << "vertex," << i << ','
+                            << componentId[i] << ','
+                            << Clamp01(maskWeight[i]) << ','
+                            << reasonText(h.reason) << ','
+                            << csvText(h.outerName) << ','
+                            << finalVerts[i].x << ',' << finalVerts[i].y << ',' << finalVerts[i].z << ','
+                            << baseVerts[i].x << ',' << baseVerts[i].y << ',' << baseVerts[i].z << ','
+                            << h.myGap << ',' << h.outerGap << ',' << h.allowedGap << ','
+                            << h.myBaseGap << ',' << h.outerBaseGap << ',' << h.outerDist << '\n';
+                    }
+                    HLog("detour: cover-diag shape='%s' slider='%s' covered=%d core=%d comps=%d small=%d direct=%d noRoom=%d loose=%d maxW=%.2f csv='%s'",
+                         shapeName.c_str(), sliderName.c_str(), coveredCount, weightedVerts,
+                         components, skippedSmall, maskDirect, maskNoRoom, maskLoose,
+                         maxWeight, csvPath.string().c_str());
+                } else {
+                    HLog("detour: cover-diag shape='%s' slider='%s' covered=%d core=%d csv_write_failed='%s'",
+                         shapeName.c_str(), sliderName.c_str(), coveredCount, weightedVerts,
+                         csvPath.string().c_str());
+                }
+            }
+
+            if (kCoveredDiffMaskEnabled && weightedVerts > 0) {
+                int maskedVerts = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    float w = Clamp01(maskWeight[i]);
+                    if (w <= 0.01f) continue;
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(baseVerts[i], finalVerts[i]), w));
+                    ++maskedVerts;
+                }
+                HLog("detour: cover-diff-mask shape='%s' covered=%d masked=%d comps=%d small=%d direct=%d noRoom=%d loose=%d maxW=%.2f",
+                     shapeName.c_str(), coveredCount, maskedVerts, components, skippedSmall,
+                     maskDirect, maskNoRoom, maskLoose, maxWeight);
+            }
+        }
+    }
+
+    const bool kEnableAntiClipTuck = false;
+    // â”€â”€ REDESIGN STEP 1: master switch OFF for the whole tangled anti-clip block â”€â”€
+    // Per the architecture review (ANTICLIP_ARCHITECTURE_REVIEW.md): disable the entire
+    // post-solve anti-clip (tuck + collapse + suppress + cleanup) to establish a CLEAN,
+    // tear-free BASE we can compare against. Code is kept (not deleted) until the new
+    // in-solve order constraint + per-region collapse are proven. Flip to true only to
+    // study the old behaviour. The new architecture will NOT live in this block.
+    const bool kAntiClipLegacyEnabled = false;
+    if (kAntiClipLegacyEnabled &&
+        NormalizePreset(preset) != DRAPE_PRESET_AUTO &&
         outerColliders && !outerColliders->empty() &&
         bodyBVH && bodyBVH->valid) {
         const float kOverlap = 2.75f;   // base proximity to count as a real overlap
@@ -4639,16 +6460,16 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // armor/belt sits thicker and needs more.
         auto clearanceFor = [](int outerPreset) -> float {
             switch (NormalizePreset(outerPreset)) {
-            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.20f;  // cloak/cape — small
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.20f;  // cloak/cape â€” small
             case DRAPE_PRESET_RIGID_ARMOR:
-            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.45f;  // armor — thick
-            case DRAPE_PRESET_BELT:            return 0.40f;  // belt — thick
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.45f;  // armor â€” thick
+            case DRAPE_PRESET_BELT:            return 0.40f;  // belt â€” thick
             default:                           return 0.30f;
             }
         };
 
         int tucked = 0;
-        for (int round = 0; round < kRounds; ++round) {
+        for (int round = 0; kEnableAntiClipTuck && round < kRounds; ++round) {
             int roundMoved = 0;
             for (size_t i = 0; i < n; ++i) {
                 Vec3 myNrm{};
@@ -4656,51 +6477,169 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
                 // Against EACH outer garment separately (review #1: keep identity).
                 for (const OuterCollider& oc : *outerColliders) {
-                    if (!oc.base.valid || !oc.current.valid) continue;
+                    if (!oc.Base().valid || !oc.Current().valid) continue;
                     const float kClearance = clearanceFor(oc.preset);
 
                     // Was I UNDER this outer mesh in the BASE config, and overlapping?
                     Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
                     int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
-                    if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bnrm, bd2,
+                    if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
                                            &baseTri, &bu, &bv, &bw)) continue;
                     if (std::sqrt(bd2) > kOverlap) continue;
                     Vec3 dummy{};
                     if (baseBodyGap(baseVerts[i], dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
-                    if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+                    if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
 
                     // CURRENT: am I clearing THIS outer mesh by its clearance?
-                    Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                    Vec3 cp = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                     float othGap  = bodyGap(cp, dummy);
                     float allowed = othGap - kClearance;
                     if (myGap <= allowed) continue;            // already tucked under this one
 
                     // BODY-CLAMP (review #2): never pull a vert closer to the body than a
-                    // tiny floor — if the outer mesh hugs the body so tight there's no room
+                    // tiny floor â€” if the outer mesh hugs the body so tight there's no room
                     // for the inner garment, do NOT reintroduce body clipping. Tuck only as
                     // far as the floor allows (partial fix beats a body poke-through).
                     const float kBodyFloor = 0.06f;            // min gap to keep off the body
                     float target = std::max(allowed, kBodyFloor);
                     if (myGap <= target) continue;
-                    finalVerts[i] = Add(finalVerts[i], Scale(myNrm, target - myGap));
-                    myGap = target;                            // update for next collider
+                    // SOFT push (half-step), not a hard snap: moving each vert all the
+                    // way at once tears the mesh (neighbours move by different amounts â†’
+                    // edges over-stretch). The stretch relax below pulls neighbours along.
+                    float step = (target - myGap) * 0.5f;
+                    finalVerts[i] = Add(finalVerts[i], Scale(myNrm, step));
+                    myGap += step;                             // update for next collider
                     if (round == 0) ++tucked;
                     ++roundMoved;
                 }
             }
             if (roundMoved == 0) break;
         }
+        // Relax over-stretch so the tuck pulls neighbours along instead of ripping.
+        // Asymmetric (resist stretch only) against the conformed rest length â€” same
+        // constraint the main solver uses, so it never fights body-induced expansion.
+        if (tucked > 0 && !useEdges.empty()) {
+            for (int it = 0; it < 6; ++it) {
+                for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                    const auto& e = useEdges[ei];
+                    if (e.a >= n || e.b >= n) continue;
+                    Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                    float len = Len(dir);
+                    if (len <= 1e-6f) continue;
+                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    if (len <= rest) continue;                 // only resist over-stretch
+                    Vec3 corr = Scale(dir, ((len - rest) / len) * 0.5f * 0.5f);
+                    finalVerts[e.a] = Sub(finalVerts[e.a], corr);
+                    finalVerts[e.b] = Add(finalVerts[e.b], corr);
+                }
+            }
+        }
         if (tucked > 0)
             HLog("detour: anti-clip shape='%s' tuckedUnder=%d outers=%zu",
                  shapeName.c_str(), tucked, outerColliders->size());
 
-        // ── Covered-vertex suppression (DISABLED) ───────────────────────────
+        // â”€â”€ Covered-vertex COLLAPSE (zap-style hide, no rips) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // For verts that are genuinely COVERED by an outer garment AND have no room to
+        // tuck (body conflict), we hide them WITHOUT moving visible geometry: collapse
+        // each fully-covered vert onto a covered neighbour so its triangles become
+        // zero-area and vanish. Unlike moving verts (which tears â€” neighbours move by
+        // different amounts), a collapse only ever shrinks an edge to length 0, so no
+        // edge over-stretches. The CRUCIAL rule: a vert is collapsible ONLY if it AND
+        // all its topological neighbours are covered (erode the region by one ring), so
+        // the visible boundary of the covered patch is never half-collapsed. This is the
+        // correct, rip-free version of the disabled suppress pass below.
+        const bool kEnableCollapse = true;
+        if (kEnableCollapse && !useEdges.empty()) {
+            // 1) Mark covered verts: under an outer garment in base, now poking through it.
+            std::vector<uint8_t> covered(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                Vec3 myNrm{};
+                float myGap = bodyGap(finalVerts[i], myNrm);
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Base().valid || !oc.Current().valid) continue;
+                    const float kClearance = clearanceFor(oc.preset);
+                    Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
+                    int baseTri = -1; float bu=0,bv=0,bw=0;
+                    if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2, &baseTri,&bu,&bv,&bw)) continue;
+                    if (std::sqrt(bd2) > kOverlap) continue;
+                    Vec3 dummy{};
+                    if (baseBodyGap(baseVerts[i], dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
+                    if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                    Vec3 cp = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                    float outerGap = bodyGap(cp, dummy);
+                    // This vert was UNDER the outer garment in the base (checked above via
+                    // baseBodyGap), so it is meant to be hidden by it. It CLIPS if its
+                    // current body-gap is at/above the outer surface (poking out from under
+                    // the cloak). Hide it by collapse. We do NOT require a body conflict â€”
+                    // any covered vert that pokes through is invisible-by-design and safe to
+                    // collapse. Small tolerance so we only catch genuine pokethrough.
+                    if (myGap > outerGap - 0.05f) {
+                        covered[i] = 1;
+                        break;
+                    }
+                }
+            }
+            // 2) Build vertex adjacency.
+            std::vector<std::vector<uint32_t>> adj(n);
+            for (const auto& e : useEdges)
+                if (e.a < n && e.b < n) { adj[e.a].push_back(e.b); adj[e.b].push_back(e.a); }
+            // 3) Collapse each COVERED vert that has at least one covered neighbour onto
+            //    that neighbour (shared edge â†’ length 0 â†’ triangle vanishes). A covered
+            //    vert with NO covered neighbour is an isolated pokethrough on the boundary;
+            //    collapsing it would pull a visible edge, so we leave it. Reading targets
+            //    from a SNAPSHOT of the pre-collapse positions avoids chained drift.
+            // 3) HIDE the covered region by sinking each covered vert to the body
+            //    surface, MINUS a depth â€” but only verts whose neighbours are ALSO covered
+            //    move the full depth; boundary verts (some neighbour visible) blend, so the
+            //    surface tapers smoothly into the body instead of ripping. Because the sink
+            //    is along the body normal and the depth varies smoothly (full interior â†’
+            //    zero at the visible boundary), no edge over-stretches: it is a smooth dent,
+            //    not an isolated spike. The dented region is under the outer garment, so the
+            //    dent is invisible and the pokethrough is gone.
+            // Compute per-vert "interiorness" = fraction of neighbours that are covered.
+            std::vector<float> interiorness(n, 0.0f);
+            for (size_t i = 0; i < n; ++i) {
+                if (!covered[i] || adj[i].empty()) continue;
+                int c = 0; for (uint32_t nb : adj[i]) if (covered[nb]) ++c;
+                interiorness[i] = (float)c / (float)adj[i].size();
+            }
+            // Smooth interiorness a couple of rings so the dent depth has no hard step.
+            for (int it = 0; it < 3; ++it) {
+                std::vector<float> nxt = interiorness;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!covered[i] || adj[i].empty()) continue;
+                    float s = interiorness[i]; int c = 1;
+                    for (uint32_t nb : adj[i]) { s += interiorness[nb]; ++c; }
+                    nxt[i] = s / (float)c;
+                }
+                interiorness.swap(nxt);
+            }
+            const float kSinkDepth = 1.2f;     // how far under the body the core sinks
+            int collapsed = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (!covered[i]) continue;
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                // Target gap = -kSinkDepth at the interior, easing to ~0 at the boundary.
+                float w = ClampRange(interiorness[i], 0.0f, 1.0f);
+                float targetGap = -kSinkDepth * w;
+                Vec3 target = Add(cp, Scale(nrm, targetGap));
+                finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), w));
+                if (w > 0.05f) ++collapsed;
+            }
+            int coveredCount = 0; for (size_t i=0;i<n;++i) if (covered[i]) ++coveredCount;
+            if (coveredCount > 0)
+                HLog("detour: anti-clip-collapse shape='%s' covered=%d collapsed=%d",
+                     shapeName.c_str(), coveredCount, collapsed);
+        }
+
+        // â”€â”€ Covered-vertex suppression (DISABLED) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // The idea (zap covered inner verts where there's no room) is sound, but this
         // implementation moves verts deep INTO the body to hide them, which tears the
         // mesh: a hidden vert pulled 1-2u inward while its neighbours stay put creates
         // stretched/ripped triangles (observed hidden=172 feathered=475 deepestGap=-2.25).
         // The correct "hide" is collapsing a covered vert ONTO a neighbour (zero-area),
-        // not pushing it through the body — left for a future rewrite. For now the
+        // not pushing it through the body â€” left for a future rewrite. For now the
         // tuck-only pass above handles the easy cases; residual covered clipping is left
         // for the user's zap slider (no rips). Kept compiled-but-dead for reference.
         const bool kEnableSuppress = false;
@@ -4727,19 +6666,19 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             Vec3 myNrm{};
             float myGap = bodyGap(finalVerts[i], myNrm);
             for (const OuterCollider& oc : *outerColliders) {
-                if (!oc.base.valid || !oc.current.valid) continue;
+                if (!oc.Base().valid || !oc.Current().valid) continue;
                 const float kClearance = clearanceFor(oc.preset);
 
                 Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
                 int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
-                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bnrm, bd2,
+                if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
                                        &baseTri, &bu, &bv, &bw)) continue;
                 if (std::sqrt(bd2) > kOverlap) continue;
                 Vec3 dummy{};
                 if (baseBodyGap(baseVerts[i], dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
-                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
 
-                Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                Vec3 cp = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                 float outerGap = bodyGap(cp, dummy);
                 float allowed = outerGap - kClearance;
                 float pen = myGap - allowed;
@@ -4791,19 +6730,19 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     float myGap = bodyGap(curSample, myNrm);
 
                     for (const OuterCollider& oc : *outerColliders) {
-                        if (!oc.base.valid || !oc.current.valid) continue;
+                        if (!oc.Base().valid || !oc.Current().valid) continue;
                         const float kClearance = clearanceFor(oc.preset);
 
                         Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
                         int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
-                        if (!BVHClosestPointEx(oc.base, baseSample, bcp, bnrm, bd2,
+                        if (!BVHClosestPointEx(oc.Base(), baseSample, bcp, bnrm, bd2,
                                                &baseTri, &bu, &bv, &bw)) continue;
                         if (std::sqrt(bd2) > kOverlap) continue;
                         Vec3 dummy{};
                         if (baseBodyGap(baseSample, dummy) >= baseBodyGap(bcp, dummy) + kBaseUnderSlack) continue;
-                        if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+                        if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
 
-                        Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                        Vec3 cp = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                         float outerGap = bodyGap(cp, dummy);
                         float allowed = outerGap - kClearance;
                         float pen = myGap - allowed;
@@ -4876,19 +6815,19 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         float forcedDeepestGap = 0.0f;
         for (size_t i = 0; i < n; ++i) {
             for (const OuterCollider& oc : *outerColliders) {
-                if (!oc.base.valid || !oc.current.valid) continue;
+                if (!oc.Base().valid || !oc.Current().valid) continue;
                 const float kClearance = clearanceFor(oc.preset);
 
                 Vec3 bcp{0,0,0}, bn{0,0,1}; float bd2 = 0.0f;
                 int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
-                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bn, bd2,
+                if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bn, bd2,
                                        &baseTri, &bu, &bv, &bw)) continue;
                 if (std::sqrt(bd2) > kOverlap) continue;
                 Vec3 dn{};
                 if (baseBodyGap(baseVerts[i], dn) >= baseBodyGap(bcp, dn) + kBaseUnderSlack) continue;
-                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
 
-                Vec3 outerCP = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                Vec3 outerCP = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                 float outerGap = bodyGap(outerCP, dn);
                 float allowed = outerGap - kClearance;
                 if (allowed >= kBodyFloor) continue;
@@ -4913,20 +6852,20 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         // DIAGNOSTIC per OUTER shape (review #5): where residual clipping remains and
         // whether it's a body-conflict (no room) vs a genuine miss.
         for (const OuterCollider& oc : *outerColliders) {
-            if (!oc.base.valid || !oc.current.valid) continue;
+            if (!oc.Base().valid || !oc.Current().valid) continue;
             const float kClearance = clearanceFor(oc.preset);
             int stillBad = 0, bodyConflict = 0; float worstPen = 0, worstZ = 0, sumZ = 0;
-            float sumOuterGap = 0, minOuterGap = 1e9f;   // real body↔outer gap at conflict pts
+            float sumOuterGap = 0, minOuterGap = 1e9f;   // real bodyâ†”outer gap at conflict pts
             for (size_t i = 0; i < n; ++i) {
                 Vec3 bcp{0,0,0}, bn{0,0,1}; float bd2 = 0.0f;
                 int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
-                if (!BVHClosestPointEx(oc.base, baseVerts[i], bcp, bn, bd2,
+                if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bn, bd2,
                                        &baseTri, &bu, &bv, &bw)) continue;
                 if (std::sqrt(bd2) > kOverlap) continue;
                 Vec3 dn{};
                 if (baseBodyGap(baseVerts[i], dn) >= baseBodyGap(bcp, dn) + kBaseUnderSlack) continue;
-                if (baseTri < 0 || baseTri >= (int)oc.current.tris.size()) continue;
-                Vec3 cp = TriPointBary(oc.current, baseTri, bu, bv, bw);
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                Vec3 cp = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                 float outerGap = bodyGap(cp, dn);           // how far the OUTER sits off body
                 float allowed = outerGap - kClearance;
                 float pen = bodyGap(finalVerts[i], dn) - allowed;
@@ -4944,6 +6883,904 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                      sumOuterGap/(float)stillBad, minOuterGap);
         }
     }
+
+    const bool finalExactSeamForCompactLoose =
+        normPreset == DRAPE_PRESET_LOOSE_DRAPED &&
+        n <= 2500 &&
+        exactSeamGroups.size() <= 260;
+    std::vector<int> exactSeamGroupOf;
+    if (finalExactSeamForCompactLoose && !exactSeamGroups.empty()) {
+        exactSeamGroupOf.assign(n, -1);
+        for (size_t gi = 0; gi < exactSeamGroups.size(); ++gi) {
+            for (uint32_t vi : exactSeamGroups[gi]) {
+                if (vi < n)
+                    exactSeamGroupOf[vi] = (int)gi;
+            }
+        }
+    }
+
+    auto applyFinalSupportCap = [&](int rounds, const char* stageLabel) -> int {
+        if (useEdges.empty()) return 0;
+        const bool innerLooseSupportCap =
+            isLoosePreset && outerColliders && !outerColliders->empty();
+        const float kFinalSupportCap = innerLooseSupportCap ? 1.08f : 1.12f;
+        auto applySupportDelta = [&](uint32_t v, const Vec3& delta) {
+            if (v >= n) return;
+            if (!exactSeamGroupOf.empty() && v < exactSeamGroupOf.size()) {
+                int gi = exactSeamGroupOf[v];
+                if (gi >= 0 && gi < (int)exactSeamGroups.size()) {
+                    for (uint32_t member : exactSeamGroups[(size_t)gi]) {
+                        if (member < n)
+                            finalVerts[member] = Add(finalVerts[member], delta);
+                    }
+                    return;
+                }
+            }
+            finalVerts[v] = Add(finalVerts[v], delta);
+        };
+        int finalCapAdjusted = 0;
+        for (int it = 0; it < rounds; ++it) {
+            int roundAdjusted = 0;
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const auto& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                if (!exactSeamGroupOf.empty() &&
+                    e.a < exactSeamGroupOf.size() &&
+                    e.b < exactSeamGroupOf.size() &&
+                    exactSeamGroupOf[e.a] >= 0 &&
+                    exactSeamGroupOf[e.a] == exactSeamGroupOf[e.b])
+                    continue;
+                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                if (rest <= 1.0e-6f) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                float cap = rest * kFinalSupportCap;
+                if (len <= cap || len <= 1.0e-6f) continue;
+                float wa = (e.a < invMass.size() && invMass[e.a] > 0.0f) ? 1.0f : 0.0f;
+                float wb = (e.b < invMass.size() && invMass[e.b] > 0.0f) ? 1.0f : 0.0f;
+                if (wa + wb <= 0.0f) { wa = 0.5f; wb = 0.5f; }
+                float wSum = wa + wb;
+                Vec3 delta = Scale(dir, ((len - cap) / len) / wSum);
+                applySupportDelta(e.a, Scale(delta, -wa));
+                applySupportDelta(e.b, Scale(delta, wb));
+                ++roundAdjusted;
+            }
+            finalCapAdjusted += roundAdjusted;
+            if (roundAdjusted == 0) break;
+        }
+        if (stageLabel && finalCapAdjusted > 0)
+            HLog("detour: %s shape='%s' adjusted=%d cap=%.2f",
+                 stageLabel, shapeName.c_str(), finalCapAdjusted, kFinalSupportCap);
+        return finalCapAdjusted;
+    };
+
+    auto isFinalRigidVertex = [&](uint32_t v) -> bool {
+        if (islandIdOut.empty() || v >= islandIdOut.size()) return false;
+        int id = islandIdOut[v];
+        return id >= 0 && id < (int)islandRigidOut.size() &&
+               islandRigidOut[(size_t)id];
+    };
+
+    auto proxCapForPair = [&](const EdgeConstraint& e, size_t ei) -> float {
+        float baseRest = (ei < proxRestLen.size()) ? proxRestLen[ei] : e.restLength;
+        if (baseRest <= 1.0e-6f) return 0.0f;
+        float supportRest = baseRest;
+        if (e.a < supportVerts.size() && e.b < supportVerts.size())
+            supportRest = std::max(supportRest, Len(Sub(supportVerts[e.a], supportVerts[e.b])));
+        if (ei < proxIsBoundarySeam.size() && proxIsBoundarySeam[ei])
+            return std::max(baseRest * 1.03f + 0.018f,
+                            supportRest * 1.02f + 0.012f);
+
+        const float capMul =
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED) ? 1.16f :
+            (normPreset == DRAPE_PRESET_TUBULAR) ? 1.10f : 1.12f;
+        const float capSlack =
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED) ? 0.055f :
+            (normPreset == DRAPE_PRESET_TUBULAR) ? 0.030f : 0.040f;
+        const float supportSlack =
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED) ? 0.035f : 0.020f;
+
+        return std::max(baseRest * capMul + capSlack,
+                        supportRest * 1.04f + supportSlack);
+    };
+
+    auto logProxSeamState = [&](const char* stageLabel) {
+        if (!stageLabel || proxEdges.empty()) return;
+        float worstRatio = 1.0f;
+        float worstOpen = 0.0f;
+        int overCap = 0;
+        for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
+            const auto& e = proxEdges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            float cap = proxCapForPair(e, ei);
+            if (cap <= 1.0e-6f) continue;
+            float len = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+            worstRatio = std::max(worstRatio, len / cap);
+            if (len > cap) {
+                ++overCap;
+                worstOpen = std::max(worstOpen, len - cap);
+            }
+        }
+        if (overCap > 0)
+            HLog("detour: prox-seam-state shape='%s' stage='%s' overCap=%d/%zu worstRatio=%.2f worstOpen=%.3f",
+                 shapeName.c_str(), stageLabel, overCap, proxEdges.size(),
+                 worstRatio, worstOpen);
+    };
+
+    auto bodySafeProxMove = [&](uint32_t, const Vec3& proposed) -> bool {
+        if (!bodyBVH || !bodyBVH->valid) return true;
+        float gap = 0.0f;
+        if (!BVHSignedGap(*bodyBVH, proposed, gap, nullptr)) return true;
+        return gap >= -0.005f;
+    };
+
+    auto applyFinalSeamVectorPairs = [&](int rounds, const char* stageLabel) -> int {
+        if (seamVectorPairs.empty()) return 0;
+        const float kEps = 0.006f;
+        const float kMaxMove = 0.085f;
+        auto applySeamDelta = [&](uint32_t v, const Vec3& delta) {
+            if (v >= n) return;
+            if (!exactSeamGroupOf.empty() && v < exactSeamGroupOf.size()) {
+                int gi = exactSeamGroupOf[v];
+                if (gi >= 0 && gi < (int)exactSeamGroups.size()) {
+                    for (uint32_t member : exactSeamGroups[(size_t)gi]) {
+                        if (member < n)
+                            finalVerts[member] = Add(finalVerts[member], delta);
+                    }
+                    return;
+                }
+            }
+            finalVerts[v] = Add(finalVerts[v], delta);
+        };
+
+        int adjusted = 0;
+        float worstBefore = 0.0f;
+        float worstAfter = 0.0f;
+        for (int round = 0; round < rounds; ++round) {
+            int roundAdjusted = 0;
+            for (const SeamVectorPair& sv : seamVectorPairs) {
+                if (!sv.boundary || sv.a >= n || sv.b >= n) continue;
+                if (!exactSeamGroupOf.empty() &&
+                    sv.a < exactSeamGroupOf.size() &&
+                    sv.b < exactSeamGroupOf.size() &&
+                    exactSeamGroupOf[sv.a] >= 0 &&
+                    exactSeamGroupOf[sv.a] == exactSeamGroupOf[sv.b])
+                    continue;
+
+                Vec3 curOff = Sub(finalVerts[sv.b], finalVerts[sv.a]);
+                Vec3 err = Sub(curOff, sv.supportOffset);
+                float errLen = Len(err);
+                if (round == 0)
+                    worstBefore = std::max(worstBefore, errLen);
+                if (errLen <= kEps) continue;
+
+                bool rigidA = isFinalRigidVertex(sv.a);
+                bool rigidB = isFinalRigidVertex(sv.b);
+                if (rigidA && rigidB) continue;
+
+                float wa = rigidA ? 0.0f : ((sv.a < invMass.size() && invMass[sv.a] > 0.0f) ? 1.0f : 0.0f);
+                float wb = rigidB ? 0.0f : ((sv.b < invMass.size() && invMass[sv.b] > 0.0f) ? 1.0f : 0.0f);
+                if (wa + wb <= 1.0e-6f) {
+                    if (!rigidA) wa = 1.0f;
+                    if (!rigidB) wb = 1.0f;
+                }
+                float wSum = wa + wb;
+                if (wSum <= 1.0e-6f) continue;
+
+                Vec3 delta = Scale(err, 0.65f / wSum);
+                float deltaLen = Len(delta);
+                if (deltaLen > kMaxMove && deltaLen > 1.0e-6f)
+                    delta = Scale(delta, kMaxMove / deltaLen);
+
+                Vec3 nextA = (wa > 0.0f) ? Add(finalVerts[sv.a], Scale(delta, wa)) : finalVerts[sv.a];
+                Vec3 nextB = (wb > 0.0f) ? Sub(finalVerts[sv.b], Scale(delta, wb)) : finalVerts[sv.b];
+                bool canA = wa <= 0.0f || bodySafeProxMove(sv.a, nextA);
+                bool canB = wb <= 0.0f || bodySafeProxMove(sv.b, nextB);
+                if (!canA || !canB) continue;
+
+                applySeamDelta(sv.a, Scale(delta, wa));
+                applySeamDelta(sv.b, Scale(delta, -wb));
+                ++roundAdjusted;
+            }
+            adjusted += roundAdjusted;
+            if (roundAdjusted == 0) break;
+        }
+
+        if (adjusted > 0) {
+            for (const SeamVectorPair& sv : seamVectorPairs) {
+                if (!sv.boundary || sv.a >= n || sv.b >= n) continue;
+                Vec3 curOff = Sub(finalVerts[sv.b], finalVerts[sv.a]);
+                worstAfter = std::max(worstAfter, Len(Sub(curOff, sv.supportOffset)));
+            }
+            if (stageLabel)
+                HLog("detour: %s shape='%s' adjusted=%d worstBefore=%.4f worstAfter=%.4f pairs=%zu",
+                     stageLabel, shapeName.c_str(), adjusted, worstBefore,
+                     worstAfter, seamVectorPairs.size());
+        }
+        return adjusted;
+    };
+
+    auto applyFinalProxSeamCap = [&](int rounds, const char* stageLabel) -> int {
+        if (proxEdges.empty()) return 0;
+        const float kMaxMove =
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED) ? 0.080f :
+            (normPreset == DRAPE_PRESET_TUBULAR) ? 0.060f : 0.070f;
+        int totalAdjusted = 0;
+        float worstBefore = 1.0f;
+        float worstAfter = 1.0f;
+        for (int round = 0; round < rounds; ++round) {
+            int roundAdjusted = 0;
+            for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
+                const auto& e = proxEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float cap = proxCapForPair(e, ei);
+                if (cap <= 1.0e-6f) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                if (len <= cap || len <= 1.0e-6f) continue;
+
+                worstBefore = std::max(worstBefore, len / cap);
+                bool rigidA = isFinalRigidVertex(e.a);
+                bool rigidB = isFinalRigidVertex(e.b);
+                if (rigidA && rigidB) continue;
+
+                float wa = rigidA ? 0.0f : ((e.a < invMass.size() && invMass[e.a] > 0.0f) ? 1.0f : 0.0f);
+                float wb = rigidB ? 0.0f : ((e.b < invMass.size() && invMass[e.b] > 0.0f) ? 1.0f : 0.0f);
+                if (wa + wb <= 1.0e-6f) {
+                    if (!rigidA) wa = 1.0f;
+                    if (!rigidB) wb = 1.0f;
+                }
+                float wSum = wa + wb;
+                if (wSum <= 1.0e-6f) continue;
+
+                float excess = len - cap;
+                Vec3 delta = Scale(dir, (excess / len) / wSum);
+                float deltaLen = Len(delta);
+                if (deltaLen > kMaxMove && deltaLen > 1.0e-6f)
+                    delta = Scale(delta, kMaxMove / deltaLen);
+
+                Vec3 nextA = Sub(finalVerts[e.a], Scale(delta, wa));
+                Vec3 nextB = Add(finalVerts[e.b], Scale(delta, wb));
+                bool canA = wa <= 0.0f || bodySafeProxMove(e.a, nextA);
+                bool canB = wb <= 0.0f || bodySafeProxMove(e.b, nextB);
+                if (!canA || !canB) {
+                    if (!canA) wa = 0.0f;
+                    if (!canB) wb = 0.0f;
+                    wSum = wa + wb;
+                    if (wSum <= 1.0e-6f) continue;
+                    delta = Scale(dir, (excess / len) / wSum);
+                    deltaLen = Len(delta);
+                    if (deltaLen > kMaxMove && deltaLen > 1.0e-6f)
+                        delta = Scale(delta, kMaxMove / deltaLen);
+                    nextA = (wa > 0.0f) ? Sub(finalVerts[e.a], Scale(delta, wa)) : finalVerts[e.a];
+                    nextB = (wb > 0.0f) ? Add(finalVerts[e.b], Scale(delta, wb)) : finalVerts[e.b];
+                    if ((wa > 0.0f && !bodySafeProxMove(e.a, nextA)) ||
+                        (wb > 0.0f && !bodySafeProxMove(e.b, nextB)))
+                        continue;
+                }
+
+                finalVerts[e.a] = nextA;
+                finalVerts[e.b] = nextB;
+                ++roundAdjusted;
+            }
+            totalAdjusted += roundAdjusted;
+            if (roundAdjusted == 0) break;
+        }
+
+        if (totalAdjusted > 0) {
+            for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
+                const auto& e = proxEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float cap = proxCapForPair(e, ei);
+                if (cap <= 1.0e-6f) continue;
+                float len = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+                worstAfter = std::max(worstAfter, len / cap);
+            }
+            if (stageLabel)
+                HLog("detour: %s shape='%s' adjusted=%d worstBefore=%.2f worstAfter=%.2f pairs=%zu",
+                     stageLabel, shapeName.c_str(), totalAdjusted,
+                     worstBefore, worstAfter, proxEdges.size());
+        }
+        return totalAdjusted;
+    };
+
+    auto exactSeamSpan = [&](const std::vector<uint32_t>& group) -> float {
+        float worst = 0.0f;
+        for (size_t ai = 0; ai < group.size(); ++ai) {
+            uint32_t a = group[ai];
+            if (a >= n) continue;
+            for (size_t bi = ai + 1; bi < group.size(); ++bi) {
+                uint32_t b = group[bi];
+                if (b >= n) continue;
+                worst = std::max(worst, Len(Sub(finalVerts[a], finalVerts[b])));
+            }
+        }
+        return worst;
+    };
+
+    auto applyFinalExactSeamWeld = [&](const char* stageLabel) -> int {
+        if (exactSeamGroups.empty()) return 0;
+        if (normPreset != DRAPE_PRESET_FITTED_CLOTH &&
+            normPreset != DRAPE_PRESET_TUBULAR &&
+            !finalExactSeamForCompactLoose)
+            return 0;
+        int moved = 0;
+        int groupsAdjusted = 0;
+        float worstBefore = 0.0f;
+        float worstAfter = 0.0f;
+        const float kMoveEps = 0.0005f;
+        const float kReportEps = 0.005f;
+        const float kBodyGap = 0.01f;
+
+        for (const auto& group : exactSeamGroups) {
+            if (group.size() < 2) continue;
+            float before = exactSeamSpan(group);
+            worstBefore = std::max(worstBefore, before);
+            if (before > kReportEps)
+                ++groupsAdjusted;
+
+            Vec3 avg{0.0f, 0.0f, 0.0f};
+            int count = 0;
+            for (uint32_t vi : group) {
+                if (vi >= n) continue;
+                avg = Add(avg, finalVerts[vi]);
+                ++count;
+            }
+            if (count < 2) continue;
+            avg = Scale(avg, 1.0f / (float)count);
+
+            if (bodyBVH && bodyBVH->valid) {
+                float gap = 0.0f;
+                Vec3 nrm{0.0f, 0.0f, 1.0f};
+                if (BVHSignedGap(*bodyBVH, avg, gap, &nrm) && gap < kBodyGap)
+                    avg = Add(avg, Scale(nrm, kBodyGap - gap));
+            }
+
+            for (uint32_t vi : group) {
+                if (vi >= n) continue;
+                if (Len(Sub(finalVerts[vi], avg)) > kMoveEps)
+                    ++moved;
+                finalVerts[vi] = avg;
+            }
+            worstAfter = std::max(worstAfter, exactSeamSpan(group));
+        }
+
+        if (moved > 0 && stageLabel)
+            HLog("detour: %s shape='%s' groups=%d/%zu moved=%d worstBefore=%.4f worstAfter=%.4f",
+                 stageLabel, shapeName.c_str(), groupsAdjusted,
+                 exactSeamGroups.size(), moved, worstBefore, worstAfter);
+        return moved;
+    };
+
+    // Outermost loose garments must keep their base body volume. If the cloak
+    // collapses toward/through the morphed body, inner layers have no valid place
+    // to go: moving them inward hits the body, and masking them creates holes.
+    // Enforce this upstream on the outer loose layer, using both vertices and face
+    // samples so large cloak triangles cannot chord through the body between clear
+    // vertices. Support caps run between rounds to prevent the old tear regression.
+    const bool preserveOuterBodyVolume =
+        isLoosePreset ||
+        normPreset == DRAPE_PRESET_BELT ||
+        normPreset == DRAPE_PRESET_FLEXIBLE_ARMOR ||
+        normPreset == DRAPE_PRESET_RIGID_ARMOR;
+    const bool intermediateLooseVolume =
+        isLoosePreset &&
+        outerColliders && !outerColliders->empty() &&
+        n <= 600;
+    const bool intermediateRigidAccessoryVolume =
+        normPreset == DRAPE_PRESET_RIGID_ACCESSORY &&
+        outerColliders && !outerColliders->empty() &&
+        n <= 800;
+    if ((preserveOuterBodyVolume || intermediateRigidAccessoryVolume) &&
+        ((!outerColliders || outerColliders->empty()) || intermediateLooseVolume || intermediateRigidAccessoryVolume) &&
+        bodyBVH && bodyBVH->valid &&
+        g_refBodyBVH.valid) {
+        const BodyBVH& baseBody = g_refBodyBVH;
+        const bool volumeForBelt = normPreset == DRAPE_PRESET_BELT;
+        const bool volumeForRigidOuter =
+            normPreset == DRAPE_PRESET_FLEXIBLE_ARMOR ||
+            normPreset == DRAPE_PRESET_RIGID_ARMOR;
+        const bool volumeForIntermediateLoose = intermediateLooseVolume;
+        const bool volumeForIntermediateRigidAccessory = intermediateRigidAccessoryVolume;
+        const float kBaseGapMin = volumeForBelt ? 0.08f : (volumeForRigidOuter ? 0.04f : (volumeForIntermediateRigidAccessory ? 0.02f : (volumeForIntermediateLoose ? 0.16f : 0.35f)));
+        const float kTargetSlack = volumeForBelt ? 0.04f : (volumeForRigidOuter ? 0.02f : (volumeForIntermediateRigidAccessory ? 0.02f : (volumeForIntermediateLoose ? 0.06f : 0.10f)));
+        const float kTargetMin = volumeForBelt ? 0.42f : (volumeForRigidOuter ? 0.48f : (volumeForIntermediateRigidAccessory ? 0.36f : (volumeForIntermediateLoose ? 0.58f : std::max(0.85f, params.bodyClearance))));
+        const float kTargetMax = volumeForBelt ? 1.10f : (volumeForRigidOuter ? 1.45f : (volumeForIntermediateRigidAccessory ? 0.95f : (volumeForIntermediateLoose ? 1.65f : 2.25f)));
+        const float kVertexStep = volumeForBelt ? 0.24f : (volumeForRigidOuter ? 0.20f : (volumeForIntermediateRigidAccessory ? 0.16f : (volumeForIntermediateLoose ? 0.24f : 0.42f)));
+        const float kFaceStep = volumeForBelt ? 0.16f : (volumeForRigidOuter ? 0.12f : (volumeForIntermediateRigidAccessory ? 0.08f : (volumeForIntermediateLoose ? 0.14f : 0.28f)));
+        const float kStrength = volumeForBelt ? 0.55f : (volumeForRigidOuter ? 0.50f : (volumeForIntermediateRigidAccessory ? 0.45f : (volumeForIntermediateLoose ? 0.55f : 0.65f)));
+        const int kVolumeRounds = volumeForBelt ? 5 : (volumeForRigidOuter ? 6 : (volumeForIntermediateRigidAccessory ? 5 : (volumeForIntermediateLoose ? 6 : 8)));
+
+        auto isRigidVertex2 = [&](size_t i) -> bool {
+            if (volumeForRigidOuter || volumeForIntermediateRigidAccessory) return false;
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() &&
+                   islandRigidOut[(size_t)id];
+        };
+
+        auto targetGapForBasePoint = [&](const Vec3& baseP, float& targetGap) -> bool {
+            float baseGap = 0.0f;
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            if (!BVHSignedGap(baseBody, baseP, baseGap, &nrm)) return false;
+            if (baseGap < kBaseGapMin) return false;
+            targetGap = ClampRange(std::max(kTargetMin, baseGap - kTargetSlack),
+                                   kTargetMin, kTargetMax);
+            return true;
+        };
+
+        auto pushVertexToGap = [&](size_t i, float targetGap,
+                                   float maxStep, float strength) -> bool {
+            if (i >= n || isRigidVertex2(i)) return false;
+            float curGap = 0.0f;
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            if (!BVHSignedGap(*bodyBVH, finalVerts[i], curGap, &nrm)) return false;
+            float need = targetGap - curGap;
+            if (need <= 0.015f) return false;
+            float step = std::min(need * strength, maxStep);
+            if (step <= 0.0f) return false;
+            finalVerts[i] = Add(finalVerts[i], Scale(nrm, step));
+            return true;
+        };
+
+        struct GapSample { float a, b, c; };
+        static const GapSample kGapSamples[] = {
+            {1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f},
+            {0.5f, 0.5f, 0.0f},
+            {0.5f, 0.0f, 0.5f},
+            {0.0f, 0.5f, 0.5f},
+        };
+        auto sampleTri = [](const std::vector<Vec3>& verts,
+                            const std::array<uint16_t, 3>& t,
+                            const GapSample& s) -> Vec3 {
+            return Add(Scale(verts[t[0]], s.a),
+                       Add(Scale(verts[t[1]], s.b), Scale(verts[t[2]], s.c)));
+        };
+
+        int totalVolumeAdjusted = 0;
+        int totalFaceAdjusted = 0;
+        for (int round = 0; round < kVolumeRounds; ++round) {
+            int roundAdjusted = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float targetGap = 0.0f;
+                if (!targetGapForBasePoint(baseVerts[i], targetGap)) continue;
+                if (pushVertexToGap(i, targetGap, kVertexStep, kStrength))
+                    ++roundAdjusted;
+            }
+
+            if (tris && !tris->empty()) {
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    for (const GapSample& s : kGapSamples) {
+                        Vec3 baseP = sampleTri(baseVerts, t, s);
+                        float targetGap = 0.0f;
+                        if (!targetGapForBasePoint(baseP, targetGap)) continue;
+
+                        Vec3 curP = sampleTri(finalVerts, t, s);
+                        float curGap = 0.0f;
+                        Vec3 nrm{0.0f, 0.0f, 1.0f};
+                        if (!BVHSignedGap(*bodyBVH, curP, curGap, &nrm)) continue;
+                        float need = targetGap - curGap;
+                        if (need <= 0.015f) continue;
+                        float step = std::min(need * 0.45f, kFaceStep);
+                        if (step <= 0.0f) continue;
+
+                        const float ws[3] = {s.a, s.b, s.c};
+                        const uint16_t vi[3] = {t[0], t[1], t[2]};
+                        for (int k = 0; k < 3; ++k) {
+                            if (ws[k] <= 0.0f || isRigidVertex2(vi[k])) continue;
+                            finalVerts[vi[k]] = Add(finalVerts[vi[k]],
+                                                    Scale(nrm, step * ws[k]));
+                        }
+                        ++roundAdjusted;
+                        ++totalFaceAdjusted;
+                    }
+                }
+            }
+
+            if (roundAdjusted == 0) break;
+            totalVolumeAdjusted += roundAdjusted;
+            applyFinalSupportCap(16, nullptr);
+        }
+        if (totalVolumeAdjusted > 0)
+            HLog("detour: loose-outer-body-volume shape='%s' adjusted=%d faceSamples=%d target=[%.2f,%.2f]",
+                 shapeName.c_str(), totalVolumeAdjusted, totalFaceAdjusted,
+                 kTargetMin, kTargetMax);
+    }
+
+    auto applyOuterAccessoryInnerClearance = [&](const char* stageLabel) -> int {
+        const bool structuredOuter =
+            normPreset == DRAPE_PRESET_BELT ||
+            normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
+            normPreset == DRAPE_PRESET_FLEXIBLE_ARMOR ||
+            normPreset == DRAPE_PRESET_RIGID_ARMOR;
+        const bool intermediateOuterLayer =
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
+             normPreset == DRAPE_PRESET_FITTED_CLOTH) &&
+            outerColliders && !outerColliders->empty();
+        if (!(structuredOuter || intermediateOuterLayer) ||
+            !innerColliders || innerColliders->empty() ||
+            !bodyBVH || !bodyBVH->valid ||
+            !g_refBodyBVH.valid)
+            return 0;
+
+        const BodyBVH& baseBody = g_refBodyBVH;
+        const float kOverlap = (normPreset == DRAPE_PRESET_BELT) ? 3.25f : (intermediateOuterLayer ? 3.00f : 2.75f);
+        const float kOverlap2 = kOverlap * kOverlap;
+        const float kBaseAboveSlack = 0.04f;
+        const float kMinViolation = 0.012f;
+        const float kStrength = intermediateOuterLayer ? 0.44f : ((normPreset == DRAPE_PRESET_BELT) ? 0.66f : 0.56f);
+        const float kVertexStep = intermediateOuterLayer ? 0.075f : ((normPreset == DRAPE_PRESET_BELT) ? 0.105f : 0.075f);
+        const float kFaceStep = intermediateOuterLayer ? 0.050f : ((normPreset == DRAPE_PRESET_BELT) ? 0.075f : 0.055f);
+        const int kRounds = intermediateOuterLayer ? 5 : ((normPreset == DRAPE_PRESET_BELT) ? 8 : 5);
+
+        auto innerMarginFor = [&](int innerPreset) -> float {
+            if (intermediateOuterLayer) {
+                switch (NormalizePreset(innerPreset)) {
+                case DRAPE_PRESET_TUBULAR:         return 0.15f;
+                case DRAPE_PRESET_FITTED_CLOTH:    return 0.14f;
+                case DRAPE_PRESET_LOOSE_DRAPED:    return 0.12f;
+                case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.12f;
+                case DRAPE_PRESET_RIGID_ARMOR:     return 0.12f;
+                case DRAPE_PRESET_BELT:            return 0.12f;
+                default:                           return 0.13f;
+                }
+            }
+            switch (NormalizePreset(innerPreset)) {
+            case DRAPE_PRESET_TUBULAR:         return 0.22f;
+            case DRAPE_PRESET_FITTED_CLOTH:    return 0.20f;
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.18f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.16f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.14f;
+            case DRAPE_PRESET_BELT:            return 0.14f;
+            default:                           return 0.18f;
+            }
+        };
+        auto signedGap3 = [](const BodyBVH& bvh, const Vec3& p, float& gap, Vec3* nrm) -> bool {
+            Vec3 tmp{0.0f, 0.0f, 1.0f};
+            bool ok = BVHSignedGap(bvh, p, gap, &tmp);
+            if (nrm) *nrm = tmp;
+            return ok;
+        };
+
+        int totalAdjusted = 0;
+        int totalFaceSamples = 0;
+        for (int round = 0; round < kRounds; ++round) {
+            int roundAdjusted = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float myBaseGap = 0.0f;
+                if (!signedGap3(baseBody, baseVerts[i], myBaseGap, nullptr)) continue;
+                float myGap = 0.0f;
+                Vec3 myNrm{0.0f, 0.0f, 1.0f};
+                if (!signedGap3(*bodyBVH, finalVerts[i], myGap, &myNrm)) continue;
+
+                float targetGap = myGap;
+                for (const OuterCollider& ic : *innerColliders) {
+                    if (!ic.Base().valid || !ic.Current().valid) continue;
+                    Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                    float bd2 = 0.0f;
+                    int baseTri = -1;
+                    float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                    if (!BVHClosestPointEx(ic.Base(), baseVerts[i], bcp, bnrm, bd2,
+                                            &baseTri, &bu, &bv, &bw)) continue;
+                    if (bd2 > kOverlap2) continue;
+                    if (baseTri < 0 || baseTri >= (int)ic.Current().tris.size()) continue;
+
+                    float innerBaseGap = 0.0f;
+                    if (!signedGap3(baseBody, bcp, innerBaseGap, nullptr)) continue;
+                    if (myBaseGap + kBaseAboveSlack < innerBaseGap) continue;
+
+                    Vec3 innerCur = TriPointBary(ic.Current(), baseTri, bu, bv, bw);
+                    float innerGap = 0.0f;
+                    if (!signedGap3(*bodyBVH, innerCur, innerGap, nullptr)) continue;
+                    targetGap = std::max(targetGap, innerGap + innerMarginFor(ic.preset));
+                }
+
+                float need = targetGap - myGap;
+                if (need <= kMinViolation) continue;
+                float step = std::min(need * kStrength, kVertexStep);
+                if (step <= 0.0f) continue;
+                finalVerts[i] = Add(finalVerts[i], Scale(myNrm, step));
+                ++roundAdjusted;
+            }
+
+            if (tris && !tris->empty()) {
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    for (const TriangleSample& s : kTriangleSamples) {
+                        Vec3 baseP = SampleTrianglePoint(baseVerts, t, s);
+                        float myBaseGap = 0.0f;
+                        if (!signedGap3(baseBody, baseP, myBaseGap, nullptr)) continue;
+                        Vec3 curP = SampleTrianglePoint(finalVerts, t, s);
+                        float myGap = 0.0f;
+                        Vec3 myNrm{0.0f, 0.0f, 1.0f};
+                        if (!signedGap3(*bodyBVH, curP, myGap, &myNrm)) continue;
+
+                        float targetGap = myGap;
+                        for (const OuterCollider& ic : *innerColliders) {
+                            if (!ic.Base().valid || !ic.Current().valid) continue;
+                            Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                            float bd2 = 0.0f;
+                            int baseTri = -1;
+                            float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                            if (!BVHClosestPointEx(ic.Base(), baseP, bcp, bnrm, bd2,
+                                                    &baseTri, &bu, &bv, &bw)) continue;
+                            if (bd2 > kOverlap2) continue;
+                            if (baseTri < 0 || baseTri >= (int)ic.Current().tris.size()) continue;
+
+                            float innerBaseGap = 0.0f;
+                            if (!signedGap3(baseBody, bcp, innerBaseGap, nullptr)) continue;
+                            if (myBaseGap + kBaseAboveSlack < innerBaseGap) continue;
+
+                            Vec3 innerCur = TriPointBary(ic.Current(), baseTri, bu, bv, bw);
+                            float innerGap = 0.0f;
+                            if (!signedGap3(*bodyBVH, innerCur, innerGap, nullptr)) continue;
+                            targetGap = std::max(targetGap, innerGap + innerMarginFor(ic.preset));
+                        }
+
+                        float need = targetGap - myGap;
+                        if (need <= kMinViolation) continue;
+                        float step = std::min(need * (kStrength * 0.78f), kFaceStep);
+                        if (step <= 0.0f) continue;
+
+                        const float ws[3] = {s.a, s.b, s.c};
+                        const uint16_t vi[3] = {t[0], t[1], t[2]};
+                        float sumSq = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+                        if (sumSq <= 1.0e-6f) continue;
+                        for (int k = 0; k < 3; ++k) {
+                            if (ws[k] <= 0.0f) continue;
+                            finalVerts[vi[k]] = Add(finalVerts[vi[k]],
+                                                    Scale(myNrm, step * ws[k] / sumSq));
+                        }
+                        ++roundAdjusted;
+                        ++totalFaceSamples;
+                    }
+                }
+            }
+
+            if (roundAdjusted == 0) break;
+            totalAdjusted += roundAdjusted;
+            applyFinalSupportCap(14, nullptr);
+        }
+
+        if (totalAdjusted > 0)
+            HLog("detour: outer-layer-inner-clearance shape='%s' stage='%s' adjusted=%d faceSamples=%d inners=%zu mode='%s'",
+                 shapeName.c_str(), stageLabel ? stageLabel : "",
+                 totalAdjusted, totalFaceSamples, innerColliders->size(),
+                 intermediateOuterLayer ? "intermediate" : "structured");
+        return totalAdjusted;
+    };
+
+    // Final feasible layer tuck. This is deliberately narrower than the legacy
+    // anti-clip block: it only handles positions that can be solved while keeping
+    // the vertex outside the body, moves in small bounded steps, and applies the
+    // support cap between rounds. No masking, no collapse, no no-room forcing.
+    const bool fittedLayerTuck =
+        normPreset == DRAPE_PRESET_FITTED_CLOTH;
+    const bool tubularLayerTuck =
+        normPreset == DRAPE_PRESET_TUBULAR;
+    auto applyFinalLayerTuck = [&](int roundOverride,
+                                   bool postCapPass,
+                                   const char* stageLabel) -> int {
+        if (!((params.verletCloth || fittedLayerTuck || tubularLayerTuck) &&
+              outerColliders && !outerColliders->empty() &&
+              bodyBVH && bodyBVH->valid))
+            return 0;
+
+        const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
+        const float kOverlap2 = 4.25f * 4.25f;
+        const float kBaseUnderSlack = 0.10f;
+        const float kBodyFloor = tubularLayerTuck ? 0.06f : (fittedLayerTuck ? 0.08f : 0.06f);
+        const float kMoveFloor = kBodyFloor;
+        const bool looseLayerTuck = isLoosePreset;
+        const float kMoveStrength = tubularLayerTuck ? 0.76f : (fittedLayerTuck ? 0.62f : (intermediateLooseVolume ? 0.70f : (looseLayerTuck ? 0.65f : 0.55f)));
+        const float kMaxStep = tubularLayerTuck ? 0.25f : (fittedLayerTuck ? 0.16f : (intermediateLooseVolume ? 0.24f : (looseLayerTuck ? 0.22f : 0.18f)));
+        const float kFaceMoveStrength = tubularLayerTuck ? 0.82f : (fittedLayerTuck ? 0.54f : 0.50f);
+        const float kFaceMaxStep = tubularLayerTuck ? 0.22f : (fittedLayerTuck ? 0.12f : 0.10f);
+        const int defaultRounds = tubularLayerTuck ? 20 : (fittedLayerTuck ? 6 : (intermediateLooseVolume ? 8 : (looseLayerTuck ? 6 : 4)));
+        const int kRounds = roundOverride > 0 ? roundOverride : defaultRounds;
+
+        auto layerMarginFor = [&](int outerPreset) -> float {
+            switch (NormalizePreset(outerPreset)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return tubularLayerTuck ? 0.34f : 0.16f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.34f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.40f;
+            case DRAPE_PRESET_BELT:            return 0.32f;
+            case DRAPE_PRESET_RIGID_ACCESSORY: return 0.28f;
+            default:                           return 0.22f;
+            }
+        };
+        auto signedGap2 = [](const BodyBVH& bvh, const Vec3& p, float& gap, Vec3* nrm) -> bool {
+            Vec3 tmp{0.0f, 0.0f, 1.0f};
+            bool ok = BVHSignedGap(bvh, p, gap, &tmp);
+            if (nrm) *nrm = tmp;
+            return ok;
+        };
+        auto isRigidVertex3 = [&](size_t i) -> bool {
+            if (looseLayerTuck) return false;
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() &&
+                   islandRigidOut[(size_t)id];
+        };
+
+        int totalTucked = 0;
+        int totalFaceTucked = 0;
+        int noRoomSkipped = 0;
+        for (int round = 0; round < kRounds; ++round) {
+            int roundTucked = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (isRigidVertex3(i)) continue;
+                float myBaseGap = 0.0f;
+                if (!signedGap2(*baseBodyBVH, baseVerts[i], myBaseGap, nullptr)) continue;
+                float myGap = 0.0f;
+                Vec3 myNrm{0.0f, 0.0f, 1.0f};
+                if (!signedGap2(*bodyBVH, finalVerts[i], myGap, &myNrm)) continue;
+
+                float targetGap = myGap;
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Base().valid || !oc.Current().valid) continue;
+                    Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                    float bd2 = 0.0f;
+                    int baseTri = -1;
+                    float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                    if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
+                                            &baseTri, &bu, &bv, &bw)) continue;
+                    if (bd2 > kOverlap2) continue;
+                    if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+
+                    float outerBaseGap = 0.0f;
+                    if (!signedGap2(*baseBodyBVH, bcp, outerBaseGap, nullptr)) continue;
+                    if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
+
+                    Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                    float outerGap = 0.0f;
+                    if (!signedGap2(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                    float allowed = outerGap - layerMarginFor(oc.preset);
+                    if (allowed < kBodyFloor) {
+                        if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
+                        if ((tubularLayerTuck || fittedLayerTuck) && myGap > kBodyFloor + 0.01f)
+                            targetGap = std::min(targetGap, kBodyFloor);
+                        continue;
+                    }
+                    if (myGap > allowed + 0.01f)
+                        targetGap = std::min(targetGap, allowed);
+                }
+
+                if (targetGap >= myGap - 0.01f) continue;
+                float step = std::min((myGap - targetGap) * kMoveStrength, kMaxStep);
+                if (step <= 0.0f) continue;
+                finalVerts[i] = Add(finalVerts[i], Scale(myNrm, -step));
+                ++roundTucked;
+            }
+            if (tris && !tris->empty()) {
+                int roundFaceTucked = 0;
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    for (const TriangleSample& s : kTriangleSamples) {
+                        Vec3 baseP = SampleTrianglePoint(baseVerts, t, s);
+                        float myBaseGap = 0.0f;
+                        if (!signedGap2(*baseBodyBVH, baseP, myBaseGap, nullptr)) continue;
+                        Vec3 curP = SampleTrianglePoint(finalVerts, t, s);
+                        float myGap = 0.0f;
+                        Vec3 myNrm{0.0f, 0.0f, 1.0f};
+                        if (!signedGap2(*bodyBVH, curP, myGap, &myNrm)) continue;
+
+                        float targetGap = myGap;
+                        for (const OuterCollider& oc : *outerColliders) {
+                            if (!oc.Base().valid || !oc.Current().valid) continue;
+                            Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                            float bd2 = 0.0f;
+                            int baseTri = -1;
+                            float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                            if (!BVHClosestPointEx(oc.Base(), baseP, bcp, bnrm, bd2,
+                                                    &baseTri, &bu, &bv, &bw)) continue;
+                            if (bd2 > kOverlap2) continue;
+                            if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+
+                            float outerBaseGap = 0.0f;
+                            if (!signedGap2(*baseBodyBVH, bcp, outerBaseGap, nullptr)) continue;
+                            if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
+
+                            Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                            float outerGap = 0.0f;
+                            if (!signedGap2(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                            float allowed = outerGap - layerMarginFor(oc.preset);
+                            if (allowed < kBodyFloor) {
+                                if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
+                                if ((tubularLayerTuck || fittedLayerTuck) && myGap > kBodyFloor + 0.01f)
+                                    targetGap = std::min(targetGap, kBodyFloor);
+                                continue;
+                            }
+                            if (myGap > allowed + 0.01f)
+                                targetGap = std::min(targetGap, allowed);
+                        }
+
+                        if (targetGap >= myGap - 0.01f) continue;
+                        float step = std::min((myGap - targetGap) * kFaceMoveStrength, kFaceMaxStep);
+                        if (step <= 0.0f) continue;
+
+                        const float ws[3] = {s.a, s.b, s.c};
+                        const uint16_t vi[3] = {t[0], t[1], t[2]};
+                        float sumSq = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+                        if (sumSq <= 1.0e-6f) continue;
+                        bool moved = false;
+                        for (int k = 0; k < 3; ++k) {
+                            if (ws[k] <= 0.0f || isRigidVertex3(vi[k])) continue;
+                            float vertexGap = 0.0f;
+                            if (signedGap2(*bodyBVH, finalVerts[vi[k]], vertexGap, nullptr)) {
+                                float room = vertexGap - kMoveFloor;
+                                if (room <= 0.005f) continue;
+                                float vStep = std::min(step * ws[k] / sumSq, room);
+                                if (vStep <= 0.0f) continue;
+                                finalVerts[vi[k]] = Add(finalVerts[vi[k]], Scale(myNrm, -vStep));
+                                moved = true;
+                            }
+                        }
+                        if (moved) {
+                            ++roundTucked;
+                            ++roundFaceTucked;
+                        }
+                    }
+                }
+                totalFaceTucked += roundFaceTucked;
+            }
+            if (roundTucked == 0) break;
+            totalTucked += roundTucked;
+            applyFinalSupportCap(12, nullptr);
+        }
+        if (totalTucked > 0)
+            HLog("detour: final-feasible-layer-tuck shape='%s' stage='%s' tucked=%d faceSamples=%d noRoomSkipped=%d",
+                 shapeName.c_str(), stageLabel ? stageLabel : "",
+                 totalTucked, totalFaceTucked, noRoomSkipped);
+        return totalTucked;
+    };
+
+    applyOuterAccessoryInnerClearance("pre-cap");
+    applyFinalLayerTuck(0, false, "pre-cap");
+    // Do not close visual gaps by pulling arbitrary boundary vertices together here.
+    // Replays showed that post-solve seam tugging increases support-edge stretch on
+    // layered outfits. Geometry continuity must be preserved by the solve itself.
+    // Final global support-length cap. Earlier caps only covered the loose cloth path,
+    // but later rigid/border/body/layer passes can still over-stretch fitted, belt,
+    // and tubular meshes. Cap against the vanilla-conformed support lengths so body
+    // morph expansion is allowed, while solver-created tears are not.
+    applyFinalSupportCap(64, "final-stretch-cap");
+    // Final body clearance runs after the support cap because the cap can pull
+    // a vertex slightly back into the body. Keep it deliberately limited: this
+    // is a last-line penetration nudge, not another body-shaping pass.
+    if (bodyBVH && bodyBVH->valid) {
+        int finalBodyAdjusted = 0;
+        const float kFinalBodyGap = 0.01f;
+        const float kFinalBodyMaxStep = 0.25f;
+        for (size_t i = 0; i < n; ++i) {
+            float gap = 0.0f;
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            if (!BVHSignedGap(*bodyBVH, finalVerts[i], gap, &nrm)) continue;
+            if (gap >= kFinalBodyGap) continue;
+            float step = std::min((kFinalBodyGap - gap) * 0.35f, kFinalBodyMaxStep);
+            if (step <= 0.0f) continue;
+            finalVerts[i] = Add(finalVerts[i], Scale(nrm, step));
+            ++finalBodyAdjusted;
+        }
+        if (finalBodyAdjusted > 0)
+            HLog("detour: final-body-clearance shape='%s' adjusted=%d",
+                 shapeName.c_str(), finalBodyAdjusted);
+    }
+    applyOuterAccessoryInnerClearance("post-cap");
+    applyFinalExactSeamWeld("pre-prox-exact-seam-weld");
+    applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
+    logProxSeamState("before-final-prox-cap");
+    applyFinalProxSeamCap(24, "final-prox-seam-cap");
+    applyFinalSupportCap(12, "post-prox-stretch-cap");
+    applyFinalSeamVectorPairs(8, "post-prox-boundary-seam-vector");
+    applyFinalProxSeamCap(10, "final-prox-seam-polish");
+    int finalExactMoved = applyFinalExactSeamWeld("final-exact-seam-weld");
+    if (finalExactMoved > 0 && finalExactSeamForCompactLoose)
+        applyFinalSupportCap(8, "post-exact-stretch-cap");
+    applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
+    logProxSeamState("after-final-prox-cap");
+    worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
     // Write only non-zero diffs (matches BodySlide convention).
     outDiff.clear();
@@ -4969,6 +7806,641 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     return true;
 }
 
+struct HarnessMetrics {
+    float worstEdgeStretch = 0.0f;
+    float worstSupportEdgeStretch = 0.0f;
+    int bodyPenetrationCount = 0;
+    int garmentResidualCount = 0;
+    int garmentFaceResidualCount = 0;
+    int garmentBodyConflictCount = 0;
+    int garmentFaceBodyConflictCount = 0;
+    std::unordered_map<std::string, int> garmentResidualByOuter;
+    std::unordered_map<std::string, int> garmentFaceResidualByOuter;
+    std::unordered_map<std::string, int> garmentBodyConflictByOuter;
+    std::unordered_map<std::string, int> garmentFaceBodyConflictByOuter;
+    std::unordered_map<std::string, float> worstGarmentPenByOuter;
+    std::unordered_map<std::string, float> worstGarmentFacePenByOuter;
+    float worstGarmentPen = 0.0f;
+    float worstGarmentFacePen = 0.0f;
+    float maxDisplacement = 0.0f;
+    int nanCount = 0;
+    float maxExpectedVertError = 0.0f;
+    float maxExpectedDiffError = 0.0f;
+    int expectedDiffMismatches = 0;
+};
+
+static std::vector<Vec3> SolvedVertsFromDiff(const std::vector<Vec3>& baseVerts,
+                                             const TargetDataDiffs& diff) {
+    size_t n = std::min<size_t>(baseVerts.size(), 0x10000);
+    std::vector<Vec3> out(n);
+    for (size_t i = 0; i < n; ++i)
+        out[i] = Add(baseVerts[i], DiffAt(diff, (uint16_t)i));
+    return out;
+}
+
+static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
+                                            const TargetDataDiffs& solvedDiff,
+                                            const std::vector<Vec3>& solvedVerts) {
+    HarnessMetrics m;
+    size_t n = std::min<size_t>(cap.baseVerts.size(), solvedVerts.size());
+    for (size_t i = 0; i < n; ++i) {
+        const Vec3& v = solvedVerts[i];
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
+            ++m.nanCount;
+            continue;
+        }
+        m.maxDisplacement = std::max(m.maxDisplacement, Len(Sub(v, cap.baseVerts[i])));
+    }
+
+    for (const EdgeConstraint& e : cap.edges) {
+        if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+        float len = Len(Sub(solvedVerts[e.a], solvedVerts[e.b]));
+        m.worstEdgeStretch = std::max(m.worstEdgeStretch, len / e.restLength);
+        Vec3 sa = Add(cap.baseVerts[e.a], DiffAt(cap.rawDiff, e.a));
+        Vec3 sb = Add(cap.baseVerts[e.b], DiffAt(cap.rawDiff, e.b));
+        float supportRest = Len(Sub(sa, sb));
+        if (supportRest > 1.0e-6f)
+            m.worstSupportEdgeStretch = std::max(m.worstSupportEdgeStretch, len / supportRest);
+    }
+
+    BodyBVH body;
+    if (cap.hasBodyBVH)
+        BuildBodyBVH(cap.bodyBVHVerts, cap.bodyBVHTris, body);
+    if (body.valid) {
+        for (size_t i = 0; i < n; ++i) {
+            float gap = 0.0f;
+            if (BVHSignedGap(body, solvedVerts[i], gap, nullptr) && gap < -0.001f)
+                ++m.bodyPenetrationCount;
+        }
+    }
+
+    if (body.valid && !cap.outerColliders.empty()) {
+        BodyBVH baseBody;
+        if (cap.hasRefBodyBVH)
+            BuildBodyBVH(cap.refBodyBVHVerts, cap.refBodyBVHTris, baseBody);
+        const BodyBVH& baseBodyRef = baseBody.valid ? baseBody : body;
+        auto signedGap = [](const BodyBVH& bvh, const Vec3& p, float& gap) -> bool {
+            Vec3 nrm{0.0f, 0.0f, 1.0f};
+            return BVHSignedGap(bvh, p, gap, &nrm);
+        };
+        auto residualMarginFor = [](int outerPreset) -> float {
+            switch (NormalizePreset(outerPreset)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.16f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.34f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.40f;
+            case DRAPE_PRESET_BELT:            return 0.32f;
+            case DRAPE_PRESET_RIGID_ACCESSORY: return 0.28f;
+            default:                           return 0.22f;
+            }
+        };
+        const float kOverlap2 = 4.25f * 4.25f;
+        const float kBaseUnderSlack = 0.10f;
+        const float kBodyFloor = 0.08f;
+        auto recordResidual = [&](const OuterCollider& oc, float allowed, float pen, bool faceSample) {
+            std::string outerName = oc.name.empty() ? std::string("<unnamed>") : oc.name;
+            if (faceSample) {
+                ++m.garmentFaceResidualCount;
+                ++m.garmentFaceResidualByOuter[outerName];
+                if (allowed < kBodyFloor) {
+                    ++m.garmentFaceBodyConflictCount;
+                    ++m.garmentFaceBodyConflictByOuter[outerName];
+                }
+                m.worstGarmentFacePen = std::max(m.worstGarmentFacePen, pen);
+                m.worstGarmentFacePenByOuter[outerName] =
+                    std::max(m.worstGarmentFacePenByOuter[outerName], pen);
+            } else {
+                ++m.garmentResidualCount;
+                ++m.garmentResidualByOuter[outerName];
+                if (allowed < kBodyFloor) {
+                    ++m.garmentBodyConflictCount;
+                    ++m.garmentBodyConflictByOuter[outerName];
+                }
+                m.worstGarmentPen = std::max(m.worstGarmentPen, pen);
+                m.worstGarmentPenByOuter[outerName] =
+                    std::max(m.worstGarmentPenByOuter[outerName], pen);
+            }
+        };
+        for (size_t i = 0; i < n; ++i) {
+            float myBaseGap = 0.0f;
+            if (!signedGap(baseBodyRef, cap.baseVerts[i], myBaseGap)) continue;
+            float myGap = 0.0f;
+            if (!signedGap(body, solvedVerts[i], myGap)) continue;
+            for (const OuterCollider& oc : cap.outerColliders) {
+                if (!oc.Base().valid || !oc.Current().valid) continue;
+                Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                float bd2 = 0.0f;
+                int baseTri = -1;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.Base(), cap.baseVerts[i], bcp, bnrm, bd2,
+                                        &baseTri, &bu, &bv, &bw)) continue;
+                if (bd2 > kOverlap2) continue;
+                if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                float outerBaseGap = 0.0f;
+                if (!signedGap(baseBodyRef, bcp, outerBaseGap)) continue;
+                if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
+                Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                float outerGap = 0.0f;
+                if (!signedGap(body, outerCur, outerGap)) continue;
+                float allowed = outerGap - residualMarginFor(oc.preset);
+                float pen = myGap - allowed;
+                if (pen <= 0.01f) continue;
+                recordResidual(oc, allowed, pen, false);
+                break;
+            }
+        }
+        if (!cap.tris.empty()) {
+            for (const auto& t : cap.tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (const TriangleSample& s : kTriangleSamples) {
+                    Vec3 baseP = SampleTrianglePoint(cap.baseVerts, t, s);
+                    float myBaseGap = 0.0f;
+                    if (!signedGap(baseBodyRef, baseP, myBaseGap)) continue;
+                    Vec3 curP = SampleTrianglePoint(solvedVerts, t, s);
+                    float myGap = 0.0f;
+                    if (!signedGap(body, curP, myGap)) continue;
+                    for (const OuterCollider& oc : cap.outerColliders) {
+                        if (!oc.Base().valid || !oc.Current().valid) continue;
+                        Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                        float bd2 = 0.0f;
+                        int baseTri = -1;
+                        float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                        if (!BVHClosestPointEx(oc.Base(), baseP, bcp, bnrm, bd2,
+                                                &baseTri, &bu, &bv, &bw)) continue;
+                        if (bd2 > kOverlap2) continue;
+                        if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                        float outerBaseGap = 0.0f;
+                        if (!signedGap(baseBodyRef, bcp, outerBaseGap)) continue;
+                        if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
+                        Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                        float outerGap = 0.0f;
+                        if (!signedGap(body, outerCur, outerGap)) continue;
+                        float allowed = outerGap - residualMarginFor(oc.preset);
+                        float pen = myGap - allowed;
+                        if (pen <= 0.01f) continue;
+                        recordResidual(oc, allowed, pen, true);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (cap.hasExpected && !cap.expectedSolvedVerts.empty()) {
+        size_t vn = std::min(n, cap.expectedSolvedVerts.size());
+        for (size_t i = 0; i < vn; ++i)
+            m.maxExpectedVertError = std::max(m.maxExpectedVertError,
+                                             Len(Sub(solvedVerts[i], cap.expectedSolvedVerts[i])));
+    }
+
+    if (cap.hasExpected) {
+        std::vector<uint16_t> keys;
+        keys.reserve(solvedDiff.size() + cap.expectedDiff.size());
+        for (const auto& kv : solvedDiff) keys.push_back(kv.first);
+        for (const auto& kv : cap.expectedDiff) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        for (uint16_t k : keys) {
+            Vec3 a = DiffAt(solvedDiff, k);
+            Vec3 b = DiffAt(cap.expectedDiff, k);
+            float err = Len(Sub(a, b));
+            m.maxExpectedDiffError = std::max(m.maxExpectedDiffError, err);
+            if (err > 1.0e-4f)
+                ++m.expectedDiffMismatches;
+        }
+    }
+
+    return m;
+}
+
+struct ReplayOptions {
+    fs::path resultObj;
+    fs::path debugPly;
+    bool quiet = false;
+};
+
+struct ReplayOutcome {
+    int code = 0;
+    bool passOk = false;
+    SolverCapture capture;
+    TargetDataDiffs solvedDiff;
+    std::vector<Vec3> solvedVerts;
+    HarnessMetrics metrics;
+};
+
+static bool WriteResultObj(const fs::path& path,
+                           const std::vector<Vec3>& verts,
+                           const std::vector<std::array<uint16_t, 3>>& tris) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+    for (const Vec3& v : verts)
+        out << "v " << v.x << ' ' << v.y << ' ' << v.z << '\n';
+    for (const auto& t : tris)
+        out << "f " << (uint32_t)t[0] + 1 << ' ' << (uint32_t)t[1] + 1 << ' ' << (uint32_t)t[2] + 1 << '\n';
+    return out.good();
+}
+
+static bool WriteDebugPly(const fs::path& path,
+                          const SolverCapture& cap,
+                          const std::vector<Vec3>& verts) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+    BodyBVH body;
+    if (cap.hasBodyBVH)
+        BuildBodyBVH(cap.bodyBVHVerts, cap.bodyBVHTris, body);
+
+    out << "ply\nformat ascii 1.0\n";
+    out << "element vertex " << verts.size() << "\n";
+    out << "property float x\nproperty float y\nproperty float z\n";
+    out << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    out << "element face " << cap.tris.size() << "\n";
+    out << "property list uchar int vertex_indices\nend_header\n";
+
+    for (size_t i = 0; i < verts.size(); ++i) {
+        float mask = 0.0f;
+        auto mit = cap.presetMask.find((uint16_t)std::min<size_t>(i, 0xFFFF));
+        if (mit != cap.presetMask.end()) mask = Clamp01(mit->second);
+        int r = 30;
+        int g = (int)ClampRange(mask * 255.0f, 0.0f, 255.0f);
+        int b = (int)ClampRange((1.0f - mask) * 255.0f, 0.0f, 255.0f);
+        if (body.valid) {
+            float gap = 0.0f;
+            if (BVHSignedGap(body, verts[i], gap, nullptr) && gap < -0.001f) {
+                r = 255; g = 32; b = 32;
+            }
+        }
+        out << verts[i].x << ' ' << verts[i].y << ' ' << verts[i].z << ' '
+            << r << ' ' << g << ' ' << b << '\n';
+    }
+    for (const auto& t : cap.tris)
+        out << "3 " << t[0] << ' ' << t[1] << ' ' << t[2] << '\n';
+    return out.good();
+}
+
+static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions& opts) {
+    ReplayOutcome out;
+    if (!ReadSolverCapture(path, out.capture)) {
+        std::cerr << "Error: failed to read capture: " << path.string() << "\n";
+        out.code = 2;
+        return out;
+    }
+
+    const SolverCapture& cap = out.capture;
+    g_projectKey = cap.projectKey;
+    g_refCenterX = cap.refCenterX;
+    g_refCenterY = cap.refCenterY;
+    g_refMinZ = cap.refMinZ;
+    g_refMaxZ = cap.refMaxZ;
+    g_processingIntensity.store(cap.processingIntensity, std::memory_order_relaxed);
+    g_refBodyBVH = BodyBVH{};
+    if (cap.hasRefBodyBVH)
+        BuildBodyBVH(cap.refBodyBVHVerts, cap.refBodyBVHTris, g_refBodyBVH);
+
+    BodyBVH bodyBVH;
+    if (cap.hasBodyBVH)
+        BuildBodyBVH(cap.bodyBVHVerts, cap.bodyBVHTris, bodyBVH);
+
+    std::vector<BendingConstraint> previousBending;
+    bool hadPreviousBending = false;
+    {
+        auto it = g_shapeBending.find(cap.shapeName);
+        if (it != g_shapeBending.end()) {
+            previousBending = it->second;
+            hadPreviousBending = true;
+        }
+    }
+    if (!cap.bending.empty())
+        g_shapeBending[cap.shapeName] = cap.bending;
+    else
+        g_shapeBending.erase(cap.shapeName);
+
+    StaticSolveStats stats;
+    out.passOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, cap.preset,
+                                      cap.baseVerts,
+                                      cap.profiles.empty() ? nullptr : &cap.profiles,
+                                      cap.edges.empty() ? nullptr : &cap.edges,
+                                      cap.tris.empty() ? nullptr : &cap.tris,
+                                      cap.hasBodyShell ? &cap.bodyShell : nullptr,
+                                      bodyBVH.valid ? &bodyBVH : nullptr,
+                                      cap.presetMask, cap.rawDiff,
+                                      cap.outerColliders.empty() ? nullptr : &cap.outerColliders,
+                                      cap.innerColliders.empty() ? nullptr : &cap.innerColliders,
+                                      &out.solvedVerts,
+                                      out.solvedDiff, stats);
+    if (hadPreviousBending)
+        g_shapeBending[cap.shapeName] = std::move(previousBending);
+    else
+        g_shapeBending.erase(cap.shapeName);
+    if (out.solvedVerts.empty() && out.passOk)
+        out.solvedVerts = SolvedVertsFromDiff(cap.baseVerts, out.solvedDiff);
+
+    out.metrics = ComputeHarnessMetrics(cap, out.solvedDiff, out.solvedVerts);
+
+    if (!opts.resultObj.empty() && !WriteResultObj(opts.resultObj, out.solvedVerts, cap.tris)) {
+        std::cerr << "Error: failed to write OBJ: " << opts.resultObj.string() << "\n";
+        out.code = 6;
+        return out;
+    }
+    if (!opts.debugPly.empty() && !WriteDebugPly(opts.debugPly, cap, out.solvedVerts)) {
+        std::cerr << "Error: failed to write PLY: " << opts.debugPly.string() << "\n";
+        out.code = 7;
+        return out;
+    }
+
+    if (!opts.quiet) {
+        std::cout << "REPLAY"
+                  << " file=" << path.string()
+                  << " shape=" << cap.shapeName
+                  << " slider=" << cap.sliderName
+                  << " preset=\"" << PresetName(cap.preset) << "\""
+                  << " pass=" << (out.passOk ? 1 : 0)
+                  << " expectedPass=" << (cap.hasExpected ? (cap.expectedPassOk ? 1 : 0) : -1)
+                  << " raw=" << cap.rawDiff.size()
+                  << " outers=" << cap.outerColliders.size()
+                  << " written=" << out.solvedDiff.size()
+                  << " verts=" << out.solvedVerts.size()
+                  << " worstEdgeStretch=" << out.metrics.worstEdgeStretch
+                  << " worstSupportEdgeStretch=" << out.metrics.worstSupportEdgeStretch
+                  << " bodyPenetrations=" << out.metrics.bodyPenetrationCount
+                  << " garmentResidual=" << out.metrics.garmentResidualCount
+                  << " garmentFaceResidual=" << out.metrics.garmentFaceResidualCount
+                  << " garmentBodyConflict=" << out.metrics.garmentBodyConflictCount
+                  << " garmentFaceBodyConflict=" << out.metrics.garmentFaceBodyConflictCount
+                  << " worstGarmentPen=" << out.metrics.worstGarmentPen
+                  << " worstGarmentFacePen=" << out.metrics.worstGarmentFacePen
+                  << " maxDisplacement=" << out.metrics.maxDisplacement
+                  << " nanCount=" << out.metrics.nanCount
+                  << " maxExpectedVertError=" << out.metrics.maxExpectedVertError
+                  << " maxExpectedDiffError=" << out.metrics.maxExpectedDiffError
+                  << " expectedDiffMismatches=" << out.metrics.expectedDiffMismatches;
+        if (!out.metrics.garmentResidualByOuter.empty()) {
+            std::cout << " residualByOuter=";
+            bool firstOuterMetric = true;
+            for (const auto& kv : out.metrics.garmentResidualByOuter) {
+                if (!firstOuterMetric) std::cout << ",";
+                firstOuterMetric = false;
+                int body = 0;
+                auto bit = out.metrics.garmentBodyConflictByOuter.find(kv.first);
+                if (bit != out.metrics.garmentBodyConflictByOuter.end()) body = bit->second;
+                float worst = 0.0f;
+                auto wit = out.metrics.worstGarmentPenByOuter.find(kv.first);
+                if (wit != out.metrics.worstGarmentPenByOuter.end()) worst = wit->second;
+                std::cout << kv.first << ":" << kv.second << "/body=" << body << "/worst=" << worst;
+            }
+        }
+        if (!out.metrics.garmentFaceResidualByOuter.empty()) {
+            std::cout << " faceResidualByOuter=";
+            bool firstOuterMetric = true;
+            for (const auto& kv : out.metrics.garmentFaceResidualByOuter) {
+                if (!firstOuterMetric) std::cout << ",";
+                firstOuterMetric = false;
+                int body = 0;
+                auto bit = out.metrics.garmentFaceBodyConflictByOuter.find(kv.first);
+                if (bit != out.metrics.garmentFaceBodyConflictByOuter.end()) body = bit->second;
+                float worst = 0.0f;
+                auto wit = out.metrics.worstGarmentFacePenByOuter.find(kv.first);
+                if (wit != out.metrics.worstGarmentFacePenByOuter.end()) worst = wit->second;
+                std::cout << kv.first << ":" << kv.second << "/body=" << body << "/worst=" << worst;
+            }
+        }
+        std::cout << "\n";
+    }
+
+    if (cap.hasExpected && out.passOk != cap.expectedPassOk) out.code = 3;
+    else if (cap.hasExpected && (out.metrics.maxExpectedDiffError > 1.0e-4f || out.metrics.expectedDiffMismatches > 0)) out.code = 4;
+    else if (out.metrics.nanCount > 0) out.code = 5;
+    return out;
+}
+
+static int ReplaySolverCapture(const fs::path& path, const ReplayOptions& opts = {}) {
+    return RunReplayCapture(path, opts).code;
+}
+
+static int ReplayCaptureDir(const fs::path& dir) {
+    std::vector<fs::path> files;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!ec && e.is_regular_file() && e.path().extension() == ".drcap")
+            files.push_back(e.path());
+    }
+    if (ec) {
+        std::cerr << "Error: failed to list capture dir: " << dir.string() << " (" << ec.message() << ")\n";
+        return 2;
+    }
+    std::unordered_map<std::string, int> dependencyCountByPath;
+    dependencyCountByPath.reserve(files.size());
+    for (const fs::path& f : files) {
+        SolverCapture cap;
+        if (ReadSolverCapture(f, cap))
+            dependencyCountByPath[f.string()] = (int)cap.outerColliders.size();
+    }
+    std::sort(files.begin(), files.end(), [&](const fs::path& a, const fs::path& b) {
+        int da = INT_MAX;
+        int db = INT_MAX;
+        auto ia = dependencyCountByPath.find(a.string());
+        auto ib = dependencyCountByPath.find(b.string());
+        if (ia != dependencyCountByPath.end()) da = ia->second;
+        if (ib != dependencyCountByPath.end()) db = ib->second;
+        if (da != db) return da < db;
+        return a.filename().string() < b.filename().string();
+    });
+
+    struct ReplayedShape {
+        int preset = DRAPE_PRESET_AUTO;
+        std::vector<Vec3> baseVerts;
+        std::vector<std::array<uint16_t, 3>> tris;
+        std::vector<Vec3> solvedVerts;
+    };
+    std::unordered_map<std::string, ReplayedShape> solvedByName;
+
+    fs::path seqDir = fs::path("tmp") / "harness_seq";
+    fs::create_directories(seqDir, ec);
+
+    int failures = 0;
+    for (const fs::path& f : files) {
+        SolverCapture cap;
+        if (!ReadSolverCapture(f, cap)) {
+            std::cerr << "Error: failed to read capture: " << f.string() << "\n";
+            ++failures;
+            continue;
+        }
+
+        int replacedOuters = 0;
+        std::unordered_set<std::string> existingOuterNames;
+        for (OuterCollider& oc : cap.outerColliders) {
+            existingOuterNames.insert(oc.name);
+            auto it = solvedByName.find(oc.name);
+            if (it == solvedByName.end()) continue;
+            const ReplayedShape& outer = it->second;
+            if (outer.solvedVerts.empty() || outer.tris.empty()) continue;
+            BodyBVH updatedCurrent;
+            BuildBodyBVH(outer.solvedVerts, outer.tris, updatedCurrent);
+            if (!updatedCurrent.valid) continue;
+            oc.current = std::move(updatedCurrent);
+            oc.preset = outer.preset;
+            ++replacedOuters;
+        }
+        int addedSemanticOuters = 0;
+        for (const auto& kv : solvedByName) {
+            if (kv.first == cap.shapeName || existingOuterNames.count(kv.first)) continue;
+            const ReplayedShape& outer = kv.second;
+            if (!PresetTieBreaksOuter(outer.preset, cap.preset)) continue;
+            if (outer.baseVerts.empty() || outer.solvedVerts.empty() || outer.tris.empty()) continue;
+            if (outer.baseVerts.size() != outer.solvedVerts.size()) continue;
+
+            OuterCollider oc;
+            oc.name = kv.first;
+            oc.preset = outer.preset;
+            BuildBodyBVH(outer.baseVerts, outer.tris, oc.base);
+            BuildBodyBVH(outer.solvedVerts, outer.tris, oc.current);
+            if (!oc.Base().valid || !oc.Current().valid) continue;
+            cap.outerColliders.push_back(std::move(oc));
+            existingOuterNames.insert(kv.first);
+            ++addedSemanticOuters;
+        }
+        if (replacedOuters > 0 || addedSemanticOuters > 0) {
+            std::cout << "REPLAY_DIR_OUTER_UPDATE"
+                      << " shape=" << cap.shapeName
+                      << " replaced=" << replacedOuters
+                      << " addedSemantic=" << addedSemanticOuters
+                      << "\n";
+        }
+
+        // In sequence mode, expected diffs belong to the original one-shot capture.
+        // We intentionally disable equality checks so the metrics reflect the new
+        // upstream outer solve instead of failing because the result changed.
+        cap.hasExpected = false;
+        cap.expectedDiff.clear();
+        cap.expectedSolvedVerts.clear();
+
+        fs::path replayPath = seqDir / f.filename();
+        if (!WriteSolverCapture(replayPath, cap)) {
+            std::cerr << "Error: failed to write sequence capture: " << replayPath.string() << "\n";
+            ++failures;
+            continue;
+        }
+
+        ReplayOutcome out = RunReplayCapture(replayPath, ReplayOptions{});
+        if (out.code != 0) ++failures;
+        if (out.passOk && !out.solvedVerts.empty()) {
+            ReplayedShape rs;
+            rs.preset = out.capture.preset;
+            rs.baseVerts = out.capture.baseVerts;
+            rs.tris = out.capture.tris;
+            rs.solvedVerts = out.solvedVerts;
+            solvedByName[out.capture.shapeName] = std::move(rs);
+        }
+    }
+    std::cout << "REPLAY_DIR dir=" << dir.string() << " files=" << files.size()
+              << " failures=" << failures << " sequence=1\n";
+    return failures == 0 ? 0 : 10;
+}
+static SolverCapture MakeSelfTestCapture() {
+    SolverCapture cap;
+    cap.shapeName = "SelfTestCloth";
+    cap.sliderName = "SelfTestSlider";
+    cap.projectKey = "self-test";
+    cap.preset = DRAPE_PRESET_FITTED_CLOTH;
+    cap.processingIntensity = 1;
+    cap.refMinZ = 0.0f;
+    cap.refMaxZ = 1.0f;
+    cap.baseVerts = {{-1.0f, -1.0f, 0.2f}, {1.0f, -1.0f, 0.2f}, {1.0f, 1.0f, 0.2f}, {-1.0f, 1.0f, 0.2f}};
+    cap.edges = {{0, 1, 2.0f}, {1, 2, 2.0f}, {2, 3, 2.0f}, {3, 0, 2.0f}, {0, 2, std::sqrt(8.0f)}};
+    cap.tris = {{0, 1, 2}, {0, 2, 3}};
+    for (uint16_t i = 0; i < 4; ++i) {
+        cap.presetMask[i] = 1.0f;
+        cap.rawDiff[i] = Vector3(0.0f, 0.0f, 0.1f);
+    }
+    cap.hasBodyBVH = true;
+    cap.bodyBVHVerts = {{-2.0f, -2.0f, 0.0f}, {2.0f, -2.0f, 0.0f}, {2.0f, 2.0f, 0.0f}, {-2.0f, 2.0f, 0.0f}};
+    cap.bodyBVHTris = {{0, 1, 2}, {0, 2, 3}};
+    cap.hasRefBodyBVH = true;
+    cap.refBodyBVHVerts = cap.bodyBVHVerts;
+    cap.refBodyBVHTris = cap.bodyBVHTris;
+
+    BodyBVH body;
+    BuildBodyBVH(cap.bodyBVHVerts, cap.bodyBVHTris, body);
+    TargetDataDiffs solved;
+    StaticSolveStats stats;
+    std::vector<Vec3> solvedVerts;
+    g_projectKey = cap.projectKey;
+    g_refMinZ = cap.refMinZ;
+    g_refMaxZ = cap.refMaxZ;
+    BuildBodyBVH(cap.refBodyBVHVerts, cap.refBodyBVHTris, g_refBodyBVH);
+    cap.expectedPassOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, cap.preset,
+                                              cap.baseVerts, nullptr, &cap.edges, &cap.tris,
+                                              nullptr, &body, cap.presetMask, cap.rawDiff,
+                                              nullptr, nullptr, &solvedVerts, solved, stats);
+    cap.hasExpected = true;
+    cap.expectedDiff = solved;
+    cap.expectedSolvedVerts = solvedVerts;
+    return cap;
+}
+
+static int WriteSelfTestCapture(const fs::path& path) {
+    SolverCapture cap = MakeSelfTestCapture();
+    if (!WriteSolverCapture(path, cap)) {
+        std::cerr << "Error: failed to write self-test capture: " << path.string() << "\n";
+        return 20;
+    }
+    std::cout << "WROTE_SELF_TEST_CAPTURE file=" << path.string() << "\n";
+    return 0;
+}
+
+static int RunSelfTest() {
+    fs::path path = fs::current_path() / "drape_harness_selftest.drcap";
+    int writeCode = WriteSelfTestCapture(path);
+    if (writeCode != 0)
+        return writeCode;
+    ReplayOptions opts;
+    int code = ReplaySolverCapture(path, opts);
+    std::error_code ec;
+    fs::remove(path, ec);
+    return code;
+}
+
+static std::string ArgValue(int argc, char** argv, const std::string& flag) {
+    for (int i = 1; i + 1 < argc; ++i)
+        if (argv[i] == flag) return argv[i + 1];
+    return {};
+}
+
+static bool HasArg(int argc, char** argv, const std::string& flag) {
+    for (int i = 1; i < argc; ++i)
+        if (argv[i] == flag) return true;
+    return false;
+}
+
+#if defined(DRAPE_HARNESS_BUILD)
+int main(int argc, char** argv) {
+    if (HasArg(argc, argv, "--self-test"))
+        return RunSelfTest();
+    std::string writeSelf = ArgValue(argc, argv, "--write-self-test");
+    if (!writeSelf.empty())
+        return WriteSelfTestCapture(fs::path(writeSelf));
+
+    std::string replay = ArgValue(argc, argv, "--replay");
+    std::string replayDir = ArgValue(argc, argv, "--replay-dir");
+    if (!replay.empty()) {
+        ReplayOptions opts;
+        std::string obj = ArgValue(argc, argv, "--result-obj");
+        std::string ply = ArgValue(argc, argv, "--debug-ply");
+        if (!obj.empty()) opts.resultObj = fs::path(obj);
+        if (!ply.empty()) opts.debugPly = fs::path(ply);
+        return ReplaySolverCapture(fs::path(replay), opts);
+    }
+    if (!replayDir.empty())
+        return ReplayCaptureDir(fs::path(replayDir));
+
+    std::cerr
+        << "Usage:\n"
+        << "  drape-harness --self-test\n"
+        << "  drape-harness --write-self-test <capture.drcap>\n"
+        << "  drape-harness --replay <capture.drcap> [--result-obj out.obj] [--debug-ply out.ply]\n"
+        << "  drape-harness --replay-dir <capture_dir>\n";
+    return 1;
+}
+#else
+
 static void Detour_GenResult(
     void* self,
     const std::string* shapeName,
@@ -4977,19 +8449,26 @@ static void Detour_GenResult(
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
     bool axisX, bool axisY, bool axisZ)
 {
-    // 1) Let the vanilla conform compute the slider's result diff.
+    const bool smartCandidate =
+        g_enabled.load(std::memory_order_acquire) && g_diffZeroVert &&
+        self && shapeName && sliderName && !solidMode;
+    if (smartCandidate && !SliderAllowedForSmartConform(*sliderName)) {
+        RecordSliderFilterSkip(*sliderName);
+        return;
+    }
+
+    // 1) Let the vanilla conform compute the selected slider's result diff.
     g_origGenResult(self, shapeName, sliderName, refDataName,
                     transformResults, maxResults, noSqueeze, solidMode,
                     axisX, axisY, axisZ);
 
-    if (!g_enabled.load(std::memory_order_acquire) || !g_diffZeroVert ||
-        !self || !shapeName || !sliderName || solidMode) {
+    if (!smartCandidate) {
         return;
     }
 
     // Skip genital / body-part meshes entirely: they are body geometry, not garments,
     // so cloth + layer logic is pointless and can deform them. Vanilla conform already
-    // ran above (g_origGenResult) — returning now leaves that correct result in place.
+    // ran above (g_origGenResult) â€” returning now leaves that correct result in place.
     {
         std::string ln = lower(*shapeName);
         static const char* kBodyPartTokens[] = {
@@ -4998,12 +8477,11 @@ static void Detour_GenResult(
         for (const char* tok : kBodyPartTokens) {
             if (NameHas(ln, tok)) {
                 if (g_missingShapesLogged.insert(*shapeName).second)
-                    HLog("detour: SKIP body-part mesh '%s' → vanilla conform", shapeName->c_str());
+                    HLog("detour: SKIP body-part mesh '%s' â†’ vanilla conform", shapeName->c_str());
                 return;
             }
         }
     }
-
     std::lock_guard<std::mutex> lk(g_cacheMx);
 
     // Rebuild cache if the open project changed.
@@ -5083,11 +8561,11 @@ static void Detour_GenResult(
             bodyBVH = &bvhIt->second;
     }
 
-    // ── Static cloth pass (main path) ──────────────────────────────────────
+    // â”€â”€ Static cloth pass (main path) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (!presetMask.empty() && g_getRawResultDiff && g_setResultDiff) {
         TargetDataDiffs rawDiff;
         if (HostGetRawResultDiff(self, shapeName, sliderName, rawDiff)) {
-            // rawDiff empty → this slider has no conform overlap with this shape:
+            // rawDiff empty â†’ this slider has no conform overlap with this shape:
             // ApplyStaticClothPass would return false immediately and the result
             // diff is also empty/trivial. Fall through to ZeroVertDiff (no-op).
             // This is expected behavior; no log entry needed per slider.
@@ -5098,32 +8576,68 @@ static void Detour_GenResult(
             // (strictly higher layer rank), kept SEPARATE so the nearest-point can never
             // jump between cloak/belt/pants (review #1). Each carries the outer mesh's
             // base + current surface and its preset (for adaptive clearance). The
-            // outermost mesh (highest rank) gets an empty list → never deformed.
+            // outermost mesh (highest rank) gets an empty list â†’ never deformed.
             int myLayerRank = 0;
             { auto it = g_shapeLayer.find(*shapeName); if (it != g_shapeLayer.end()) myLayerRank = it->second; }
             std::vector<OuterCollider> outerColliders;
+            std::vector<OuterCollider> innerColliders;
             {
                 auto slIt = g_solvedShapes.find(*sliderName);
-                for (const auto& kv : g_shapeVerts) {
-                    const std::string& other = kv.first;
+                std::vector<std::string> colliderNames;
+                colliderNames.reserve(g_shapeVerts.size());
+                for (const auto& kv : g_shapeVerts)
+                    colliderNames.push_back(kv.first);
+                std::sort(colliderNames.begin(), colliderNames.end());
+                for (const std::string& other : colliderNames) {
                     if (other == *shapeName) continue;
                     int otherPreset = PresetForShapeLocked(other);
                     if (NormalizePreset(otherPreset) == DRAPE_PRESET_AUTO)
                         continue;                                  // skip body meshes
                     int otherRank = 0;
                     { auto it = g_shapeLayer.find(other); if (it != g_shapeLayer.end()) otherRank = it->second; }
-                    if (otherRank <= myLayerRank) continue;        // only strictly OUTER meshes
+                    bool pairSaysOtherOuter = ShapeCoversInnerLocked(other, *shapeName);
+                    bool pairSaysThisOuter = ShapeCoversInnerLocked(*shapeName, other);
+                    bool otherIsOuter = false;
+                    if (pairSaysOtherOuter && !pairSaysThisOuter) {
+                        otherIsOuter = true;
+                    } else if (!pairSaysThisOuter) {
+                        bool outerByRank = otherRank > myLayerRank;
+                        bool outerByPresetTie =
+                            otherRank == myLayerRank &&
+                            PresetTieBreaksOuter(otherPreset, preset);
+                        otherIsOuter = outerByRank || outerByPresetTie;
+                    }
+
+                    bool otherIsInner = false;
+                    if (pairSaysThisOuter && !pairSaysOtherOuter) {
+                        otherIsInner = true;
+                    } else if (!pairSaysOtherOuter) {
+                        bool innerByRank = otherRank < myLayerRank;
+                        bool innerByPresetTie =
+                            otherRank == myLayerRank &&
+                            PresetTieBreaksOuter(preset, otherPreset);
+                        otherIsInner = innerByRank || innerByPresetTie;
+                    }
+                    if (!otherIsOuter && !otherIsInner) continue;
                     auto itIt = g_shapeTris.find(other);
                     if (itIt == g_shapeTris.end() || itIt->second.empty()) continue;
-                    const auto& obase = kv.second;
+                    auto otherVertsIt = g_shapeVerts.find(other);
+                    if (otherVertsIt == g_shapeVerts.end()) continue;
+                    const auto& obase = otherVertsIt->second;
                     if (obase.empty() || obase.size() > 0xFFFF) continue;
+                    auto baseBvhIt = g_shapeBaseBVH.find(other);
+                    if (baseBvhIt == g_shapeBaseBVH.end() || !baseBvhIt->second.valid) continue;
 
                     // current config: solved if cached this slider, else conformed.
                     const std::vector<Vec3>* cur = nullptr;
+                    const BodyBVH* curBvh = nullptr;
                     if (slIt != g_solvedShapes.end()) {
                         auto svIt = slIt->second.find(other);
-                        if (svIt != slIt->second.end() && !svIt->second.verts.empty())
+                        if (svIt != slIt->second.end() && !svIt->second.verts.empty()) {
                             cur = &svIt->second.verts;
+                            if (svIt->second.bvh.valid)
+                                curBvh = &svIt->second.bvh;
+                        }
                     }
                     std::vector<Vec3> conformed;
                     if (!cur) {
@@ -5141,10 +8655,17 @@ static void Detour_GenResult(
                     OuterCollider oc;
                     oc.name = other;
                     oc.preset = otherPreset;
-                    BuildBodyBVH(obase, itIt->second, oc.base);
-                    BuildBodyBVH(*cur,  itIt->second, oc.current);
-                    if (oc.base.valid && oc.current.valid)
-                        outerColliders.push_back(std::move(oc));
+                    oc.baseRef = &baseBvhIt->second;
+                    if (curBvh)
+                        oc.currentRef = curBvh;
+                    else
+                        BuildBodyBVH(*cur, itIt->second, oc.current);
+                    if (oc.Base().valid && oc.Current().valid) {
+                        if (otherIsOuter)
+                            outerColliders.push_back(oc);
+                        if (otherIsInner)
+                            innerColliders.push_back(std::move(oc));
+                    }
                 }
                 if (!outerColliders.empty()) {
                     std::string names;
@@ -5152,27 +8673,50 @@ static void Detour_GenResult(
                     HLog("detour: anti-clip-collider shape='%s' slider='%s' myRank=%d outers=[%s]",
                          shapeName->c_str(), sliderName->c_str(), myLayerRank, names.c_str());
                 }
+                if (!innerColliders.empty()) {
+                    std::string names;
+                    for (auto& ic : innerColliders) { if (!names.empty()) names += ","; names += ic.name; }
+                    HLog("detour: inner-clearance-collider shape='%s' slider='%s' myRank=%d inners=[%s]",
+                         shapeName->c_str(), sliderName->c_str(), myLayerRank, names.c_str());
+                }
             }
 
             std::vector<Vec3> solvedVerts;
+            const bool captureThis = EnvFlagEnabled("DRAPE_CAPTURE");
+            SolverCapture solverCapture;
+            if (captureThis) {
+                solverCapture = MakeSolverCapture(*shapeName, *sliderName, preset,
+                                                  vertsIt->second, profiles, edges, tris,
+                                                  bodyShell, bodyBVH,
+                                                  presetMask, rawDiff,
+                                                  outerColliders.empty() ? nullptr : &outerColliders,
+                                                  innerColliders.empty() ? nullptr : &innerColliders);
+            }
             bool passOk = ApplyStaticClothPass(*shapeName, *sliderName, preset,
                                                vertsIt->second, profiles, edges, tris,
                                                bodyShell, bodyBVH,
                                                presetMask, rawDiff,
                                                outerColliders.empty() ? nullptr : &outerColliders,
+                                               innerColliders.empty() ? nullptr : &innerColliders,
                                                &solvedVerts,
                                                solvedDiff, stats);
-            // Cache this mesh's solved positions per (slider, shape) so other meshes
-            // solved later this slider use its actual draped surface as their collider.
-            if (passOk && !solvedVerts.empty()) {
-                int myLayer = 0;
-                auto mlit = g_shapeLayer.find(*shapeName);
-                if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
-                SolvedMesh sm; sm.verts = std::move(solvedVerts); sm.layer = myLayer;
-                g_solvedShapes[*sliderName][*shapeName] = std::move(sm);
-            }
+            if (captureThis)
+                MaybeWriteSolverCapture(std::move(solverCapture), passOk, solvedDiff, solvedVerts);
             if (passOk) {
                 if (HostSetResultDiff(self, shapeName, sliderName, solvedDiff)) {
+                    // Cache this mesh only after the host accepted the diff, so later
+                    // meshes never collide against a solution that failed to publish.
+                    if (!solvedVerts.empty()) {
+                        int myLayer = 0;
+                        auto mlit = g_shapeLayer.find(*shapeName);
+                        if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
+                        SolvedMesh sm;
+                        sm.verts = std::move(solvedVerts);
+                        sm.layer = myLayer;
+                        if (tris && !tris->empty())
+                            BuildBodyBVH(sm.verts, *tris, sm.bvh);
+                        g_solvedShapes[*sliderName][*shapeName] = std::move(sm);
+                    }
                     // Log EVERY slider (no deduplication) so we can verify the write path.
                     size_t edgeCount = edges ? edges->size() : 0;
                     HLog("detour: STATIC_CLOTH shape='%s' slider='%s' preset='%s' phys=%d "
@@ -5192,9 +8736,9 @@ static void Detour_GenResult(
                          stats.influenceZeroVerts, edgeCount);
                     return;
                 }
-                // HostSetResultDiff failed — fall through to ZeroVertDiff
+                // HostSetResultDiff failed â€” fall through to ZeroVertDiff
                 HLog("detour: SKIPPED shape='%s' slider='%s' preset='%s' "
-                     "reason='HostSetResultDiff failed' → FALLBACK_SCALE",
+                     "reason='HostSetResultDiff failed' â†’ FALLBACK_SCALE",
                      shapeName->c_str(), sliderName->c_str(), PresetName(preset));
             } else if (!rawDiff.empty()) {
                 // rawDiff was non-empty but pass still rejected (preset disabled, etc.)
@@ -5203,7 +8747,7 @@ static void Detour_GenResult(
                         ? "preset disables static pass (skin-tight)"
                         : "solver returned false";
                     HLog("detour: SKIPPED shape='%s' slider='%s' preset='%s' "
-                         "reason='%s' → FALLBACK_SCALE",
+                         "reason='%s' â†’ FALLBACK_SCALE",
                          shapeName->c_str(), sliderName->c_str(), PresetName(preset), reason);
                 }
             }
@@ -5211,20 +8755,20 @@ static void Detour_GenResult(
             // HostGetRawResultDiff failed (ABI issue or missing RVA)
             if (g_fallbackShapesLogged.insert(*shapeName).second)
                 HLog("detour: SKIPPED static cloth shape='%s' "
-                     "reason='HostGetRawResultDiff failed' → FALLBACK_SCALE",
+                     "reason='HostGetRawResultDiff failed' â†’ FALLBACK_SCALE",
                      shapeName->c_str());
         }
     } else if (!presetMask.empty()) {
         // Host methods not wired (offsets not confirmed for this exe build)
         if (g_fallbackShapesLogged.insert(*shapeName).second)
             HLog("detour: SKIPPED static cloth shape='%s' "
-                 "reason='%s' → FALLBACK_SCALE",
+                 "reason='%s' â†’ FALLBACK_SCALE",
                  shapeName->c_str(),
                  !g_getRawResultDiff ? "GetRawResultDiff RVA not wired"
                  : "SetResultDiff RVA not wired");
     }
 
-    // ── Fallback: ZeroVertDiff mask scale ──────────────────────────────────
+    // â”€â”€ Fallback: ZeroVertDiff mask scale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Scales each vanilla conform diff by the preset mask weight; drops near-zero
     // entries. This is the safety net, not the feature.
     if (!presetMask.empty()) {
@@ -5241,7 +8785,7 @@ static void Detour_GenResult(
     }
 }
 
-// ── Public API (called by version.dll after injection) ─────────────────
+// â”€â”€ Public API (called by version.dll after injection) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 extern "C" __declspec(dllexport)
 int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
@@ -5255,7 +8799,7 @@ int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
     g_opts.looseDistance = looseDistance;
 
     if (!drape_off::Configured()) {
-        HLog("install: offsets not configured for this build — hook disabled");
+        HLog("install: offsets not configured for this build â€” hook disabled");
         return -2;
     }
 
@@ -5306,6 +8850,8 @@ extern "C" __declspec(dllexport) void DrapeSetHookEnabled(int enabled) {
     }
 
     g_enabled.store(enabled != 0, std::memory_order_release);
+    if (!enabled)
+        LogSliderFilterSummary();
 }
 
 extern "C" __declspec(dllexport)
@@ -5340,10 +8886,40 @@ int DrapeGetCurrentShapes(char* outUtf8, int outSize) {
 }
 
 extern "C" __declspec(dllexport)
+int DrapeGetCurrentSliders(char* outUtf8, int outSize) {
+    std::lock_guard<std::mutex> lk(g_cacheMx);
+
+    std::string proj = ProjFromTitle();
+    std::vector<std::string> names;
+    if (!proj.empty()) {
+        ResolvedProject resolved = ResolveProject(proj);
+        if (!resolved.ospPath.empty())
+            names = ParseSliderNamesFromOsp(resolved.ospPath, proj);
+    }
+
+    std::string payload;
+    for (const auto& name : names) {
+        payload += name;
+        payload += '\n';
+    }
+
+    if (outUtf8 && outSize > 0) {
+        int n = std::min<int>(outSize - 1, (int)payload.size());
+        if (n > 0)
+            memcpy(outUtf8, payload.data(), (size_t)n);
+        outUtf8[n] = '\0';
+    }
+
+    HLog("preset-ui: listed %zu slider(s) for project '%s'", names.size(), proj.c_str());
+    return (int)names.size();
+}
+
+extern "C" __declspec(dllexport)
 int DrapeClearShapePresets() {
     std::lock_guard<std::mutex> lk(g_cacheMx);
     g_shapePresets.clear();
     g_appliedShapesLogged.clear();
+    g_shapePresetMaskCache.clear();
     // Clear the per-slider solved-mesh cache too: it holds the PREVIOUS Conform run's
     // results, which would otherwise be used as stale colliders on the next run.
     g_solvedShapes.clear();
@@ -5359,9 +8935,26 @@ int DrapeSetShapePreset(const char* shapeNameUtf8, int preset) {
     int normalized = NormalizePreset(preset);
     std::lock_guard<std::mutex> lk(g_cacheMx);
     g_shapePresets[shapeNameUtf8] = normalized;
+    g_shapePresetMaskCache.erase(shapeNameUtf8);
     g_appliedShapesLogged.clear();
     HLog("preset-ui: shape '%s' preset='%s'", shapeNameUtf8, PresetName(normalized));
     return 0;
+}
+
+extern "C" __declspec(dllexport)
+int DrapeSetSliderFilter(const char* filterUtf8) {
+    std::vector<std::string> filter = SplitSliderFilter(filterUtf8);
+    size_t selected = filter.size();
+    {
+        std::lock_guard<std::mutex> lk(g_sliderFilterMx);
+        g_sliderFilter = std::move(filter);
+        g_sliderFilterSkipLogged.clear();
+        g_sliderFilterSkippedCalls = 0;
+        g_sliderFilterSkipExamples.clear();
+    }
+
+    HLog("preset-ui: slider filter selected=%zu", selected);
+    return (int)selected;
 }
 
 extern "C" __declspec(dllexport)
@@ -5371,3 +8964,4 @@ void DrapeSetProcessingIntensity(int level) {
     static const char* kLabels[] = {"Low", "Medium", "High"};
     HLog("preset-ui: processing intensity set to %s (%d)", kLabels[clamped], clamped);
 }
+#endif // !DRAPE_HARNESS_BUILD
