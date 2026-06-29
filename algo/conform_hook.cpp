@@ -3793,6 +3793,40 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     static const std::vector<EdgeConstraint> kNoEdges;
     const std::vector<EdgeConstraint>& useEdges = edges ? *edges : kNoEdges;
 
+    // Pre-clamp vanilla Conform All edge-stretch outliers BEFORE the solve.
+    // On heavy morphs, vanilla occasionally mis-projects a lateral seam vertex,
+    // creating a 4-5x stretched edge that reads as a visible tear. Clamping
+    // supportVerts here lets the physics solve start from a sane position; body
+    // collision then pushes the vert back to the actual surface. supportRestLen
+    // is computed later from the clamped supportVerts, so the solve's stretch
+    // constraints also reflect the corrected rest lengths.
+    // Threshold 2.8x: above the highest legitimate vanilla expansion on any clean
+    // mesh in harness testing (Cloak RM_Heavy ~2.24x), so clean outfits are unaffected.
+    // 50/50 Gauss-Seidel: distribute correction to both endpoints each pass so
+    // fixing one edge doesn't over-stretch its neighbours.
+    if (params.verletCloth && !useEdges.empty()) {
+        const float kVanillaMaxStretch = 2.8f;
+        for (int gsPass = 0; gsPass < 8; ++gsPass) {
+            bool anyFixed = false;
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n || e.restLength <= 1e-6f) continue;
+                Vec3 dir = Sub(supportVerts[e.a], supportVerts[e.b]);
+                float len = Len(dir);
+                float maxLen = e.restLength * kVanillaMaxStretch;
+                if (len <= maxLen || len <= 1e-6f) continue;
+                anyFixed = true;
+                Vec3 normDir = Scale(dir, 1.0f / len);
+                float excess = len - maxLen;
+                Vec3 half = Scale(normDir, excess * 0.5f);
+                supportVerts[e.a] = Sub(supportVerts[e.a], half);
+                supportVerts[e.b] = Add(supportVerts[e.b], half);
+                finalVerts[e.a]   = supportVerts[e.a];
+                finalVerts[e.b]   = supportVerts[e.b];
+            }
+            if (!anyFixed) break;
+        }
+    }
+
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // UNIFIED VERTEX CLASSIFICATION
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
