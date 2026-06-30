@@ -7882,6 +7882,156 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         return totalMoved;
     };
 
+    // Self-collision tuck: the dress is a thin double shell. Under heavy-body
+    // inflation the vanilla conform pushes some INNER-shell verts out through the
+    // OUTER shell (visible dark inner faces, mostly in the skirt). The solver has
+    // no self-collision, so this finishing pass pulls each EXPOSED inner-facing
+    // vertex back inward (toward the body) until outer-shell cloth covers it again.
+    // Boundary/seam verts are excluded so it cannot reopen welded seams (the
+    // mistake the de-spike made), and a support-stretch guard prevents new tears.
+    // Detection mirrors scratchpad/pokethrough.py (thresholds x10 for nif units).
+    auto applyFinalSelfCollisionTuck = [&](const char* stageLabel) -> int {
+        if (!tris || tris->empty() || !bodyBVH || !bodyBVH->valid) return 0;
+        if (!(isLoosePreset || fittedLayerTuck)) return 0;
+        const float kFacingThresh = -0.25f;  // inner-facing if vertNormal . bodyOut < this
+        const float kCoveredMin   = 0.30f;   // nif: min outward distance to count as "outside me"
+        const float kPerpRadius   = 2.5f;    // nif: perpendicular radius of the coverage cone
+        const float kSearchR      = 4.0f;    // nif: grid cell / neighbour search radius
+        const float kStepSC       = 0.50f;   // nif: inward step per round
+        const float kBodyFloorSC  = 0.10f;
+        const int   kItersSC      = 8;
+        const float kSCStretchCap = 1.12f;
+
+        // Boundary verts = on an edge used by only one triangle. Exclude them.
+        std::unordered_map<uint32_t, int> edgeCount;
+        auto ekey = [](uint16_t a, uint16_t b) -> uint32_t {
+            if (a > b) { uint16_t t = a; a = b; b = t; }
+            return ((uint32_t)a << 16) | b;
+        };
+        for (const auto& t : *tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            edgeCount[ekey(t[0], t[1])]++;
+            edgeCount[ekey(t[1], t[2])]++;
+            edgeCount[ekey(t[2], t[0])]++;
+        }
+        std::vector<bool> boundary(n, false);
+        for (const auto& t : *tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const uint16_t es[3][2] = {{t[0], t[1]}, {t[1], t[2]}, {t[2], t[0]}};
+            for (const auto& e : es)
+                if (edgeCount[ekey(e[0], e[1])] == 1) {
+                    boundary[e[0]] = true;
+                    boundary[e[1]] = true;
+                }
+        }
+
+        // Per-vertex incident support edges (stretch guard).
+        std::vector<std::vector<std::pair<uint16_t, float>>> vEdges(n);
+        for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+            const auto& e = useEdges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+            if (rest < 1e-4f) continue;
+            vEdges[e.a].emplace_back((uint16_t)e.b, rest);
+            vEdges[e.b].emplace_back((uint16_t)e.a, rest);
+        }
+
+        const float inv = 1.0f / kSearchR;
+        auto cellKey = [](int x, int y, int z) -> int64_t {
+            return ((int64_t)(x + 4096) << 40) | ((int64_t)(y + 4096) << 20) |
+                   (int64_t)(z + 4096);
+        };
+        int totalMoved = 0;
+        for (int it = 0; it < kItersSC; ++it) {
+            std::vector<Vec3> vn(n, Vec3{0.0f, 0.0f, 0.0f});
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                for (int k = 0; k < 3; ++k) vn[t[k]] = Add(vn[t[k]], fn);
+            }
+            std::unordered_map<int64_t, std::vector<int>> grid;
+            grid.reserve(n * 2);
+            for (size_t i = 0; i < n; ++i) {
+                int gx = (int)std::floor(finalVerts[i].x * inv);
+                int gy = (int)std::floor(finalVerts[i].y * inv);
+                int gz = (int)std::floor(finalVerts[i].z * inv);
+                grid[cellKey(gx, gy, gz)].push_back((int)i);
+            }
+            // Precompute per-vertex body-outward direction and facing sign so the
+            // coverage test can require an OUTER-facing coverer (two inner verts
+            // poking out must not "cover" each other).
+            std::vector<Vec3> bodyOutAll(n, Vec3{0.0f, 0.0f, 1.0f});
+            std::vector<float> bodyGapAll(n, 0.0f);
+            std::vector<float> facingAll(n, 0.0f);
+            std::vector<uint8_t> okAll(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                float nl = std::sqrt(Dot(vn[i], vn[i]));
+                if (nl < 1e-6f) continue;
+                Vec3 vnorm = Scale(vn[i], 1.0f / nl);
+                Vec3 bo{0.0f, 0.0f, 1.0f};
+                float bg = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], bg, &bo)) continue;
+                bodyOutAll[i] = bo;
+                bodyGapAll[i] = bg;
+                facingAll[i] = Dot(vnorm, bo);
+                okAll[i] = 1;
+            }
+            std::vector<Vec3> newPos(finalVerts.begin(), finalVerts.begin() + n);
+            int moved = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (boundary[i] || !okAll[i]) continue;
+                Vec3 bodyOut = bodyOutAll[i];
+                float bodyGap = bodyGapAll[i];
+                if (facingAll[i] > kFacingThresh) continue;  // only inner-facing
+                if (bodyGap <= kBodyFloorSC) continue;
+                // Coverage test: is any OUTER-facing cloth vertex clearly outside me?
+                bool covered = false;
+                int gx = (int)std::floor(finalVerts[i].x * inv);
+                int gy = (int)std::floor(finalVerts[i].y * inv);
+                int gz = (int)std::floor(finalVerts[i].z * inv);
+                for (int dx = -1; dx <= 1 && !covered; ++dx)
+                for (int dy = -1; dy <= 1 && !covered; ++dy)
+                for (int dz = -1; dz <= 1 && !covered; ++dz) {
+                    auto itg = grid.find(cellKey(gx + dx, gy + dy, gz + dz));
+                    if (itg == grid.end()) continue;
+                    for (int j : itg->second) {
+                        if (j == (int)i || !okAll[j]) continue;
+                        if (facingAll[j] < 0.0f) continue;  // coverer must be outer-facing
+                        Vec3 rel = Sub(finalVerts[j], finalVerts[i]);
+                        float along = Dot(rel, bodyOut);
+                        if (along <= kCoveredMin) continue;
+                        float perp = std::sqrt(std::max(Dot(rel, rel) - along * along, 0.0f));
+                        if (perp < kPerpRadius) { covered = true; break; }
+                    }
+                }
+                if (covered) continue;
+                // Exposed inner-shell vertex: push inward (toward body), bounded.
+                float step = std::min(kStepSC, bodyGap - kBodyFloorSC);
+                if (step <= 0.0f) continue;
+                Vec3 cand = Sub(finalVerts[i], Scale(bodyOut, step));
+                bool overStretch = false;
+                for (const auto& pe : vEdges[i]) {
+                    Vec3 d = Sub(cand, finalVerts[pe.first]);
+                    if (Dot(d, d) > (kSCStretchCap * pe.second) * (kSCStretchCap * pe.second)) {
+                        overStretch = true;
+                        break;
+                    }
+                }
+                if (overStretch) continue;
+                newPos[i] = cand;
+                ++moved;
+            }
+            for (size_t i = 0; i < n; ++i) finalVerts[i] = newPos[i];
+            totalMoved += moved;
+            if (moved == 0) break;
+        }
+        if (totalMoved > 0)
+            HLog("detour: final-selfcollision-tuck shape='%s' stage='%s' moved=%d",
+                 shapeName.c_str(), stageLabel ? stageLabel : "", totalMoved);
+        return totalMoved;
+    };
+
     applyOuterAccessoryInnerClearance("pre-cap");
     applyFinalLayerTuck(0, false, "pre-cap");
     // Do not close visual gaps by pulling arbitrary boundary vertices together here.
@@ -7927,11 +8077,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
     logProxSeamState("after-final-prox-cap");
 
-    // NOTE: applyFinalDeSpike (defined above) is DISABLED. Running it last reopened the
-    // waist/arm seam welds (it moved seam-boundary verts after the seam passes). The
-    // protrusion metric did not catch the seam regression. Re-introduce only with a
-    // boundary/seam-vertex exclusion. Kept defined for that follow-up.
+    // NOTE: applyFinalDeSpike (defined above) is DISABLED. It chased nif-scale
+    // protrusion bumps (a scale-relative red herring) and, running after the seam
+    // welds, reopened the waist/arm seams. Kept defined for reference only.
     (void)applyFinalDeSpike;
+
+    // Self-collision tuck runs LAST: it pulls exposed inner-shell verts back under
+    // the outer shell. It excludes boundary/seam verts, so it does not disturb the
+    // seam welds above (unlike the de-spike).
+    applyFinalSelfCollisionTuck("final");
 
     worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
