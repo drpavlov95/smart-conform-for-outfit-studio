@@ -5847,6 +5847,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         }
     }
 
+
     // â”€â”€ Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes â”€â”€â”€â”€
     // MUST run AFTER seam-close (which restores cross-island offsets and would undo it).
     // This is the LAST geometry pass â€” its corrections are the final word.
@@ -7603,6 +7604,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
         const BodyBVH* baseBodyBVH = g_refBodyBVH.valid ? &g_refBodyBVH : bodyBVH;
         const float kOverlap2 = 4.25f * 4.25f;
+        const float kFaceOverlap2 = 5.5f * 5.5f;
         const float kBaseUnderSlack = 0.10f;
         const float kBodyFloor = tubularLayerTuck ? 0.06f : (fittedLayerTuck ? 0.08f : 0.06f);
         const float kMoveFloor = kBodyFloor;
@@ -7611,7 +7613,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float kMaxStep = tubularLayerTuck ? 0.25f : (fittedLayerTuck ? 0.16f : (intermediateLooseVolume ? 0.24f : (looseLayerTuck ? 0.22f : 0.18f)));
         const float kFaceMoveStrength = tubularLayerTuck ? 0.82f : (fittedLayerTuck ? 0.54f : 0.50f);
         const float kFaceMaxStep = tubularLayerTuck ? 0.22f : (fittedLayerTuck ? 0.12f : 0.10f);
-        const int defaultRounds = tubularLayerTuck ? 20 : (fittedLayerTuck ? 6 : (intermediateLooseVolume ? 8 : (looseLayerTuck ? 6 : 4)));
+        const int defaultRounds = tubularLayerTuck ? 20 : (fittedLayerTuck ? 6 : (intermediateLooseVolume ? 8 : (looseLayerTuck ? 10 : 4)));
         const int kRounds = roundOverride > 0 ? roundOverride : defaultRounds;
 
         auto layerMarginFor = [&](int outerPreset) -> float {
@@ -7646,7 +7648,9 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             for (size_t i = 0; i < n; ++i) {
                 if (isRigidVertex3(i)) continue;
                 float myBaseGap = 0.0f;
-                if (!signedGap2(*baseBodyBVH, baseVerts[i], myBaseGap, nullptr)) continue;
+                if (!looseLayerTuck) {
+                    if (!signedGap2(*baseBodyBVH, baseVerts[i], myBaseGap, nullptr)) continue;
+                }
                 float myGap = 0.0f;
                 Vec3 myNrm{0.0f, 0.0f, 1.0f};
                 if (!signedGap2(*bodyBVH, finalVerts[i], myGap, &myNrm)) continue;
@@ -7660,16 +7664,20 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     float bu = 0.0f, bv = 0.0f, bw = 0.0f;
                     if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
                                             &baseTri, &bu, &bv, &bw)) continue;
-                    if (bd2 > kOverlap2) continue;
+                    if (bd2 > (looseLayerTuck ? kFaceOverlap2 : kOverlap2)) continue;
                     if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
-
-                    float outerBaseGap = 0.0f;
-                    if (!signedGap2(*baseBodyBVH, bcp, outerBaseGap, nullptr)) continue;
-                    if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
 
                     Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                     float outerGap = 0.0f;
                     if (!signedGap2(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                    if (looseLayerTuck) {
+                        // current-morph guard: skip if outer face is significantly below us
+                        if (outerGap + 0.15f <= myGap) continue;
+                    } else {
+                        float outerBaseGap = 0.0f;
+                        if (!signedGap2(*baseBodyBVH, bcp, outerBaseGap, nullptr)) continue;
+                        if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
+                    }
                     float allowed = outerGap - layerMarginFor(oc.preset);
                     if (allowed < kBodyFloor) {
                         if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
@@ -7693,8 +7701,6 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
                     for (const TriangleSample& s : kTriangleSamples) {
                         Vec3 baseP = SampleTrianglePoint(baseVerts, t, s);
-                        float myBaseGap = 0.0f;
-                        if (!signedGap2(*baseBodyBVH, baseP, myBaseGap, nullptr)) continue;
                         Vec3 curP = SampleTrianglePoint(finalVerts, t, s);
                         float myGap = 0.0f;
                         Vec3 myNrm{0.0f, 0.0f, 1.0f};
@@ -7709,16 +7715,15 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                             float bu = 0.0f, bv = 0.0f, bw = 0.0f;
                             if (!BVHClosestPointEx(oc.Base(), baseP, bcp, bnrm, bd2,
                                                     &baseTri, &bu, &bv, &bw)) continue;
-                            if (bd2 > kOverlap2) continue;
+                            if (bd2 > kFaceOverlap2) continue;
                             if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
-
-                            float outerBaseGap = 0.0f;
-                            if (!signedGap2(*baseBodyBVH, bcp, outerBaseGap, nullptr)) continue;
-                            if (myBaseGap >= outerBaseGap + kBaseUnderSlack) continue;
 
                             Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
                             float outerGap = 0.0f;
                             if (!signedGap2(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                            // Use current-morph gap instead of base-gap guard: skip only when
+                            // the outer face is significantly below us (dress naturally above it).
+                            if (outerGap + 0.15f <= myGap) continue;
                             float allowed = outerGap - layerMarginFor(oc.preset);
                             if (allowed < kBodyFloor) {
                                 if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
@@ -7770,6 +7775,113 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         return totalTucked;
     };
 
+    // De-spike pass: relax vertices that protrude far beyond their 1-ring neighbours
+    // (vanilla-conform tent-poles) inward along the vertex normal. Capped at kSpikeCap
+    // so genuine curvature is preserved; clamped to the body floor so no vertex is
+    // pushed into the body. Only runs for draped/fitted cloth where these spikes occur.
+    auto applyFinalDeSpike = [&](const char* stageLabel) -> int {
+        if (!tris || tris->empty() || !bodyBVH || !bodyBVH->valid) return 0;
+        if (!(isLoosePreset || fittedLayerTuck)) return 0;
+        const float kSpikeCap = 0.8f;
+        const float kRelax = 0.5f;
+        const int kIters = 12;
+        const float kBodyFloorDS = 0.06f;
+        const float kMaxStepDS = 0.40f;
+        const float kDeSpikeStretchCap = 1.12f;  // matches the loose support cap
+
+        std::vector<std::vector<uint16_t>> adj(n);
+        {
+            std::vector<std::unordered_set<uint16_t>> tmp(n);
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b)
+                        if (a != b) tmp[t[a]].insert(t[b]);
+            }
+            for (size_t i = 0; i < n; ++i)
+                adj[i].assign(tmp[i].begin(), tmp[i].end());
+        }
+        // Per-vertex incident support edges with their vanilla rest lengths, so a
+        // de-spike move can be rejected if it would over-stretch any support edge.
+        std::vector<std::vector<std::pair<uint16_t, float>>> vEdges(n);
+        for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+            const auto& e = useEdges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+            if (rest < 1e-4f) continue;
+            vEdges[e.a].emplace_back((uint16_t)e.b, rest);
+            vEdges[e.b].emplace_back((uint16_t)e.a, rest);
+        }
+
+        int totalMoved = 0;
+        for (int it = 0; it < kIters; ++it) {
+            std::vector<Vec3> vn(n, Vec3{0.0f, 0.0f, 0.0f});
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                for (int k = 0; k < 3; ++k) vn[t[k]] = Add(vn[t[k]], fn);
+            }
+            std::vector<Vec3> newPos(finalVerts.begin(), finalVerts.begin() + n);
+            int moved = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (adj[i].empty()) continue;
+                Vec3 cen{0.0f, 0.0f, 0.0f};
+                for (uint16_t w : adj[i]) cen = Add(cen, finalVerts[w]);
+                float k = (float)adj[i].size();
+                cen = Scale(cen, 1.0f / k);
+                float nl = std::sqrt(Dot(vn[i], vn[i]));
+                if (nl < 1e-6f) continue;
+                Vec3 nrm = Scale(vn[i], 1.0f / nl);
+                float o = Dot(Sub(finalVerts[i], cen), nrm);   // protrusion along normal
+                if (o <= kSpikeCap) continue;
+                // Move only the NORMAL component of the protrusion inward (flatten the
+                // spike height) without the large in-plane displacement that a full
+                // Laplacian toward the centroid would add and which distorts triangles.
+                float excess = std::min((o - kSpikeCap) * kRelax, kMaxStepDS);
+                Vec3 cand = Sub(finalVerts[i], Scale(nrm, excess));
+                // Body floor clamp: never push a vertex into (or under) the body. If the
+                // move would cross the floor, shorten it to land at the floor instead of
+                // skipping the spike entirely.
+                float candGap = 0.0f;
+                if (BVHSignedGap(*bodyBVH, cand, candGap, nullptr) && candGap < kBodyFloorDS) {
+                    float curGap = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, finalVerts[i], curGap, nullptr) ||
+                        curGap <= kBodyFloorDS)
+                        continue;
+                    float denom = curGap - candGap;
+                    if (denom <= 1e-4f) continue;
+                    float scale = (curGap - kBodyFloorDS) / denom;
+                    if (scale <= 0.0f) continue;
+                    cand = Sub(finalVerts[i], Scale(nrm, excess * scale));
+                }
+                // Support-stretch guard: reject the move if it would push any incident
+                // support edge past the cap. This stops the spike-flattening from
+                // creating a new lateral tear (the along-normal move has a small lateral
+                // component when the vertex normal is skewed).
+                bool overStretch = false;
+                for (const auto& pe : vEdges[i]) {
+                    Vec3 d = Sub(cand, finalVerts[pe.first]);
+                    if (Dot(d, d) > (kDeSpikeStretchCap * pe.second) *
+                                    (kDeSpikeStretchCap * pe.second)) {
+                        overStretch = true;
+                        break;
+                    }
+                }
+                if (overStretch) continue;
+                newPos[i] = cand;
+                ++moved;
+            }
+            for (size_t i = 0; i < n; ++i) finalVerts[i] = newPos[i];
+            totalMoved += moved;
+            if (moved == 0) break;
+        }
+        if (totalMoved > 0)
+            HLog("detour: final-despike shape='%s' stage='%s' moved=%d",
+                 shapeName.c_str(), stageLabel ? stageLabel : "", totalMoved);
+        return totalMoved;
+    };
+
     applyOuterAccessoryInnerClearance("pre-cap");
     applyFinalLayerTuck(0, false, "pre-cap");
     // Do not close visual gaps by pulling arbitrary boundary vertices together here.
@@ -7814,6 +7926,13 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         applyFinalSupportCap(8, "post-exact-stretch-cap");
     applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
     logProxSeamState("after-final-prox-cap");
+
+    // NOTE: applyFinalDeSpike (defined above) is DISABLED. Running it last reopened the
+    // waist/arm seam welds (it moved seam-boundary verts after the seam passes). The
+    // protrusion metric did not catch the seam regression. Re-introduce only with a
+    // boundary/seam-vertex exclusion. Kept defined for that follow-up.
+    (void)applyFinalDeSpike;
+
     worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
     // Write only non-zero diffs (matches BodySlide convention).
@@ -8049,6 +8168,7 @@ static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
 struct ReplayOptions {
     fs::path resultObj;
     fs::path debugPly;
+    fs::path inputObj;
     bool quiet = false;
 };
 
@@ -8169,6 +8289,14 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
 
     out.metrics = ComputeHarnessMetrics(cap, out.solvedDiff, out.solvedVerts);
 
+    if (!opts.inputObj.empty()) {
+        std::vector<Vec3> inputVerts = SolvedVertsFromDiff(cap.baseVerts, cap.rawDiff);
+        if (!WriteResultObj(opts.inputObj, inputVerts, cap.tris)) {
+            std::cerr << "Error: failed to write input OBJ: " << opts.inputObj.string() << "\n";
+            out.code = 6;
+            return out;
+        }
+    }
     if (!opts.resultObj.empty() && !WriteResultObj(opts.resultObj, out.solvedVerts, cap.tris)) {
         std::cerr << "Error: failed to write OBJ: " << opts.resultObj.string() << "\n";
         out.code = 6;
@@ -8458,8 +8586,10 @@ int main(int argc, char** argv) {
         ReplayOptions opts;
         std::string obj = ArgValue(argc, argv, "--result-obj");
         std::string ply = ArgValue(argc, argv, "--debug-ply");
+        std::string iobj = ArgValue(argc, argv, "--input-obj");
         if (!obj.empty()) opts.resultObj = fs::path(obj);
         if (!ply.empty()) opts.debugPly = fs::path(ply);
+        if (!iobj.empty()) opts.inputObj = fs::path(iobj);
         return ReplaySolverCapture(fs::path(replay), opts);
     }
     if (!replayDir.empty())
