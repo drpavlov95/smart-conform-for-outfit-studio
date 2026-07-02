@@ -619,3 +619,73 @@ seat/drape/de-wrinkle nudge tower is retired (flag-gated). Golden updated.
 `belt M1 ARAP: support=... handles=... comps=... bodyFloored=... authoredOffsetMean=...`
 (HLog, every belt solve) - the single most useful line for M2. Temporary M1DIAG
 collider-dump removed.
+
+## Part 12 - M2 COMPLETION LOG (2026-07-02, Opus session)
+
+**Status: M2 DONE (belt rest-on layer graph). Deployed. Live-validation pending user.**
+M2 guarantees the belt de-floats onto OUR solved dress regardless of OutfitStudio's
+solve order, and adds honest rest-on metrics. The dress<->belt fixpoint (M2.2) was
+found to be already closed by the existing solved-mesh cache in the common order and
+was deliberately NOT given a compensating re-solve pass.
+
+### 12.1 What was built
+- **`kLayerSolveOrder` (ON) - live solve-order guarantee (M2.1).** New helper
+  `EnsureSupportSolvedLocked(self, supportName, slider, bodyShell, bodyBVH)` (DLL-only,
+  before `Detour_GenResult`). In the belt's inner-collider builder, when the belt is
+  solved BEFORE its LOOSE_DRAPED support (the dress) in OS's call order - so the dress
+  is not yet in `g_solvedShapes` - the support is solved ON DEMAND now, once, cached in
+  `g_solvedShapes[slider]`, and used as the belt's inner collider. The belt therefore
+  rests on OUR de-floated dress, never the vanilla-conformed one (which still carries the
+  magnetism M1 removes). Scoped to the belt->dress relationship (the M1 pilot).
+  - **Depth cap:** the on-demand support solve passes NO outer/inner colliders (nullptr),
+    so it cannot trigger a further on-demand solve => no recursion, no cycle. It is the
+    natural "dress draped on the body" rest state.
+  - **No host re-entry:** pure `ApplyStaticClothPass` computation; never calls
+    `g_origGenResult` or any host entry point. Runs under the caller's `g_cacheMx`.
+    Result validated with `ValidateSolveOutput` (same gate as the live path) before caching.
+  - **Deterministic:** same inputs + fixed iterations. When OS later calls the dress for
+    real it re-solves identically (and overwrites the cache with the belt-tucked dress).
+  - Log line: `M2 on-demand support solve: '<dress>' for slider '<s>' verts=N preset='...'`.
+- **Support-relative honest metrics (M2.3).** M1.3 caveat: body-relative float/magnetism
+  MISLEAD for a rest-on belt (it legitimately sits closer to the body). Added to
+  `HarnessMetrics` + the `--replay` line: `hasSupport`, `supportFloatIndexMean/Worst`
+  (solved gap-to-support minus AUTHORED base gap-to-support; 0 = tracks the design offset),
+  `supportMagnetismCount/Worst` (verts pulled BELOW the authored offset toward/into the
+  support - the design clearance is the reference, NOT vanilla, so the intended de-float
+  is not miscounted). Nearest inner collider chosen per-vert. `hasSupport=0` => the four
+  numbers are 0, distinguishing "no support" from "at offset 0".
+
+### 12.2 Results (dir-replay = golden, updated)
+- **Belt (rests on dress):** `hasSupport=1`, `supportFloatIndexMean=-0.028`
+  (tracks its authored ~0.77u offset onto the dress almost exactly),
+  `supportMagnetismCount=50` of 294 (worst 1.07u below design; bodyPen 0, no garment
+  residual - not clips, just the approximate face-normal offset at the flap/wrap).
+  Contrast the MISLEADING body-relative `magnetismCount=280` / `floatIndexMean=-1.30`:
+  the honest rest-on numbers now separate "de-floated onto support (good)" from the 50
+  verts worth watching.
+- All PRE-EXISTING metrics on all 4 shapes are **byte-stable** vs the M1 golden
+  (checker showed ONLY the 5 new fields as drift). No regression.
+- **Determinism:** `--continuity` on the belt capture = `maxDelta=0 meanDelta=0`.
+  The single-capture belt (no inner colliders) still body-binds (M1a fallback): stretch
+  3.85, `supportFloat=0`, `floatIndexMean=-0.11` - fallback path intact.
+
+### 12.3 M2.2 (dress<->belt cycle) - DEFERRED, with reason
+The one-iteration retuck (dress re-solved under the SOLVED belt) was NOT implemented.
+In the common unfavorable order (belt solved first), M2.1 already makes the belt
+on-demand-solve the dress; then when OS solves the dress for real, the belt is ALREADY
+cached as solved, so the dress tucks under the SOLVED belt automatically - the cycle is
+closed by the existing `g_solvedShapes` cache, no extra pass needed. Only in the
+favorable order (dress first) does the dress tuck under the not-yet-solved (conformed)
+belt, and that difference is sub-offset in the narrow belt band (plan measured it
+negligible; Clothes even improved). Adding a re-solve pass for that residual would be
+exactly the compensating pass the project meta-rule forbids. Left for M4 if a measured
+need appears.
+
+### 12.4 Known limitation
+M2.1's on-demand path (`EnsureSupportSolvedLocked`) is DLL-only and can only be exercised
+LIVE (the harness has no `g_shape*` maps, so `--replay-dir` still fakes order via the
++1000 sort + `REPLAY_DIR_INNER` injection). The OUTCOME it produces - belt resting on the
+solved dress - IS covered by the dir-replay golden. Live confirmation = the drape_debug.log
+lines `M2 on-demand support solve: 'Clothes' ...` followed by `belt M1 ARAP: support='Clothes'`
+(vs `support='body'`). If the belt still logs `support='body'` live, the dress isn't being
+classed as the belt's inner LOOSE_DRAPED collider - a layer-classification issue, not M2.1.

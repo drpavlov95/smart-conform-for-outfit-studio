@@ -2380,6 +2380,15 @@ static constexpr bool kBeltSkinBind = false;
 static constexpr bool kBeltArap = true;
 static constexpr bool kBeltArapRestOn = true;  // prefer a solved inner-garment support when present
 
+// M2 (2026-07-02): guarantee the rest-on solve ORDER live. M1b de-floats the belt onto
+// the dress ONLY IF the dress happens to be solved before the belt in OutfitStudio's own
+// call order (otherwise the belt rests on the VANILLA-conformed dress, which still carries
+// magnetism). With this flag, when the belt is solved before its LOOSE_DRAPED support, the
+// support is solved ON DEMAND first (depth-capped, deterministic, host never re-entered),
+// cached in g_solvedShapes, and used as the belt's inner collider -> the belt always rests
+// on OUR solved dress regardless of order. See BELT_AND_PIPELINE_REVIEW.md Part 12.
+static constexpr bool kLayerSolveOrder = true;
+
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
     switch (NormalizePreset(preset)) {
@@ -9014,6 +9023,22 @@ struct HarnessMetrics {
     int magnetismCount = 0;         // verts pulled inward vs vanilla by > 0.05u
     float magnetismWorst = 0.0f;    // largest such inward pull
 
+    // supportFloat / supportMagnetism (M2): the rest-on analogue of the two above.
+    // For a garment that RESTS ON another (belt->dress), the body-relative float/
+    // magnetism MISLEAD - a belt sitting on the dress legitimately moves closer to
+    // the body, so magnetismCount rises even with zero magnetism vs its actual
+    // support. These measure against the SUPPORT (the nearest inner collider):
+    //   supportFloatIndex = solved gap-to-support minus AUTHORED base gap-to-support
+    //     (0 = tracking the authored offset, e.g. the belt's 0.77u onto the dress).
+    //   supportMagnetism  = verts pulled BELOW where vanilla sat vs the support.
+    // hasSupport is false (and the four numbers 0) when no inner collider is present,
+    // so a shape with no support is trivially distinguishable from one at offset 0.
+    bool  hasSupport = false;
+    float supportFloatIndexMean = 0.0f;
+    float supportFloatIndexWorst = 0.0f;   // signed; most-positive = floats most vs authored
+    int   supportMagnetismCount = 0;
+    float supportMagnetismWorst = 0.0f;
+
     // interlayerGap: mean/worst SIGNED gap (not violation) from this garment to
     // each outer/inner collider's CURRENT solved surface. Unlike
     // garmentResidual*, this reports the plain distance even when it's not
@@ -9156,6 +9181,49 @@ static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
                     m.magnetismWorst = std::max(m.magnetismWorst, pulledIn);
                 }
             }
+        }
+
+        // supportFloat / supportMagnetism (M2): same idea as float/magnetism but
+        // measured against the SUPPORT the garment rests on (its nearest inner
+        // collider) instead of the body. Honest for rest-on garments (belt->dress),
+        // where body-relative numbers mislead (Part 11.3 caveat). Per vert, pick the
+        // single nearest inner collider by its CURRENT surface, then compare authored
+        // (base garment vert -> support Base) vs solved (solved vert -> support Current).
+        if (!cap.innerColliders.empty()) {
+            m.hasSupport = true;
+            double sfSum = 0.0; int sfCnt = 0;
+            for (size_t i = 0; i < n; ++i) {
+                // nearest inner collider for this vert (by solved distance to Current).
+                const OuterCollider* best = nullptr;
+                float bestD2 = std::numeric_limits<float>::max();
+                Vec3 bestCp{0,0,0}, bestNrm{0,0,1};
+                for (const OuterCollider& ic : cap.innerColliders) {
+                    if (!ic.Current().valid) continue;
+                    Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                    if (!BVHClosestPoint(ic.Current(), solvedVerts[i], cp, nrm, d2)) continue;
+                    if (d2 < bestD2) { bestD2 = d2; best = &ic; bestCp = cp; bestNrm = nrm; }
+                }
+                if (!best || !best->Base().valid) continue;
+                float authoredGap = 0.0f;
+                if (!BVHSignedGap(best->Base(), cap.baseVerts[i], authoredGap, nullptr)) continue;
+                float solvedGap = Dot(Sub(solvedVerts[i], bestCp), bestNrm) < 0.0f
+                                      ? -std::sqrt(bestD2) : std::sqrt(bestD2);
+                float sf = solvedGap - authoredGap;
+                sfSum += sf; ++sfCnt;
+                if (std::fabs(sf) > std::fabs(m.supportFloatIndexWorst)) m.supportFloatIndexWorst = sf;
+
+                // support-relative magnetism: verts pulled BELOW their AUTHORED offset
+                // toward/into the support. Reference is the DESIGN clearance, NOT vanilla:
+                // a belt de-floating from a 2u body-float down ONTO the dress moves closer
+                // to the dress than vanilla, but that is the intended rest-on, not magnetism.
+                // Only sitting closer than authored (sf < 0) is the "sucked in" the rule bans.
+                float belowAuthored = -sf;   // + = sits closer to support than designed
+                if (belowAuthored > 0.05f) {
+                    ++m.supportMagnetismCount;
+                    m.supportMagnetismWorst = std::max(m.supportMagnetismWorst, belowAuthored);
+                }
+            }
+            if (sfCnt > 0) m.supportFloatIndexMean = (float)(sfSum / sfCnt);
         }
 
         // drapeVerticality: mean angle-from-vertical of edges where BOTH endpoints
@@ -9571,6 +9639,11 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                   << " floatIndexWorst=" << out.metrics.floatIndexWorst
                   << " magnetismCount=" << out.metrics.magnetismCount
                   << " magnetismWorst=" << out.metrics.magnetismWorst
+                  << " hasSupport=" << (out.metrics.hasSupport ? 1 : 0)
+                  << " supportFloatIndexMean=" << out.metrics.supportFloatIndexMean
+                  << " supportFloatIndexWorst=" << out.metrics.supportFloatIndexWorst
+                  << " supportMagnetismCount=" << out.metrics.supportMagnetismCount
+                  << " supportMagnetismWorst=" << out.metrics.supportMagnetismWorst
                   << " drapeVerticality=" << out.metrics.drapeVerticality
                   << " drapeVerticalityEdgeCount=" << out.metrics.drapeVerticalityEdgeCount
                   << " stretchEnergy=" << out.metrics.stretchEnergy
@@ -9977,6 +10050,79 @@ int main(int argc, char** argv) {
 }
 #else
 
+// M2 (kLayerSolveOrder): resolve a rest-on dependency depth-first so live solve ORDER
+// can't rob the belt of its de-float. When the belt is solved before its LOOSE_DRAPED
+// support (the dress) in OutfitStudio's call order, the support isn't in g_solvedShapes
+// yet, so without this the belt would rest on the VANILLA-conformed dress (which still
+// carries the magnetism we remove). This solves `supportName` NOW, once, caches it in
+// g_solvedShapes[slider], and returns it, so the belt always rests on OUR solved dress.
+//
+// Depth cap: the on-demand support solve passes NO outer colliders (nullptr), so it can
+// never trigger a further on-demand solve -> no recursion, no cycle. It is the natural
+// "dress draped on the body" rest state; OutfitStudio's own later call re-solves the
+// dress WITH the (now solved) belt as an outer collider and overwrites the cache - the
+// dress<->belt fixpoint refinement is M2.2. Pure computation (ApplyStaticClothPass never
+// re-enters the host/OS); deterministic. Requires g_cacheMx held by the caller.
+// Returns a pointer into g_solvedShapes (stable across the call) or nullptr on failure.
+static const SolvedMesh* EnsureSupportSolvedLocked(
+        void* self, const std::string& supportName, const std::string& sliderName,
+        const BodyShell* bodyShell, const BodyBVH* bodyBVH) {
+    auto& slot = g_solvedShapes[sliderName];
+    {
+        auto existing = slot.find(supportName);
+        if (existing != slot.end() && !existing->second.verts.empty())
+            return &existing->second;
+    }
+
+    auto vIt = g_shapeVerts.find(supportName);
+    auto wIt = g_shapeWeights.find(supportName);
+    if (vIt == g_shapeVerts.end() || wIt == g_shapeWeights.end()) return nullptr;
+    if (vIt->second.empty() || vIt->second.size() > 0xFFFF ||
+        wIt->second.empty()) return nullptr;
+    auto pIt = g_shapeBoneProfiles.find(supportName);
+    auto eIt = g_shapeEdges.find(supportName);
+    auto tIt = g_shapeTris.find(supportName);
+    const auto* profiles = pIt != g_shapeBoneProfiles.end() ? &pIt->second : nullptr;
+    const auto* edges    = eIt != g_shapeEdges.end() ? &eIt->second : nullptr;
+    const auto* tris     = tIt != g_shapeTris.end() ? &tIt->second : nullptr;
+
+    std::unordered_map<uint16_t, float> presetMask;
+    int preset = DRAPE_PRESET_AUTO;
+    BuildPresetMaskLocked(supportName, wIt->second, profiles, edges, presetMask, preset);
+    if (presetMask.empty()) return nullptr;
+
+    TargetDataDiffs rawDiff;
+    if (!HostGetRawResultDiff(self, &supportName, &sliderName, rawDiff)) return nullptr;
+
+    std::vector<Vec3> solvedVerts;
+    TargetDataDiffs solvedDiff;
+    StaticSolveStats stats;
+    bool ok = ApplyStaticClothPass(supportName, sliderName, preset, vIt->second,
+                                   profiles, edges, tris, bodyShell, bodyBVH,
+                                   presetMask, rawDiff,
+                                   /*outerColliders*/ nullptr, /*innerColliders*/ nullptr,
+                                   &solvedVerts, solvedDiff, stats);
+    if (!ok || solvedVerts.empty()) return nullptr;
+    SolveValidation val = ValidateSolveOutput(vIt->second, solvedVerts, edges);
+    if (!val.ok) {
+        HLog("M2 on-demand support solve REJECTED for '%s' slider '%s' reason='%s'",
+             supportName.c_str(), sliderName.c_str(), val.reason);
+        return nullptr;
+    }
+
+    SolvedMesh sm;
+    sm.verts = std::move(solvedVerts);
+    { auto lit = g_shapeLayer.find(supportName);
+      sm.layer = lit != g_shapeLayer.end() ? lit->second : 0; }
+    if (tris && !tris->empty()) BuildBodyBVH(sm.verts, *tris, sm.bvh);
+    auto ins = slot.emplace(supportName, std::move(sm));
+    HLog("M2 on-demand support solve: '%s' for slider '%s' verts=%zu preset='%s' "
+         "(solved BEFORE its dependent so the belt rests on OUR result)",
+         supportName.c_str(), sliderName.c_str(), ins.first->second.verts.size(),
+         PresetName(preset));
+    return &ins.first->second;
+}
+
 static void Detour_GenResult(
     void* self,
     const std::string* shapeName,
@@ -10173,6 +10319,22 @@ static void Detour_GenResult(
                             cur = &svIt->second.verts;
                             if (svIt->second.bvh.valid)
                                 curBvh = &svIt->second.bvh;
+                        }
+                    }
+                    // M2: rest-on solve-order guarantee. If this belt's LOOSE_DRAPED support
+                    // (the dress) hasn't been solved yet in OutfitStudio's order, solve it on
+                    // demand NOW so the belt rests on OUR de-floated dress, not the vanilla
+                    // one. Scoped to the belt->dress relationship (the M1 pilot); depth-capped
+                    // inside the helper (no recursion). See kLayerSolveOrder.
+                    if (!cur && kLayerSolveOrder && otherIsInner &&
+                        NormalizePreset(preset) == DRAPE_PRESET_BELT &&
+                        NormalizePreset(otherPreset) == DRAPE_PRESET_LOOSE_DRAPED) {
+                        const SolvedMesh* sm =
+                            EnsureSupportSolvedLocked(self, other, *sliderName, bodyShell, bodyBVH);
+                        if (sm && !sm->verts.empty()) {
+                            cur = &sm->verts;
+                            if (sm->bvh.valid) curBvh = &sm->bvh;
+                            slIt = g_solvedShapes.find(*sliderName);  // helper may have inserted; refresh
                         }
                     }
                     std::vector<Vec3> conformed;
