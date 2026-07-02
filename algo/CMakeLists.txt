@@ -4,6 +4,17 @@ project(drape_algo CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# libigl (header-only, MPL-2.0) + Eigen (MPL-2.0) for the ARAP deformation core
+# (plan Phase 1b). Both are header-only; no separate build.
+set(LIBIGL_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../reference/libigl/include")
+set(EIGEN_INCLUDE   "${CMAKE_CURRENT_SOURCE_DIR}/../reference/eigen")
+if (NOT EXISTS "${LIBIGL_INCLUDE}/igl/arap.h")
+    message(FATAL_ERROR "libigl not found at ${LIBIGL_INCLUDE}")
+endif()
+if (NOT EXISTS "${EIGEN_INCLUDE}/Eigen/Core")
+    message(FATAL_ERROR "Eigen not found at ${EIGEN_INCLUDE}")
+endif()
+
 set(BS_ROOT "E:/SkyrimDev/BodySlide-and-Outfit-Studio" CACHE PATH
     "Path to a BodySlide and Outfit Studio source tree used for nifly/DiffData sources")
 set(MPP_DIR "${BS_ROOT}/mppatcher")
@@ -57,6 +68,7 @@ set(MINHOOK_SRCS
 add_library(drape_algo SHARED
     algo.cpp
     conform_hook.cpp
+    skin_arap.cpp
     ../cli/DrapeConformer.cpp
     ${MINHOOK_SRCS}
     ${NIFLY_SRCS}
@@ -70,6 +82,8 @@ set_target_properties(drape_algo PROPERTIES
 )
 
 target_include_directories(drape_algo PRIVATE
+    "${LIBIGL_INCLUDE}"
+    "${EIGEN_INCLUDE}"
     "${MPP_DIR}/wx_stubs"
     "${BS_ROOT}/lib/nifly/include"
     "${BS_ROOT}/lib/nifly/external"
@@ -113,6 +127,7 @@ add_custom_command(TARGET drape_algo POST_BUILD
 
 add_executable(drape_harness
     conform_hook.cpp
+    skin_arap.cpp
     ../cli/DrapeConformer.cpp
     ${NIFLY_SRCS}
     ${BS_SRCS}
@@ -121,6 +136,8 @@ add_executable(drape_harness
 set_target_properties(drape_harness PROPERTIES OUTPUT_NAME "drape-harness")
 
 target_include_directories(drape_harness PRIVATE
+    "${LIBIGL_INCLUDE}"
+    "${EIGEN_INCLUDE}"
     "${MPP_DIR}/wx_stubs"
     "${BS_ROOT}/lib/nifly/include"
     "${BS_ROOT}/lib/nifly/external"

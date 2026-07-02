@@ -23,6 +23,7 @@
 #include "../proxy/drape_iface.h"
 #include "DiffData.h"
 #include "NifFile.hpp"
+#include "skin_arap.h"   // M1: As-Rigid-As-Possible deformation (libigl, isolated TU)
 
 #include <MinHook.h>
 #include <windows.h>
@@ -42,6 +43,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <malloc.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -2253,6 +2255,29 @@ struct StaticSolveParams {
     float stretchStiffness = 0.35f;
     int surfaceSmoothIterations = 1;
     float surfaceSmoothStrength = 0.08f;
+    // Late tangential de-wrinkle (belt): runs after the deforming passes so it
+    // sticks; tangential (preserves body gap) + boundary-skip + edge-cap so it
+    // flattens folds without melting straps/buckle or opening the silhouette.
+    int beltDeWrinkleIterations = 0;
+    float beltDeWrinkleStrength = 0.0f;
+    // Late "seat" pass (belt): vanilla Conform floats the belt ~2u off the body
+    // (a hula hoop above the dress). Pull each vert IN along the body normal toward
+    // a target gap that lands it just above where the dress sits, clamped so it
+    // never crosses the target (no body penetration). Follows the body contour ->
+    // de-hoops it. Target ~= dress body-gap (~0.65) + leather thickness.
+    int beltSeatIterations = 0;
+    float beltSeatStrength = 0.0f;
+    float beltSeatTargetGap = 0.9f;
+    float beltSeatMaxStep = 0.35f;
+    // Belt flap drape (scoped PBD): anchor the top cord to the body, then let the
+    // rest of the wrap HANG under gravity with shape-preserving edges and one-way
+    // (push-out only) body collision, so the flap drapes instead of hugging.
+    float beltAnchorFrac = 0.30f;      // top fraction of the wrap = anchored cord
+    int   beltDrapeIterations = 0;     // PBD iterations for the flap (0 = off)
+    float beltDrapeGravity = 0.0f;     // downward pull per iteration (stiff leather = small)
+    float beltDrapeFloor = 0.15f;      // min body gap kept during drape (push-out only)
+    float beltDrapeMaxGap = 3.0f;      // flap can't float past this off the body (kills flank hover)
+    int   beltDrapeEdgePasses = 4;     // Gauss-Seidel edge-length passes per iteration
     int pbdIterations = 8;
     float gravity = 0.0f;
     float anchorStiffness = 0.55f;
@@ -2306,6 +2331,54 @@ struct StaticSolveStats {
     int influenceZeroVerts = 0;
     bool physicsDrapeActive = false;  // was physicsDrape mode actually used?
 };
+
+// Belt-as-cloth PoC (drape solver route). FINDING (2026-07-01, harness): routing the
+// belt through verletCloth+physicsDrape gives lower edge-stretch (3.51->2.82) and NO
+// magnetism, but it FLOATS (main ~1.34, strap ~4.5) because the belt's vanilla conform
+// floats it uniformly and the drape solver has no on-body anchor to pull it in (the
+// dress works only because its fitted top anchors to an on-body vanilla position; the
+// belt has none). Pinning per-island tops to contact was not enough (stretch-preserved
+// bodies keep the vanilla out-shape; leather-gravity too weak to straighten). The
+// correct fix is the plan's Phase 1 SKIN-BIND (bind each vert to a base-body point +
+// clearance, move it with the morphed body) to establish contact by construction -
+// a careful gated phase, not a blind param tweak. Flag left OFF per plan discipline;
+// drape-solver code kept in place (disable-by-flag before delete).
+static constexpr bool kBeltDrapeSolver = false;
+
+// Belt SKIN-BIND (plan Phase 1a for the belt). The real cause of both the float AND the
+// magnetism is that the belt is positioned by the vanilla conform (over-projects = float)
+// then corrected by inward nudges (= magnetism). FINDING (2026-07-01, harness):
+//  * Topology transfers cleanly (base & morphed body share 26412 tris); binding works.
+//  * KEY DISCOVERY: the belt is AUTHORED LOOSE - base clearance median ~2.1u (range
+//    0.7-3.2). The "float" is largely the DESIGN, not the conform (vanilla gap 1.95 ~=
+//    base clearance 2.10). Faithful skin-bind preserves it -> still floats.
+//  * De-floating (clearance scale or fixed inset) has TWO hard conflicts: (a) it distorts
+//    (non-uniform move -> edge-stretch 3.5->3.9-4.1), and (b) it drives the belt BELOW the
+//    dress surface (dress ~0.5 sits between body and belt) -> dress clips through the belt
+//    (Clothes faceResidual 43 -> 114-227). Insetting toward the BODY ignores the dress.
+//  * Even faithful skin-bind adds stretch (4.07): the face-normal offset is approximate at
+//    edges/corners; a correct version needs deformation-gradient transfer.
+//  CONCLUSION: a clean de-float needs the plan's Phase 1b ARAP (deform tighter, minimise
+//  distortion) + Phase 3 layering (stay above the dress) - a gated libigl integration, not
+//  a blind tweak. Flag left OFF; PoC code kept (disable-by-flag before delete).
+static constexpr bool kBeltSkinBind = false;
+
+// M1 (2026-07-02): the real fix from the CONCLUSION above. Bind each belt vert to the
+// base body (barycentric anchor + AUTHORED signed offset); the same anchor evaluated on
+// the morphed body is the target. A well-conditioned subset are ARAP HANDLES; ARAP fills
+// the rest, minimising distortion (fixes the +stretch the raw skin-bind had, and keeps
+// straps rigid instead of warping). Reproduces the AUTHORED belt<->support relationship:
+// no uniform target => magnetism is structurally impossible (the user's rule).
+//   M1a (this flag): binds to the BODY - the only support a lone belt capture has. This
+//     reproduces the authored ~2u float WITHOUT magnetism/distortion. Per the user's own
+//     rule, a belt with nothing pushing it in SHOULD sit at its authored clearance; the
+//     visible de-float only happens when it RESTS ON something (the dress).
+//   M1b (kBeltArapRestOn): when a solved inner garment (the dress) is available as its
+//     support, bind to THAT instead of the body -> the belt rests on the dress = de-floats
+//     for real, still no magnetism. Needs the dress solved before the belt (solve-order /
+//     support-availability plumbing).
+static constexpr bool kBeltArap = true;
+static constexpr bool kBeltArapRestOn = true;  // prefer a solved inner-garment support when present
 
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
@@ -2455,6 +2528,47 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.collisionStiffness = 0.95f;
         break;
     case DRAPE_PRESET_BELT:
+        if (kBeltDrapeSolver) {
+            // Belt as CLOTH via the real drape solver (fixes the "magnetism" at the
+            // cause instead of stacking post-solve nudges). verletCloth settles it ONTO
+            // the body (kills the vanilla float); drapeReturnRate stops it snapping back
+            // into hollows (bridges concavities = the anti-magnetism, by construction).
+            // Tuned STIFF (leather): high stretch stiffness, higher bending, small
+            // gravity, short bounded sag. All inward-pulling correction passes zeroed
+            // (physics owns position, like LOOSE_DRAPED). The belt* nudge params stay 0
+            // so applyBeltFinishing is disabled (kept in code for comparison).
+            p.physicsDrape = true;
+            p.verletCloth = true;
+            p.physicsDrapeInitPushStiffness = 0.80f;
+            p.physicsDrapeInitPushPasses = 8;
+            p.maxDisplacementMult = 0.0f;
+            p.inwardSuppressionStrength = 0.0f;
+            p.clearanceStrength = 0.0f;
+            p.clearanceSlack = 0.0f;
+            p.bodyCollisionStrength = 0.0f;
+            p.bodyGapPreserve = 0.0f;
+            p.bodyColumnStrength = 0.0f;
+            p.envelopeStrength = 0.0f;
+            p.relaxPerUnitZ = 0.0f;
+            p.layerStrength = 0.0f;
+            p.layerIterations = 0;
+            p.drapeEnvelopeStrength = 0.0f;
+            p.drapeEnvelopeBins = 96;
+            p.drapeReturnRate = 0.028f;   // anti-magnetism: bridge hollows, don't snap in
+            p.bodyClearance = 0.45f;      // leather sits close to the dress
+            p.bendingStiffness = 0.30f;   // stiff leather: soft, few folds
+            p.bendingIterations = 3;
+            p.surfaceSmoothIterations = 3;
+            p.surfaceSmoothStrength = 0.14f;
+            p.anchorStiffness = 0.55f;
+            p.gravity = 0.05f;            // short piece: modest sag
+            p.clothMaxDrop = 2.5f;        // bounded (belt is short)
+            p.stretchStiffness = 0.90f;   // leather barely stretches
+            p.collisionStiffness = 0.90f;
+            p.constraintIterations = 5;
+            p.pbdIterations = 50;
+            break;
+        }
         p.clearanceStrength = 0.82f;
         p.clearanceSlack = 0.04f;
         p.bodyCollisionStrength = 0.88f;
@@ -2472,6 +2586,24 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         p.gravity = 0.04f;
         p.anchorStiffness = 0.90f;
         p.collisionStiffness = 0.96f;
+        // Legacy post-solve nudge stack (the seat/drape/de-wrinkle "magnetism" tower).
+        // RETIRED by M1 (kBeltArap) - the bind+ARAP override owns the belt result now.
+        // Kept flag-gated (delete-by-flag) so flipping kBeltArap OFF restores it for
+        // comparison. Zeroed when kBeltArap is ON so applyBeltFinishing doesn't run.
+        if (!kBeltArap) {
+            p.beltSeatIterations = 6;
+            p.beltSeatStrength = 0.85f;
+            p.beltSeatTargetGap = 0.5f;
+            p.beltSeatMaxStep = 0.35f;
+            p.beltAnchorFrac = 0.30f;
+            p.beltDrapeIterations = 24;
+            p.beltDrapeGravity = 0.08f;
+            p.beltDrapeFloor = 0.15f;
+            p.beltDrapeMaxGap = 5.0f;
+            p.beltDrapeEdgePasses = 5;
+            p.beltDeWrinkleIterations = 6;
+            p.beltDeWrinkleStrength = 0.45f;
+        }
         break;
     case DRAPE_PRESET_RIGID_ACCESSORY:
         p.clearanceStrength = 0.20f;
@@ -3696,7 +3828,12 @@ static void MaybeWriteSolverCapture(SolverCapture capture,
     }
 }
 
-static bool ApplyStaticClothPass(const std::string& shapeName,
+// The real solver body. NEVER call this directly outside the ApplyStaticClothPass
+// wrapper below (U1, crash containment) â€” this function and everything it calls
+// is where a bug in ~8000 lines of solver code could raise a hardware exception
+// (bad index, div-by-zero, etc). The wrapper catches that so it can never take
+// OutfitStudio down with it.
+static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                  const std::string& sliderName,
                                  int preset,
                                  const std::vector<Vec3>& baseVerts,
@@ -3788,6 +3925,52 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
         invMass[i]      = Clamp01(mobility);
         anchorWeight[i] = Clamp01(anchor);
+    }
+
+    // Belt-as-cloth boundary condition. The BELT mask forces high follow everywhere, so
+    // the drape solver would anchor the whole belt to the FLOATING vanilla conform (it
+    // never touches the body -> the "hover"). Real cloth is pinned only where it CONTACTS
+    // the body (the TOP line of each piece) and hangs from there. So per connected island
+    // (wrap, hanging strap, buckle): seat its TOP band onto the body (rewrite the anchor
+    // target = a real contact) and pin it; make the rest DRAPE-eligible so cloth physics
+    // hangs it from that contact and bridges hollows (no uniform inward pull = no magnetism).
+    if (params.physicsDrape && NormalizePreset(preset) == DRAPE_PRESET_BELT &&
+        bodyBVH && bodyBVH->valid && tris && !tris->empty() && n > 0 && n <= 0xFFFF) {
+        std::vector<int> parent(n);
+        for (size_t i = 0; i < n; ++i) parent[i] = (int)i;
+        auto findp = [&](int x) -> int {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        for (const auto& t : *tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            parent[findp(t[0])] = findp(t[1]);
+            parent[findp(t[1])] = findp(t[2]);
+        }
+        std::unordered_map<int, float> compZMax;   // top of each island
+        for (size_t i = 0; i < n; ++i) {
+            int r = findp((int)i);
+            auto it = compZMax.find(r);
+            if (it == compZMax.end() || supportVerts[i].z > it->second) compZMax[r] = supportVerts[i].z;
+        }
+        const float kPinBand = 2.5f;   // pin the top 2.5u of each island (the contact line)
+        const float kCordGap = 0.4f;   // pinned contact sits this far off the body/dress
+        int pinned = 0;
+        for (size_t i = 0; i < n; ++i) {
+            float topZ = compZMax[findp((int)i)];
+            if (supportVerts[i].z >= topZ - kPinBand) {
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                if (BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) {
+                    supportVerts[i] = Add(cp, Scale(nrm, kCordGap));  // seat onto body = contact
+                    finalVerts[i]   = supportVerts[i];
+                }
+                follow[i] = 1.0f; anchorWeight[i] = 1.0f; invMass[i] = 0.05f;
+                ++pinned;
+            } else {
+                follow[i] = 0.10f; anchorWeight[i] = 0.0f; invMass[i] = 0.90f;  // drape
+            }
+        }
+        HLog("belt-as-cloth: islands=%zu pinnedTopVerts=%d of %zu", compZMax.size(), pinned, n);
     }
 
     static const std::vector<EdgeConstraint> kNoEdges;
@@ -5211,6 +5394,395 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     if (!params.verletCloth)
         ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
 
+    // Belt finishing (seat + de-wrinkle). DEFINED here but INVOKED after the
+    // influence-blend / idempotency / safety-clamp below: those run toward the
+    // vanilla conform (which floats the belt ~2u off the body), so seating before
+    // them lets the blend pull the belt back out. Invoking last makes the seat
+    // authoritative.
+    auto applyBeltFinishing = [&]() {
+    // A belt mesh is usually the wide wrap band PLUS separate hanging appendages
+    // (dangling straps, buckle/clasp) as their own connected components. The wrap
+    // should seat onto the body; the appendages must hang FREELY (seating them to a
+    // uniform body-gap twists them and can clip). So restrict all belt shaping to the
+    // LARGEST connected component (the wrap) and leave the appendages as solved.
+    std::vector<uint8_t> isMainBand;
+    std::vector<int> compRoot;   // per-vertex connected-component id (or -1)
+    if ((params.beltSeatIterations > 0 || params.beltDeWrinkleIterations > 0) &&
+        tris && !tris->empty() && n > 0 && n <= 0xFFFF) {
+        std::vector<int> parent(n);
+        for (size_t i = 0; i < n; ++i) parent[i] = (int)i;
+        auto findp = [&](int x) -> int {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        auto unite = [&](int a, int b) { if (a<(int)n && b<(int)n) parent[findp(a)] = findp(b); };
+        for (const auto& t : *tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            unite(t[0], t[1]); unite(t[1], t[2]);
+        }
+        std::unordered_map<int, int> compSize;
+        for (size_t i = 0; i < n; ++i) ++compSize[findp((int)i)];
+        int bestRoot = -1, bestSize = -1;
+        for (const auto& kv : compSize)
+            if (kv.second > bestSize) { bestSize = kv.second; bestRoot = kv.first; }
+        isMainBand.assign(n, 0);
+        compRoot.assign(n, -1);
+        for (size_t i = 0; i < n; ++i) {
+            int r = findp((int)i);
+            compRoot[i] = r;
+            if (r == bestRoot) isMainBand[i] = 1;
+        }
+    }
+    auto inMainBand = [&](size_t i) -> bool {
+        return isMainBand.empty() || (i < isMainBand.size() && isMainBand[i]);
+    };
+
+    // Predominantly-VERTICAL appendage (hanging strap) drape. A strap is a small,
+    // separate island whose z-extent dwarfs its horizontal extent. vanilla Conform
+    // hangs it roughly straight but floats it ~3u off the body. Physically it should
+    // CONTACT the body only where the body pushes it out (its TOP, at the hip) and
+    // hang straight from there - standing off wherever the leg narrows below. So we
+    // translate the whole rigid island in by the TOP's float only (NOT the median):
+    // the top contacts, the bottom keeps that same offset and naturally stands off.
+    // No inward "magnetism" that drags the bottom onto the narrower thigh.
+    if (!compRoot.empty() && bodyBVH && bodyBVH->valid) {
+        std::unordered_map<int, std::vector<uint32_t>> comps;
+        for (size_t i = 0; i < n; ++i)
+            if (isMainBand.empty() || !isMainBand[i]) comps[compRoot[i]].push_back((uint32_t)i);
+        const float kStrapTargetGap = 0.4f;
+        for (auto& kv : comps) {
+            auto& verts = kv.second;
+            if (verts.size() < 6) continue;               // skip tiny buckle bits
+            float xmin=1e30f,xmax=-1e30f,ymin=1e30f,ymax=-1e30f,zmin=1e30f,zmax=-1e30f;
+            for (uint32_t i : verts) {
+                const Vec3& p = finalVerts[i];
+                xmin=std::min(xmin,p.x); xmax=std::max(xmax,p.x);
+                ymin=std::min(ymin,p.y); ymax=std::max(ymax,p.y);
+                zmin=std::min(zmin,p.z); zmax=std::max(zmax,p.z);
+            }
+            float dz = zmax - zmin;
+            float horiz = std::sqrt((xmax-xmin)*(xmax-xmin) + (ymax-ymin)*(ymax-ymin));
+            if (dz < 1.5f * std::max(horiz, 0.01f)) continue;   // not predominantly vertical
+            // Inward direction + gap from the TOP 30% of the island only (the contact zone).
+            float topZ = zmax - 0.30f * dz;
+            Vec3 inward{0,0,0}; std::vector<float> topGaps;
+            for (uint32_t i : verts) {
+                if (finalVerts[i].z < topZ) continue;
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2=0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                float dist = std::sqrt(d2);
+                topGaps.push_back(Dot(Sub(finalVerts[i], cp), nrm) < 0.0f ? -dist : dist);
+                inward = Sub(inward, nrm);   // -normal = toward body
+            }
+            if (topGaps.empty()) continue;
+            std::sort(topGaps.begin(), topGaps.end());
+            float topGap = topGaps[topGaps.size()/2];
+            float L = Len(inward);
+            if (L < 1.0e-4f) continue;
+            inward = Scale(inward, 1.0f / L);
+            float move = topGap - kStrapTargetGap;        // bring the TOP to contact only
+            if (move <= 0.05f) continue;
+            Vec3 t = Scale(inward, move);
+            for (uint32_t i : verts) finalVerts[i] = Add(finalVerts[i], t);
+            // collision push-out only (never pull in): the bottom stands off freely.
+            for (uint32_t i : verts) {
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2=0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                float dist = std::sqrt(d2);
+                float gap = Dot(Sub(finalVerts[i], cp), nrm) < 0.0f ? -dist : dist;
+                if (gap < 0.1f) finalVerts[i] = Add(cp, Scale(nrm, 0.1f));
+            }
+            HLog("belt strap drape: island n=%zu dz=%.1f topGap=%.2f movedTopToContact=%.2f",
+                 verts.size(), dz, topGap, move);
+        }
+    }
+
+    // Late "seat" pass (belt). vanilla Conform floats the wrap ~2u off the body, so it
+    // reads as an inflated hula hoop hovering above the dress. Pull each wrap vert IN
+    // along the body normal toward beltSeatTargetGap (chosen to land just above where
+    // the dress conforms), clamped so it never crosses the target -> no body
+    // penetration, and it follows the body contour instead of staying a rigid ring.
+    if (params.beltSeatIterations > 0 && params.beltSeatStrength > 0.0f &&
+        bodyBVH && bodyBVH->valid && n > 0 && !isMainBand.empty()) {
+        auto isRigidSeat = [&](size_t i) -> bool {
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+        // Split the wrap into an ANCHORED top cord and a DRAPING flap by height.
+        float zmin = 1e30f, zmax = -1e30f;
+        for (size_t i = 0; i < n; ++i)
+            if (isMainBand[i]) { zmin = std::min(zmin, finalVerts[i].z);
+                                 zmax = std::max(zmax, finalVerts[i].z); }
+        float zspan = std::max(zmax - zmin, 1.0e-3f);
+        float anchorZ = zmax - params.beltAnchorFrac * zspan;
+        std::vector<uint8_t> isAnchor(n, 0);
+        for (size_t i = 0; i < n; ++i)
+            if (isMainBand[i] && !isRigidSeat(i) && finalVerts[i].z >= anchorZ)
+                isAnchor[i] = 1;
+
+        // (1) Seat the anchor cord onto the body (cinch): snap to target gap.
+        const float kTarget = params.beltSeatTargetGap;
+        const float kStrength = params.beltSeatStrength;
+        int seated = 0;
+        for (int iter = 0; iter < params.beltSeatIterations; ++iter) {
+            for (size_t i = 0; i < n; ++i) {
+                if (!isAnchor[i]) continue;
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                float dist = std::sqrt(d2);
+                float gap = Dot(Sub(finalVerts[i], cp), nrm) < 0.0f ? -dist : dist;
+                if (gap <= kTarget + 0.01f) continue;
+                Vec3 seatPos = Add(cp, Scale(nrm, kTarget));
+                finalVerts[i] = Add(Scale(finalVerts[i], 1.0f - kStrength),
+                                    Scale(seatPos, kStrength));
+                ++seated;
+            }
+        }
+
+        // (2) Drape the flap: hang from the anchored cord under gravity, holding the
+        //     wrap's CURRENT edge lengths (leather keeps its shape) with one-way body
+        //     collision (push OUT only) so it drapes instead of hugging the contour.
+        int draped = 0;
+        if (params.beltDrapeIterations > 0 && tris && !tris->empty()) {
+            struct MBEdge { uint32_t a, b; float rest; };
+            std::vector<MBEdge> mbEdges;
+            mbEdges.reserve(tris->size() * 2);
+            std::unordered_set<uint64_t> seen;
+            auto addE = [&](uint32_t a, uint32_t b) {
+                if (!isMainBand[a] || !isMainBand[b]) return;
+                uint64_t k = a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
+                if (!seen.insert(k).second) return;
+                mbEdges.push_back({a, b, Len(Sub(finalVerts[a], finalVerts[b]))});
+            };
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                addE(t[0], t[1]); addE(t[1], t[2]); addE(t[2], t[0]);
+            }
+            const float kGrav = params.beltDrapeGravity;
+            const float kFloor = params.beltDrapeFloor;
+            const float kMaxGap = params.beltDrapeMaxGap;
+            for (int iter = 0; iter < params.beltDrapeIterations; ++iter) {
+                // gravity on the non-anchored flap verts
+                for (size_t i = 0; i < n; ++i)
+                    if (isMainBand[i] && !isAnchor[i] && !isRigidSeat(i))
+                        finalVerts[i].z -= kGrav;
+                // shape-preserving edge constraints (anchored ends immovable)
+                for (int p = 0; p < params.beltDrapeEdgePasses; ++p) {
+                    for (const MBEdge& e : mbEdges) {
+                        Vec3 d = Sub(finalVerts[e.a], finalVerts[e.b]);
+                        float L = Len(d);
+                        if (L < 1.0e-5f) continue;
+                        float wa = isAnchor[e.a] ? 0.0f : 1.0f;
+                        float wb = isAnchor[e.b] ? 0.0f : 1.0f;
+                        if (wa + wb <= 0.0f) continue;
+                        Vec3 corr = Scale(d, (L - e.rest) / L);
+                        finalVerts[e.a] = Sub(finalVerts[e.a], Scale(corr, wa / (wa + wb)));
+                        finalVerts[e.b] = Add(finalVerts[e.b], Scale(corr, wb / (wa + wb)));
+                    }
+                }
+                // one-way body collision: push out only (never pull in -> keeps drape)
+                for (size_t i = 0; i < n; ++i) {
+                    if (!isMainBand[i] || isAnchor[i] || isRigidSeat(i)) continue;
+                    Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                    if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                    float dist = std::sqrt(d2);
+                    float gap = Dot(Sub(finalVerts[i], cp), nrm) < 0.0f ? -dist : dist;
+                    if (gap < kFloor) {
+                        finalVerts[i] = Add(cp, Scale(nrm, kFloor));  // no penetration
+                        ++draped;
+                    } else if (gap > kMaxGap) {
+                        // Flank/corner verts hang too far out (reads as hover). Pull them
+                        // back toward the max-drape gap so the flap hangs close-ish while
+                        // still draping (not shrink-wrapping).
+                        finalVerts[i] = Add(cp, Scale(nrm, kMaxGap));
+                        ++draped;
+                    }
+                }
+            }
+        }
+        // (3) ANTI-MAGNETISM (convexity restore). The seat/drape can leave the belt
+        //     following the body INTO its concavities (sides, under-hip, between the
+        //     legs) - i.e. pulled toward the center where nothing pushes it. Real cloth
+        //     BRIDGES hollows: it only contacts the convex high points. Here, any vert
+        //     that sits more toward the body than its ring-neighbors is filling a hollow
+        //     - push it back OUT to the neighbor level (along the body normal only, and
+        //     ONLY ever outward, never inward). Iterating bridges the hollows while the
+        //     convex contacts (bumps) are untouched.
+        if (tris && !tris->empty()) {
+            std::vector<std::vector<uint32_t>> ring(n);
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k+1)%3];
+                    if (isMainBand[a] && isMainBand[b]) { ring[a].push_back(b); ring[b].push_back(a); }
+                }
+            }
+            for (size_t i = 0; i < n; ++i) {
+                auto& r = ring[i];
+                std::sort(r.begin(), r.end());
+                r.erase(std::unique(r.begin(), r.end()), r.end());
+            }
+            int bridged = 0;
+            const float kBridgeStrength = 0.6f;
+            for (int iter = 0; iter < 12; ++iter) {
+                std::vector<Vec3> next = finalVerts;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!isMainBand[i] || isRigidSeat(i)) continue;
+                    const auto& r = ring[i];
+                    if (r.size() < 2) continue;
+                    Vec3 c{0,0,0};
+                    for (uint32_t j : r) c = Add(c, finalVerts[j]);
+                    c = Scale(c, 1.0f / (float)r.size());
+                    Vec3 nrm{0,0,1}; float g = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, &nrm)) continue;
+                    float inwardness = Dot(Sub(c, finalVerts[i]), nrm);  // >0 => vert dips toward body
+                    if (inwardness > 0.02f) {
+                        finalVerts[i] = Add(finalVerts[i], Scale(nrm, inwardness * kBridgeStrength));
+                        ++bridged;
+                    }
+                }
+                (void)next;
+            }
+            HLog("belt anti-magnetism: bridged %d concave-dip moves", bridged);
+        }
+
+        HLog("belt drape: anchorZ=%.1f seated=%d drapedCollisions=%d edges", anchorZ, seated, draped);
+        {   // DIAG: flap gap by flank (solver frame) to locate residual hover
+            float cxb = 0.0f; int cn = 0;
+            for (size_t i = 0; i < n; ++i) if (isMainBand[i]) { cxb += finalVerts[i].x; ++cn; }
+            if (cn) cxb /= cn;
+            std::vector<float> gl, gr;
+            for (size_t i = 0; i < n; ++i) {
+                if (!isMainBand[i] || isAnchor[i]) continue;
+                float g = 0.0f; Vec3 nn{0,0,1};
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, &nn)) continue;
+                (finalVerts[i].x >= cxb ? gr : gl).push_back(g);
+            }
+            std::sort(gl.begin(), gl.end()); std::sort(gr.begin(), gr.end());
+            auto med = [](std::vector<float>& v){ return v.empty()?0.0f:v[v.size()/2]; };
+            auto mx  = [](std::vector<float>& v){ return v.empty()?0.0f:v.back(); };
+            HLog("belt FLAP gap by flank: x>=cx median=%.2f max=%.2f n=%d | x<cx median=%.2f max=%.2f n=%d",
+                 med(gr), mx(gr), (int)gr.size(), med(gl), mx(gl), (int)gl.size());
+            // Verticality: mean angle-from-straight-down of flap edges that span z levels
+            // (0deg = hanging vertical/90deg fold, 90deg = lying flat along the body).
+            double angSum = 0.0; int angN = 0;
+            if (tris) for (const auto& t : *tris) {
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k + 1) % 3];
+                    if (a >= n || b >= n) continue;
+                    if (!isMainBand[a] || !isMainBand[b]) continue;
+                    if (isAnchor[a] && isAnchor[b]) continue;
+                    Vec3 d = Sub(finalVerts[a], finalVerts[b]);
+                    float L = Len(d); if (L < 1.0e-4f) continue;
+                    float vert = std::fabs(d.z) / L;      // 1 = vertical, 0 = horizontal
+                    if (vert < 0.30f) continue;            // skip near-horizontal ring edges
+                    angSum += std::acos(std::min(1.0f, vert)) * 57.2958f; ++angN;
+                }
+            }
+            HLog("belt FLAP verticality: mean edge angle-from-vertical = %.1f deg (n=%d; 0=straight down)",
+                 angN ? angSum / angN : 0.0, angN);
+        }
+    }
+
+    // Late tangential de-wrinkle (belt). Runs AFTER the deforming passes above so
+    // the flattening survives (an early surface smooth gets re-bunched by the
+    // envelope/layer/edge passes). Slides each INTERIOR vert along the body tangent
+    // toward its 1-ring centroid: tangential => body gap preserved (no new
+    // penetration, no lift-off); boundary verts pinned (silhouette + hanging straps
+    // keep their shape); each step capped to a fraction of the local edge so edges
+    // can't tear.
+    if (params.beltDeWrinkleIterations > 0 && params.beltDeWrinkleStrength > 0.0f &&
+        tris && !tris->empty() && n > 0 && n <= 0xFFFF) {
+        std::vector<std::vector<uint32_t>> ring(n);
+        std::unordered_map<uint64_t, int> edgeTriCount;
+        edgeTriCount.reserve(tris->size() * 3);
+        auto ekey = [](uint32_t a, uint32_t b) -> uint64_t {
+            if (a > b) std::swap(a, b);
+            return ((uint64_t)a << 32) | (uint64_t)b;
+        };
+        for (const auto& t : *tris) {
+            uint32_t a = t[0], b = t[1], c = t[2];
+            if (a >= n || b >= n || c >= n) continue;
+            ++edgeTriCount[ekey(a, b)];
+            ++edgeTriCount[ekey(b, c)];
+            ++edgeTriCount[ekey(c, a)];
+            ring[a].push_back(b); ring[a].push_back(c);
+            ring[b].push_back(a); ring[b].push_back(c);
+            ring[c].push_back(a); ring[c].push_back(b);
+        }
+        std::vector<uint8_t> isBoundary(n, 0);
+        for (const auto& kv : edgeTriCount) {
+            if (kv.second == 1) {
+                isBoundary[(size_t)(kv.first >> 32)] = 1;
+                isBoundary[(size_t)(kv.first & 0xFFFFFFFFu)] = 1;
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            auto& r = ring[i];
+            std::sort(r.begin(), r.end());
+            r.erase(std::unique(r.begin(), r.end()), r.end());
+        }
+        auto isRigidVert = [&](size_t i) -> bool {
+            if (islandIdOut.empty() || i >= islandIdOut.size()) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+        const float kStrength = params.beltDeWrinkleStrength;
+        const float kEdgeCapFrac = 0.30f;  // max step/iter as fraction of mean edge
+        const float kGapFloor = 0.02f;     // keep at least this body gap after a move
+        int moved = 0;
+        for (int iter = 0; iter < params.beltDeWrinkleIterations; ++iter) {
+            std::vector<Vec3> next = finalVerts;  // Jacobi: read old, write new
+            for (size_t i = 0; i < n; ++i) {
+                if (!inMainBand(i)) continue;  // hanging straps/buckle stay free
+                if (isBoundary[i] || isRigidVert(i)) continue;
+                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                const auto& r = ring[i];
+                if (r.size() < 2) continue;
+                Vec3 centroid{0.0f, 0.0f, 0.0f};
+                float meanEdge = 0.0f;
+                for (uint32_t j : r) {
+                    centroid = Add(centroid, finalVerts[j]);
+                    meanEdge += Len(Sub(finalVerts[j], finalVerts[i]));
+                }
+                float invR = 1.0f / (float)r.size();
+                centroid = Scale(centroid, invR);
+                meanEdge *= invR;
+                Vec3 delta = Sub(centroid, finalVerts[i]);
+                Vec3 nrm{0.0f, 0.0f, 1.0f};
+                float g0 = 0.0f;
+                bool haveGap = bodyBVH && bodyBVH->valid &&
+                               BVHSignedGap(*bodyBVH, finalVerts[i], g0, &nrm);
+                if (haveGap)
+                    delta = Sub(delta, Scale(nrm, Dot(delta, nrm)));  // tangential
+                Vec3 step = Scale(delta, kStrength);
+                float stepLen = Len(step);
+                float cap = kEdgeCapFrac * meanEdge;
+                if (stepLen > cap && stepLen > 1.0e-6f)
+                    step = Scale(step, cap / stepLen);
+                Vec3 cand = Add(finalVerts[i], step);
+                if (haveGap) {
+                    float g1 = 0.0f; Vec3 n1{0.0f, 0.0f, 1.0f};
+                    if (BVHSignedGap(*bodyBVH, cand, g1, &n1)) {
+                        if (g1 < kGapFloor)
+                            cand = Add(cand, Scale(n1, kGapFloor - g1));  // no penetration
+                        // NOTE: no re-seat-to-target here. The flap is meant to DRAPE
+                        // (hang at gap > target); clamping it back to target would undo
+                        // the drape. De-wrinkle only smooths tangentially + stops
+                        // penetration; positioning is owned by the drape/seat above.
+                    }
+                }
+                next[i] = cand;
+                ++moved;
+            }
+            finalVerts = std::move(next);
+        }
+        HLog("belt de-wrinkle: iters=%d strength=%.2f moved=%d",
+             params.beltDeWrinkleIterations, kStrength, moved);
+    }
+    };  // applyBeltFinishing (invoked after the clamp passes below)
+
     // Slider-source influence blend (CORRECTION MODE ONLY).
     // In physicsDrape mode, physics determines cloth position â€” no blend-back.
     // Blending back to supportVerts (vanilla conform) would kill the drape effect.
@@ -5250,6 +5822,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
             }
         }
     }
+
+    // Belt seat + de-wrinkle: run LAST so the influence-blend / safety-clamp above
+    // can't pull the seated belt back toward the vanilla float. No-op for non-belt
+    // presets (beltSeatIterations / beltDeWrinkleIterations default to 0).
+    applyBeltFinishing();
 
     // â”€â”€ WRITE-PATH DIAGNOSTIC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Overrides the physics result with a brutal, obvious deformation so we can
@@ -7607,7 +8184,12 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         const float kFaceOverlap2 = 5.5f * 5.5f;
         const float kBaseUnderSlack = 0.10f;
         const float kBodyFloor = tubularLayerTuck ? 0.06f : (fittedLayerTuck ? 0.08f : 0.06f);
-        const float kMoveFloor = kBodyFloor;
+        // When the outer garment leaves no room at kBodyFloor (its own surface dips
+        // close to or below the body there), Pants is never directly visible under a
+        // covering outer layer, so let it embed toward the body instead of poking past
+        // the outer. applyFinalBodyClearance still softens anything that goes too deep.
+        const float kNoRoomFloor = tubularLayerTuck ? -0.50f : kBodyFloor;
+        const float kMoveFloor = tubularLayerTuck ? kNoRoomFloor : kBodyFloor;
         const bool looseLayerTuck = isLoosePreset;
         const float kMoveStrength = tubularLayerTuck ? 0.76f : (fittedLayerTuck ? 0.62f : (intermediateLooseVolume ? 0.70f : (looseLayerTuck ? 0.65f : 0.55f)));
         const float kMaxStep = tubularLayerTuck ? 0.25f : (fittedLayerTuck ? 0.16f : (intermediateLooseVolume ? 0.24f : (looseLayerTuck ? 0.22f : 0.18f)));
@@ -7681,8 +8263,13 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                     float allowed = outerGap - layerMarginFor(oc.preset);
                     if (allowed < kBodyFloor) {
                         if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
-                        if ((tubularLayerTuck || fittedLayerTuck) && myGap > kBodyFloor + 0.01f)
+                        if (tubularLayerTuck) {
+                            float tightTarget = std::max(allowed, kNoRoomFloor);
+                            if (myGap > tightTarget + 0.01f)
+                                targetGap = std::min(targetGap, tightTarget);
+                        } else if (fittedLayerTuck && myGap > kBodyFloor + 0.01f) {
                             targetGap = std::min(targetGap, kBodyFloor);
+                        }
                         continue;
                     }
                     if (myGap > allowed + 0.01f)
@@ -7691,6 +8278,11 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
 
                 if (targetGap >= myGap - 0.01f) continue;
                 float step = std::min((myGap - targetGap) * kMoveStrength, kMaxStep);
+                // Hard per-round cap on current position, not just intended step: surface
+                // curvature can make a step move the gap further than the linear estimate,
+                // which would let repeated rounds overshoot kMoveFloor. Recomputed from the
+                // CURRENT gap each round, so it bounds the actual position, not just intent.
+                step = std::min(step, myGap - kMoveFloor);
                 if (step <= 0.0f) continue;
                 finalVerts[i] = Add(finalVerts[i], Scale(myNrm, -step));
                 ++roundTucked;
@@ -7723,12 +8315,20 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                             if (!signedGap2(*bodyBVH, outerCur, outerGap, nullptr)) continue;
                             // Use current-morph gap instead of base-gap guard: skip only when
                             // the outer face is significantly below us (dress naturally above it).
-                            if (outerGap + 0.15f <= myGap) continue;
+                            // Tubular (Pants) is excluded: a large gap here IS the visible clip
+                            // (pants sticking out past the dress) and must fall through to the
+                            // no-room embed logic below instead of being skipped outright.
+                            if (!tubularLayerTuck && outerGap + 0.15f <= myGap) continue;
                             float allowed = outerGap - layerMarginFor(oc.preset);
                             if (allowed < kBodyFloor) {
                                 if (round == 0 && myGap > allowed + 0.01f) ++noRoomSkipped;
-                                if ((tubularLayerTuck || fittedLayerTuck) && myGap > kBodyFloor + 0.01f)
+                                if (tubularLayerTuck) {
+                                    float tightTarget = std::max(allowed, kNoRoomFloor);
+                                    if (myGap > tightTarget + 0.01f)
+                                        targetGap = std::min(targetGap, tightTarget);
+                                } else if (fittedLayerTuck && myGap > kBodyFloor + 0.01f) {
                                     targetGap = std::min(targetGap, kBodyFloor);
+                                }
                                 continue;
                             }
                             if (myGap > allowed + 0.01f)
@@ -8092,6 +8692,155 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     // Write only non-zero diffs (matches BodySlide convention).
     outDiff.clear();
     outDiff.reserve(rawDiff.size());
+    // Belt SKIN-BIND override (Phase 1a). Bind each belt vert to a barycentric anchor on
+    // the BASE body + its signed clearance, then re-evaluate on the MORPHED body so it
+    // tracks the morph at the authored clearance (no float, no magnetism, by construction).
+    // Requires base & morphed body to share topology (same tri indices). Uses the morphed
+    // FACE normal for the offset (interior closest points -> ~exact; edge/vertex -> approx).
+    if (kBeltSkinBind && NormalizePreset(preset) == DRAPE_PRESET_BELT &&
+        bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
+        g_refBodyBVH.tris.size() == bodyBVH->tris.size() && !bodyBVH->faceNormal.empty()) {
+        // The belt is authored LOOSE (~2u clearance). INSET it a fixed distance toward
+        // the body (every vert moves ~the same amount along its normal) so it de-floats
+        // near-uniformly -> preserves edge lengths (little added stretch) and preserves
+        // the RELATIVE drape (no uniform target = no magnetism). kFloor keeps contacts
+        // just off the body (no penetration).
+        const float kInset = 0.0f;
+        const float kFloor = 0.10f;
+        int bound = 0;
+        for (size_t i = 0; i < n; ++i) {
+            Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+            int tri = -1; float u = 0.0f, vv = 0.0f, w = 0.0f;
+            if (!BVHClosestPointEx(g_refBodyBVH, baseVerts[i], cp, nrm, d2, &tri, &u, &vv, &w)) continue;
+            if (tri < 0 || tri >= (int)bodyBVH->tris.size()) continue;
+            float clearance = std::sqrt(d2);
+            if (Dot(Sub(baseVerts[i], cp), nrm) < 0.0f) clearance = -clearance;   // signed
+            clearance = std::max(clearance - kInset, kFloor);   // fixed inset toward body
+            Vec3 mp = TriPointBary(*bodyBVH, tri, u, vv, w);      // same anchor, morphed body
+            Vec3 mn = bodyBVH->faceNormal[(size_t)tri];
+            Vec3 pos = Add(mp, Scale(mn, clearance));
+            float g = 0.0f; Vec3 gn{0,0,1};
+            if (BVHSignedGap(*bodyBVH, pos, g, &gn) && g < kFloor)
+                pos = Add(pos, Scale(gn, kFloor - g));
+            finalVerts[i] = pos;
+            ++bound;
+        }
+        HLog("belt skin-bind: bound %d of %zu verts inset=%.2f (refTris=%zu bodyTris=%zu)",
+             bound, n, kInset, g_refBodyBVH.tris.size(), bodyBVH->tris.size());
+    }
+
+    // ---- M1: belt bind + ARAP (replaces the nudge stack) ----
+    // Bind each belt vert to a barycentric anchor on the SUPPORT's base surface plus its
+    // authored signed offset; the SAME anchor on the support's CURRENT (morphed/solved)
+    // surface is the target. Well-conditioned verts (interior closest point => accurate
+    // face-normal offset) are ARAP handles; ARAP fills the rest, minimising distortion.
+    // Support = a solved inner garment (the dress) if resting-on is enabled and available
+    // (M1b, de-floats onto it); else the body (M1a, reproduces the authored clearance).
+    // No uniform target anywhere => magnetism is structurally impossible.
+    if (kBeltArap && NormalizePreset(preset) == DRAPE_PRESET_BELT &&
+        tris && !tris->empty() && n > 0 && n <= 0xFFFF) {
+        const BodyBVH* supBase = nullptr;
+        const BodyBVH* supCur  = nullptr;
+        std::string supName = "body";
+        if (kBeltArapRestOn && innerColliders) {
+            for (const OuterCollider& ic : *innerColliders) {
+                if (NormalizePreset(ic.preset) != DRAPE_PRESET_LOOSE_DRAPED) continue;  // the dress
+                if (!ic.Base().valid || !ic.Current().valid) continue;
+                if (ic.Base().tris.size() != ic.Current().tris.size()) continue;
+                if (ic.Current().faceNormal.empty()) continue;
+                supBase = &ic.Base(); supCur = &ic.Current(); supName = ic.name;
+                break;
+            }
+        }
+        if (!supBase && bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
+            g_refBodyBVH.tris.size() == bodyBVH->tris.size() && !bodyBVH->faceNormal.empty()) {
+            supBase = &g_refBodyBVH; supCur = bodyBVH; supName = "body";
+        }
+        if (supBase && supCur) {
+            // 1) per-vert bind + morphed target; flag well-conditioned (interior) binds.
+            std::vector<ArapVec3> arap(n);
+            std::vector<ArapVec3> target(n);
+            std::vector<uint8_t> hasTarget(n, 0), wellCond(n, 0);
+            double offSum = 0.0; int offCnt = 0;  // DIAG: authored offset field magnitude
+            for (size_t i = 0; i < n; ++i) {
+                arap[i] = { baseVerts[i].x, baseVerts[i].y, baseVerts[i].z };  // ARAP rest = base
+                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                int tri = -1; float u = 0.0f, v = 0.0f, w = 0.0f;
+                if (!BVHClosestPointEx(*supBase, baseVerts[i], cp, nrm, d2, &tri, &u, &v, &w)) continue;
+                if (tri < 0 || tri >= (int)supCur->tris.size()) continue;
+                float off = std::sqrt(d2);
+                if (Dot(Sub(baseVerts[i], cp), nrm) < 0.0f) off = -off;   // signed
+                offSum += off; ++offCnt;
+                Vec3 mp = TriPointBary(*supCur, tri, u, v, w);
+                Vec3 mn = supCur->faceNormal[(size_t)tri];
+                Vec3 pos = Add(mp, Scale(mn, off));
+                target[i] = { pos.x, pos.y, pos.z };
+                hasTarget[i] = 1;
+                if (u >= 0.05f && v >= 0.05f && w >= 0.05f) wellCond[i] = 1;  // accurate offset dir
+            }
+            // 2) connected components: each disconnected island (wrap/strap/buckle) needs
+            //    its own handles or its ARAP block is singular (unconstrained rigid body).
+            std::vector<int> parent(n);
+            for (size_t i = 0; i < n; ++i) parent[i] = (int)i;
+            auto findRoot = [&](int x) -> int {
+                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                return x;
+            };
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                parent[findRoot(t[0])] = findRoot(t[1]);
+                parent[findRoot(t[1])] = findRoot(t[2]);
+            }
+            // 3) handles = well-conditioned + hasTarget; if a component has < kMinHandles,
+            //    promote all its targeted verts (small rigid islands become pure skin-bind).
+            std::vector<uint8_t> isHandle(n, 0);
+            std::unordered_map<int, int> handleCountByComp;
+            for (size_t i = 0; i < n; ++i)
+                if (hasTarget[i] && wellCond[i]) { isHandle[i] = 1; ++handleCountByComp[findRoot((int)i)]; }
+            const int kMinHandles = 4;
+            for (size_t i = 0; i < n; ++i)
+                if (hasTarget[i] && !isHandle[i] && handleCountByComp[findRoot((int)i)] < kMinHandles)
+                    isHandle[i] = 1;
+            // 4) assemble + solve.
+            std::vector<std::array<uint32_t, 3>> aTris;
+            aTris.reserve(tris->size());
+            for (const auto& t : *tris)
+                if (t[0] < n && t[1] < n && t[2] < n)
+                    aTris.push_back({(uint32_t)t[0], (uint32_t)t[1], (uint32_t)t[2]});
+            std::vector<uint32_t> hIdx; std::vector<ArapVec3> hTgt;
+            for (size_t i = 0; i < n; ++i)
+                if (isHandle[i]) { hIdx.push_back((uint32_t)i); hTgt.push_back(target[i]); }
+            std::unordered_set<int> roots;
+            for (size_t i = 0; i < n; ++i) roots.insert(findRoot((int)i));
+            if (!hIdx.empty() && SolveArap(arap, aTris, hIdx, hTgt, 4)) {
+                for (size_t i = 0; i < n; ++i)
+                    finalVerts[i] = Vec3{ arap[i].x, arap[i].y, arap[i].z };
+                // One-way body floor (the plan's kept safety net): ARAP has no body-
+                // collision awareness, and negative authored offsets (belt inner shell
+                // below the dress) can land verts inside the body. Push ONLY penetrating
+                // verts back out to a thin clearance - one-directional, resolves a
+                // violation, never a uniform inward pull. bodyBVH is the morphed body.
+                int floored = 0;
+                if (bodyBVH && bodyBVH->valid) {
+                    const float kBodyFloor = 0.08f;
+                    for (size_t i = 0; i < n; ++i) {
+                        float g = 0.0f; Vec3 gn{0,0,1};
+                        if (BVHSignedGap(*bodyBVH, finalVerts[i], g, &gn) && g < kBodyFloor) {
+                            finalVerts[i] = Add(finalVerts[i], Scale(gn, kBodyFloor - g));
+                            ++floored;
+                        }
+                    }
+                }
+                HLog("belt M1 ARAP: support='%s' verts=%zu handles=%zu comps=%zu bodyFloored=%d authoredOffsetMean=%.3f",
+                     supName.c_str(), n, hIdx.size(), roots.size(), floored,
+                     offCnt > 0 ? (float)(offSum / offCnt) : 0.0f);
+            } else {
+                HLog("belt M1 ARAP: SolveArap FAILED (support='%s' handles=%zu) - keeping pipeline result",
+                     supName.c_str(), hIdx.size());
+            }
+        }
+    }
+
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
         Vec3 finalDiff = Sub(finalVerts[i], baseVerts[i]);
@@ -8113,10 +8862,116 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
     return true;
 }
 
+// Crash-containment wrapper (plan U1). Calls the real implementation inside SEH so
+// a hardware exception ANYWHERE in the ~8000-line solver (bad index, div-by-zero,
+// stack overflow, etc) is caught HERE instead of propagating up through the
+// OutfitStudio hook and taking the host process down with unsaved work. On any
+// crash: outDiff/stats/outSolvedVerts are reset to empty so the caller sees "no
+// result produced" and falls back cleanly (see Detour_GenResult: vanilla's result
+// from g_origGenResult is already sitting in the host, so an empty diff here means
+// vanilla stays - the U2 degradation ladder's bottom rung). Deliberately a THIN
+// wrapper (no local C++ objects needing destructor unwinding) so SEH semantics are
+// unambiguous, matching HostGetRawResultDiff / HostSetResultDiff / HostCopySourceDiff.
+static bool ApplyStaticClothPass(const std::string& shapeName,
+                                 const std::string& sliderName,
+                                 int preset,
+                                 const std::vector<Vec3>& baseVerts,
+                                 const std::vector<VertexBoneProfile>* profiles,
+                                 const std::vector<EdgeConstraint>* edges,
+                                 const std::vector<std::array<uint16_t, 3>>* tris,
+                                 const BodyShell* bodyShell,
+                                 const BodyBVH* bodyBVH,
+                                 const std::unordered_map<uint16_t, float>& presetMask,
+                                 const TargetDataDiffs& rawDiff,
+                                 const std::vector<OuterCollider>* outerColliders,
+                                 const std::vector<OuterCollider>* innerColliders,
+                                 std::vector<Vec3>* outSolvedVerts,
+                                 TargetDataDiffs& outDiff,
+                                 StaticSolveStats& stats) {
+#if defined(_MSC_VER)
+    __try {
+        return ApplyStaticClothPassImpl(shapeName, sliderName, preset, baseVerts,
+                                        profiles, edges, tris, bodyShell, bodyBVH,
+                                        presetMask, rawDiff, outerColliders, innerColliders,
+                                        outSolvedVerts, outDiff, stats);
+    }
+    __except (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW
+                  ? (_resetstkoflw(), EXCEPTION_EXECUTE_HANDLER)
+                  : EXCEPTION_EXECUTE_HANDLER) {
+        HLog("CRASH CONTAINED: ApplyStaticClothPass raised SEH 0x%08X for shape '%s' "
+             "slider '%s' preset=%d - falling back to vanilla conform result",
+             (unsigned)GetExceptionCode(), shapeName.c_str(), sliderName.c_str(), preset);
+        outDiff.clear();
+        stats = StaticSolveStats{};
+        if (outSolvedVerts) outSolvedVerts->clear();
+        return false;
+    }
+#else
+    return ApplyStaticClothPassImpl(shapeName, sliderName, preset, baseVerts,
+                                    profiles, edges, tris, bodyShell, bodyBVH,
+                                    presetMask, rawDiff, outerColliders, innerColliders,
+                                    outSolvedVerts, outDiff, stats);
+#endif
+}
+
+// Output validation gate (plan U2, the degradation ladder's top rung). Even when
+// ApplyStaticClothPass logically "succeeds" (passOk=true, no crash), its output
+// could still be garbage - NaN from a divide-by-zero that didn't fault, or an
+// "explosion" (a feedback loop in one of the ~20 finishing passes blowing a vertex
+// out to absurd distance). Both have happened during development. This is a HARD
+// SANITY ceiling, not a quality gate - thresholds are deliberately generous (far
+// above anything legitimate this project has ever produced, including RM_Heavy's
+// extreme morph) so it only fires on genuine breakage, never on normal tuning
+// variance. On failure the live caller must NOT call HostSetResultDiff, leaving
+// vanilla's already-computed result in place (Detour_GenResult runs
+// g_origGenResult before any of this) - that is the ladder's bottom rung.
+struct SolveValidation {
+    bool ok = true;
+    const char* reason = "";
+    int nanCount = 0;
+    float worstStretch = 0.0f;
+    float maxDisplacement = 0.0f;
+};
+
+static SolveValidation ValidateSolveOutput(const std::vector<Vec3>& baseVerts,
+                                           const std::vector<Vec3>& solvedVerts,
+                                           const std::vector<EdgeConstraint>* edges) {
+    SolveValidation v;
+    static constexpr float kMaxStretchCeiling = 8.0f;     // no legitimate cloth edge does this
+    static constexpr float kMaxDisplacementCeiling = 80.0f;  // absurd for any garment/morph seen
+    size_t n = std::min(baseVerts.size(), solvedVerts.size());
+    if (n == 0) return v;  // empty output is a no-op, not a failure
+
+    for (size_t i = 0; i < n; ++i) {
+        const Vec3& p = solvedVerts[i];
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+            ++v.nanCount;
+            continue;
+        }
+        v.maxDisplacement = std::max(v.maxDisplacement, Len(Sub(p, baseVerts[i])));
+    }
+    if (v.nanCount > 0) { v.ok = false; v.reason = "NaN/Inf vertex"; return v; }
+    if (v.maxDisplacement > kMaxDisplacementCeiling) {
+        v.ok = false; v.reason = "displacement exploded"; return v;
+    }
+    if (edges) {
+        for (const EdgeConstraint& e : *edges) {
+            if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+            float stretch = Len(Sub(solvedVerts[e.a], solvedVerts[e.b])) / e.restLength;
+            v.worstStretch = std::max(v.worstStretch, stretch);
+        }
+        if (v.worstStretch > kMaxStretchCeiling) {
+            v.ok = false; v.reason = "edge stretch exploded"; return v;
+        }
+    }
+    return v;
+}
+
 struct HarnessMetrics {
     float worstEdgeStretch = 0.0f;
     float worstSupportEdgeStretch = 0.0f;
     int bodyPenetrationCount = 0;
+    float worstBodyGap = 0.0f;
     int garmentResidualCount = 0;
     int garmentFaceResidualCount = 0;
     int garmentBodyConflictCount = 0;
@@ -8134,6 +8989,53 @@ struct HarnessMetrics {
     float maxExpectedVertError = 0.0f;
     float maxExpectedDiffError = 0.0f;
     int expectedDiffMismatches = 0;
+
+    // ---- P0 defect-taxonomy metrics (plan Part 2G / Part 9.6) ----
+    // Each pairs with a user-visible complaint this project has repeatedly hit
+    // where the OLD metrics stayed flat. See BELT_AND_PIPELINE_REVIEW.md.
+
+    // roughness: mean |vert - 1-ring centroid|. Complaint: "wrinkly/bunched
+    // surface" (tent-pole lesson). Reported for both the solved output and the
+    // vanilla-conformed input so a regression shows whether we made it WORSE.
+    float roughnessSolved = 0.0f;
+    float roughnessVanilla = 0.0f;
+
+    // floatIndex: solved body-gap minus the vertex's AUTHORED base-pose body-gap
+    // (from skin-bind: base garment vert -> nearest base-body point). Complaint:
+    // "hovers / floats". Near 0 = tracking the AUTHORED clearance, not zero gap
+    // (a garment authored loose is SUPPOSED to float - Part 1 belt finding).
+    float floatIndexMean = 0.0f;
+    float floatIndexWorst = 0.0f;   // signed; most-positive = floats most vs design
+
+    // magnetismIndex: how far a vertex was pulled INWARD (toward the body)
+    // relative to where VANILLA put it. Complaint: "gets sucked into hollows"
+    // (the user's radial-hang rule, Part 9). Only counts inward moves; a garment
+    // that legitimately drapes OUTWARD from vanilla scores 0 here, not negative.
+    int magnetismCount = 0;         // verts pulled inward vs vanilla by > 0.05u
+    float magnetismWorst = 0.0f;    // largest such inward pull
+
+    // interlayerGap: mean/worst SIGNED gap (not violation) from this garment to
+    // each outer/inner collider's CURRENT solved surface. Unlike
+    // garmentResidual*, this reports the plain distance even when it's not
+    // clipping - shows trends like "belt sits Nu below the dress" before it
+    // becomes a violation. Keyed by collider name, same style as residualByOuter.
+    std::unordered_map<std::string, float> interlayerGapMeanByOuter;
+    std::unordered_map<std::string, float> interlayerGapMeanByInner;
+
+    // drapeVerticality: mean angle (degrees, 0=straight down) of edges in
+    // DRAPE-eligible regions (both endpoints have low presetMask follow-weight,
+    // matching the physicsDrape threshold used by the solver). Complaint: "cloth
+    // doesn't hang straight below where the body recedes" (the user's rule).
+    float drapeVerticality = 0.0f;
+    int drapeVerticalityEdgeCount = 0;
+
+    // Deformation energy split: mean squared relative deviation from rest, over
+    // the structural STRETCH edges vs the diagonal BEND (dihedral-proxy) edges.
+    // Complaint: "stretching instead of the faces bending around edges/vertices"
+    // (Part 9.3). A drape change should grow bendEnergy while stretchEnergy stays
+    // ~flat; if stretchEnergy jumps, verts are being translated, not hinged.
+    float stretchEnergy = 0.0f;
+    float bendEnergy = 0.0f;
 };
 
 static std::vector<Vec3> SolvedVertsFromDiff(const std::vector<Vec3>& baseVerts,
@@ -8176,9 +9078,162 @@ static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
     if (body.valid) {
         for (size_t i = 0; i < n; ++i) {
             float gap = 0.0f;
-            if (BVHSignedGap(body, solvedVerts[i], gap, nullptr) && gap < -0.001f)
-                ++m.bodyPenetrationCount;
+            if (BVHSignedGap(body, solvedVerts[i], gap, nullptr)) {
+                if (gap < -0.001f) ++m.bodyPenetrationCount;
+                m.worstBodyGap = std::min(m.worstBodyGap, gap);
+            }
         }
+    }
+
+    // ---- P0 defect-taxonomy metrics (see field comments on HarnessMetrics) ----
+    {
+        // roughness: 1-ring adjacency from cap.tris, shared by the roughness and
+        // drapeVerticality computations below.
+        std::vector<std::vector<uint32_t>> ring(n);
+        if (!cap.tris.empty()) {
+            for (const auto& t : cap.tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k + 1) % 3];
+                    ring[a].push_back(b); ring[b].push_back(a);
+                }
+            }
+            for (size_t i = 0; i < n; ++i) {
+                auto& r = ring[i];
+                std::sort(r.begin(), r.end());
+                r.erase(std::unique(r.begin(), r.end()), r.end());
+            }
+            auto roughnessOf = [&](const std::vector<Vec3>& verts) -> float {
+                double total = 0.0; int cnt = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    const auto& r = ring[i];
+                    if (r.size() < 2) continue;
+                    Vec3 c{0.0f, 0.0f, 0.0f};
+                    for (uint32_t j : r) c = Add(c, verts[j]);
+                    c = Scale(c, 1.0f / (float)r.size());
+                    total += Len(Sub(verts[i], c));
+                    ++cnt;
+                }
+                return cnt > 0 ? (float)(total / cnt) : 0.0f;
+            };
+            m.roughnessSolved = roughnessOf(solvedVerts);
+            std::vector<Vec3> vanillaVerts(n);
+            for (size_t i = 0; i < n; ++i)
+                vanillaVerts[i] = Add(cap.baseVerts[i], DiffAt(cap.rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+            m.roughnessVanilla = roughnessOf(vanillaVerts);
+        }
+
+        // floatIndex + magnetismIndex: both compare against the AUTHORED base-pose
+        // relationship, so they need the reference (base) body BVH alongside the
+        // morphed one.
+        BodyBVH baseBody;
+        if (cap.hasRefBodyBVH)
+            BuildBodyBVH(cap.refBodyBVHVerts, cap.refBodyBVHTris, baseBody);
+        if (body.valid && baseBody.valid) {
+            double floatSum = 0.0; int floatCnt = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float authoredGap = 0.0f, solvedGap = 0.0f;
+                if (!BVHSignedGap(baseBody, cap.baseVerts[i], authoredGap, nullptr)) continue;
+                if (!BVHSignedGap(body, solvedVerts[i], solvedGap, nullptr)) continue;
+                float fi = solvedGap - authoredGap;
+                floatSum += fi; ++floatCnt;
+                if (std::fabs(fi) > std::fabs(m.floatIndexWorst)) m.floatIndexWorst = fi;
+            }
+            if (floatCnt > 0) m.floatIndexMean = (float)(floatSum / floatCnt);
+
+            // magnetismIndex: solved position vs where VANILLA put the SAME vertex,
+            // both measured against the morphed body. Positive = pulled inward
+            // relative to vanilla (the "magnetism" the user's rule forbids).
+            for (size_t i = 0; i < n; ++i) {
+                Vec3 vanillaPos = Add(cap.baseVerts[i],
+                                      DiffAt(cap.rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+                float vanillaGap = 0.0f, solvedGap = 0.0f;
+                if (!BVHSignedGap(body, vanillaPos, vanillaGap, nullptr)) continue;
+                if (!BVHSignedGap(body, solvedVerts[i], solvedGap, nullptr)) continue;
+                float pulledIn = vanillaGap - solvedGap;
+                if (pulledIn > 0.05f) {
+                    ++m.magnetismCount;
+                    m.magnetismWorst = std::max(m.magnetismWorst, pulledIn);
+                }
+            }
+        }
+
+        // drapeVerticality: mean angle-from-vertical of edges where BOTH endpoints
+        // are drape-eligible (low presetMask follow weight - matches the 0.35
+        // physicsDrape threshold already used by the solver, see ApplyStaticClothPassImpl).
+        if (!cap.tris.empty()) {
+            auto followOf = [&](size_t i) -> float {
+                auto it = cap.presetMask.find((uint16_t)std::min<size_t>(i, 0xFFFF));
+                return it != cap.presetMask.end() ? it->second : 1.0f;
+            };
+            std::unordered_set<uint64_t> seenEdge;
+            double angSum = 0.0;
+            for (const auto& t : cap.tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k + 1) % 3];
+                    if (followOf(a) >= 0.35f || followOf(b) >= 0.35f) continue;
+                    uint64_t key = a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
+                    if (!seenEdge.insert(key).second) continue;
+                    Vec3 d = Sub(solvedVerts[a], solvedVerts[b]);
+                    float len = Len(d);
+                    if (len < 1.0e-4f) continue;
+                    float vert = std::fabs(d.z) / len;   // 1=vertical, 0=horizontal
+                    if (vert < 0.30f) continue;           // skip near-horizontal ring edges
+                    angSum += std::acos(std::min(1.0f, vert)) * 57.29578;
+                    ++m.drapeVerticalityEdgeCount;
+                }
+            }
+            if (m.drapeVerticalityEdgeCount > 0)
+                m.drapeVerticality = (float)(angSum / m.drapeVerticalityEdgeCount);
+        }
+
+        // Deformation energy split: mean squared relative deviation from rest,
+        // over structural (stretch) edges vs the diagonal (bend-proxy) edges.
+        if (!cap.edges.empty()) {
+            double sum = 0.0; int cnt = 0;
+            for (const EdgeConstraint& e : cap.edges) {
+                if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+                float ratio = Len(Sub(solvedVerts[e.a], solvedVerts[e.b])) / e.restLength - 1.0f;
+                sum += (double)ratio * ratio; ++cnt;
+            }
+            if (cnt > 0) m.stretchEnergy = (float)(sum / cnt);
+        }
+        if (!cap.bending.empty()) {
+            double sum = 0.0; int cnt = 0;
+            for (const BendingConstraint& bc : cap.bending) {
+                if (bc.c >= n || bc.d >= n || bc.restLength <= 1.0e-6f) continue;
+                float ratio = Len(Sub(solvedVerts[bc.c], solvedVerts[bc.d])) / bc.restLength - 1.0f;
+                sum += (double)ratio * ratio; ++cnt;
+            }
+            if (cnt > 0) m.bendEnergy = (float)(sum / cnt);
+        }
+
+        // interlayerGap: plain signed distance (not a violation) from this
+        // garment's verts to each outer/inner collider's CURRENT surface, so
+        // trends ("belt sits Nu below the dress") show up before they clip.
+        const float kOverlap2 = 4.25f * 4.25f;  // same convention as garmentResidual
+        auto accumulateInterlayer = [&](const std::vector<OuterCollider>& colliders,
+                                        std::unordered_map<std::string, float>& outMean) {
+            for (const OuterCollider& oc : colliders) {
+                if (!oc.Current().valid) continue;
+                double sum = 0.0; int cnt = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(oc.Current(), solvedVerts[i], cp, nrm, d2)) continue;
+                    if (d2 > kOverlap2) continue;
+                    float gap = Dot(Sub(solvedVerts[i], cp), nrm) < 0.0f ? -std::sqrt(d2) : std::sqrt(d2);
+                    sum += gap; ++cnt;
+                }
+                if (cnt > 0) {
+                    std::string name = oc.name.empty() ? std::string("<unnamed>") : oc.name;
+                    outMean[name] = (float)(sum / cnt);
+                }
+            }
+        };
+        accumulateInterlayer(cap.outerColliders, m.interlayerGapMeanByOuter);
+        accumulateInterlayer(cap.innerColliders, m.interlayerGapMeanByInner);
     }
 
     if (body.valid && !cap.outerColliders.empty()) {
@@ -8323,6 +9378,7 @@ struct ReplayOptions {
     fs::path resultObj;
     fs::path debugPly;
     fs::path inputObj;
+    fs::path bodyObj;
     bool quiet = false;
 };
 
@@ -8370,6 +9426,20 @@ static bool WriteDebugPly(const fs::path& path,
         int r = 30;
         int g = (int)ClampRange(mask * 255.0f, 0.0f, 255.0f);
         int b = (int)ClampRange((1.0f - mask) * 255.0f, 0.0f, 255.0f);
+        // Magnetism viz (P0): magenta if this vertex was pulled INWARD toward the
+        // body vs where vanilla put it (the "sucked into hollows" defect, see
+        // magnetismCount/magnetismWorst). Overridden by red (penetration) below,
+        // since an actual penetration is the more severe defect.
+        if (body.valid && i < cap.baseVerts.size()) {
+            Vec3 vanillaPos = Add(cap.baseVerts[i],
+                                  DiffAt(cap.rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+            float vanillaGap = 0.0f, solvedGap = 0.0f;
+            if (BVHSignedGap(body, vanillaPos, vanillaGap, nullptr) &&
+                BVHSignedGap(body, verts[i], solvedGap, nullptr) &&
+                (vanillaGap - solvedGap) > 0.05f) {
+                r = 220; g = 0; b = 220;
+            }
+        }
         if (body.valid) {
             float gap = 0.0f;
             if (BVHSignedGap(body, verts[i], gap, nullptr) && gap < -0.001f) {
@@ -8456,6 +9526,12 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         out.code = 6;
         return out;
     }
+    if (!opts.bodyObj.empty() && cap.hasBodyBVH &&
+        !WriteResultObj(opts.bodyObj, cap.bodyBVHVerts, cap.bodyBVHTris)) {
+        std::cerr << "Error: failed to write body OBJ: " << opts.bodyObj.string() << "\n";
+        out.code = 6;
+        return out;
+    }
     if (!opts.debugPly.empty() && !WriteDebugPly(opts.debugPly, cap, out.solvedVerts)) {
         std::cerr << "Error: failed to write PLY: " << opts.debugPly.string() << "\n";
         out.code = 7;
@@ -8477,6 +9553,7 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                   << " worstEdgeStretch=" << out.metrics.worstEdgeStretch
                   << " worstSupportEdgeStretch=" << out.metrics.worstSupportEdgeStretch
                   << " bodyPenetrations=" << out.metrics.bodyPenetrationCount
+                  << " worstBodyGap=" << out.metrics.worstBodyGap
                   << " garmentResidual=" << out.metrics.garmentResidualCount
                   << " garmentFaceResidual=" << out.metrics.garmentFaceResidualCount
                   << " garmentBodyConflict=" << out.metrics.garmentBodyConflictCount
@@ -8487,7 +9564,17 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                   << " nanCount=" << out.metrics.nanCount
                   << " maxExpectedVertError=" << out.metrics.maxExpectedVertError
                   << " maxExpectedDiffError=" << out.metrics.maxExpectedDiffError
-                  << " expectedDiffMismatches=" << out.metrics.expectedDiffMismatches;
+                  << " expectedDiffMismatches=" << out.metrics.expectedDiffMismatches
+                  << " roughnessSolved=" << out.metrics.roughnessSolved
+                  << " roughnessVanilla=" << out.metrics.roughnessVanilla
+                  << " floatIndexMean=" << out.metrics.floatIndexMean
+                  << " floatIndexWorst=" << out.metrics.floatIndexWorst
+                  << " magnetismCount=" << out.metrics.magnetismCount
+                  << " magnetismWorst=" << out.metrics.magnetismWorst
+                  << " drapeVerticality=" << out.metrics.drapeVerticality
+                  << " drapeVerticalityEdgeCount=" << out.metrics.drapeVerticalityEdgeCount
+                  << " stretchEnergy=" << out.metrics.stretchEnergy
+                  << " bendEnergy=" << out.metrics.bendEnergy;
         if (!out.metrics.garmentResidualByOuter.empty()) {
             std::cout << " residualByOuter=";
             bool firstOuterMetric = true;
@@ -8518,6 +9605,24 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                 std::cout << kv.first << ":" << kv.second << "/body=" << body << "/worst=" << worst;
             }
         }
+        if (!out.metrics.interlayerGapMeanByOuter.empty()) {
+            std::cout << " interlayerGapByOuter=";
+            bool first = true;
+            for (const auto& kv : out.metrics.interlayerGapMeanByOuter) {
+                if (!first) std::cout << ",";
+                first = false;
+                std::cout << kv.first << ":" << kv.second;
+            }
+        }
+        if (!out.metrics.interlayerGapMeanByInner.empty()) {
+            std::cout << " interlayerGapByInner=";
+            bool first = true;
+            for (const auto& kv : out.metrics.interlayerGapMeanByInner) {
+                if (!first) std::cout << ",";
+                first = false;
+                std::cout << kv.first << ":" << kv.second;
+            }
+        }
         std::cout << "\n";
     }
 
@@ -8529,6 +9634,69 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
 
 static int ReplaySolverCapture(const fs::path& path, const ReplayOptions& opts = {}) {
     return RunReplayCapture(path, opts).code;
+}
+
+// U3 slider-continuity check. Users SCRUB sliders; a pass with a hard threshold
+// ("if gap < X, snap") produces a discontinuous jump (popping) between two nearby
+// slider values even though the underlying morph changed smoothly. This compares
+// the FULLY SOLVED output of two captures of the SAME shape (ideally at nearby
+// slider percentages) and reports how far each vertex moved between them - large,
+// isolated per-vertex jumps (vs a smooth spread) are the signature of a gate
+// firing. Judging "is this delta too much for this slider gap" is left to the
+// caller (a human, or a later CI check once real near-slider capture pairs
+// exist); this tool's job is just to produce the number. With two IDENTICAL
+// captures (capA==capB) this must report exactly zero delta - that's also a live
+// determinism check (plan: "byte-identical output every run").
+static int RunContinuityCheck(const fs::path& pathA, const fs::path& pathB) {
+    // NOTE: deliberately checks passOk + nanCount, NOT the RunReplayCapture return
+    // code. A capture's embedded "expected" self-test field (codes 3/4) can go
+    // stale independent of whether the LIVE solve itself succeeded (e.g. the
+    // capture predates a later solver tuning change) - that staleness is
+    // irrelevant to comparing two live solves against each other, which is all
+    // this check does. A genuine solve failure (crash/NaN/read error) still stops it.
+    ReplayOutcome a = RunReplayCapture(pathA, {});
+    if (!a.passOk || a.metrics.nanCount > 0 || a.solvedVerts.empty()) {
+        std::cerr << "Error: capture A did not produce a usable solve (code " << a.code << "): "
+                  << pathA.string() << "\n";
+        return a.code != 0 ? a.code : 1;
+    }
+    ReplayOutcome b = RunReplayCapture(pathB, {});
+    if (!b.passOk || b.metrics.nanCount > 0 || b.solvedVerts.empty()) {
+        std::cerr << "Error: capture B did not produce a usable solve (code " << b.code << "): "
+                  << pathB.string() << "\n";
+        return b.code != 0 ? b.code : 1;
+    }
+    if (a.capture.shapeName != b.capture.shapeName) {
+        std::cerr << "Error: continuity check requires the SAME shape; got '"
+                  << a.capture.shapeName << "' vs '" << b.capture.shapeName << "'\n";
+        return 7;
+    }
+    if (a.solvedVerts.size() != b.solvedVerts.size()) {
+        std::cerr << "Error: vertex count mismatch (topology differs): "
+                  << a.solvedVerts.size() << " vs " << b.solvedVerts.size() << "\n";
+        return 7;
+    }
+    size_t n = a.solvedVerts.size();
+    float maxDelta = 0.0f;
+    double sumDelta = 0.0;
+    size_t worstIdx = 0;
+    for (size_t i = 0; i < n; ++i) {
+        float d = Len(Sub(a.solvedVerts[i], b.solvedVerts[i]));
+        sumDelta += d;
+        if (d > maxDelta) { maxDelta = d; worstIdx = i; }
+    }
+    float meanDelta = n > 0 ? (float)(sumDelta / n) : 0.0f;
+    std::cout << "CONTINUITY shapeA=" << pathA.string()
+              << " shapeB=" << pathB.string()
+              << " shape=" << a.capture.shapeName
+              << " sliderA=" << a.capture.sliderName
+              << " sliderB=" << b.capture.sliderName
+              << " verts=" << n
+              << " maxDelta=" << maxDelta
+              << " meanDelta=" << meanDelta
+              << " worstVertexIndex=" << worstIdx
+              << "\n";
+    return 0;
 }
 
 static int ReplayCaptureDir(const fs::path& dir) {
@@ -8546,8 +9714,16 @@ static int ReplayCaptureDir(const fs::path& dir) {
     dependencyCountByPath.reserve(files.size());
     for (const fs::path& f : files) {
         SolverCapture cap;
-        if (ReadSolverCapture(f, cap))
-            dependencyCountByPath[f.string()] = (int)cap.outerColliders.size();
+        if (ReadSolverCapture(f, cap)) {
+            int key = (int)cap.outerColliders.size();
+            // M1b rest-on: a BELT rests on the loose dress, so it must solve AFTER the
+            // loose garments (support-availability). Bump it past every normal
+            // outer-count so it sorts last. (This is the pilot heuristic - the general
+            // layer graph / cycle handling is M2.)
+            if (kBeltArapRestOn && NormalizePreset(cap.preset) == DRAPE_PRESET_BELT)
+                key += 1000;
+            dependencyCountByPath[f.string()] = key;
+        }
     }
     std::sort(files.begin(), files.end(), [&](const fs::path& a, const fs::path& b) {
         int da = INT_MAX;
@@ -8619,6 +9795,35 @@ static int ReplayCaptureDir(const fs::path& dir) {
                       << " replaced=" << replacedOuters
                       << " addedSemantic=" << addedSemanticOuters
                       << "\n";
+        }
+
+        // M1b rest-on: give a BELT the SOLVED loose garment (the dress) as an inner
+        // support collider, so the M1 ARAP block binds the belt to the dress (de-float)
+        // instead of the body. The belt sorts last (above), so the dress is already
+        // solved and in solvedByName here.
+        int addedInners = 0;
+        if (kBeltArapRestOn && NormalizePreset(cap.preset) == DRAPE_PRESET_BELT) {
+            std::unordered_set<std::string> existingInnerNames;
+            for (const OuterCollider& ic : cap.innerColliders) existingInnerNames.insert(ic.name);
+            for (const auto& kv : solvedByName) {
+                if (kv.first == cap.shapeName || existingInnerNames.count(kv.first)) continue;
+                const ReplayedShape& inner = kv.second;
+                if (NormalizePreset(inner.preset) != DRAPE_PRESET_LOOSE_DRAPED) continue;
+                if (inner.baseVerts.empty() || inner.solvedVerts.empty() || inner.tris.empty()) continue;
+                if (inner.baseVerts.size() != inner.solvedVerts.size()) continue;
+                OuterCollider ic;
+                ic.name = kv.first;
+                ic.preset = inner.preset;
+                BuildBodyBVH(inner.baseVerts, inner.tris, ic.base);
+                BuildBodyBVH(inner.solvedVerts, inner.tris, ic.current);
+                if (!ic.Base().valid || !ic.Current().valid) continue;
+                cap.innerColliders.push_back(std::move(ic));
+                existingInnerNames.insert(kv.first);
+                ++addedInners;
+            }
+            if (addedInners > 0)
+                std::cout << "REPLAY_DIR_INNER_UPDATE shape=" << cap.shapeName
+                          << " addedInner=" << addedInners << "\n";
         }
 
         // In sequence mode, expected diffs belong to the original one-shot capture.
@@ -8741,20 +9946,33 @@ int main(int argc, char** argv) {
         std::string obj = ArgValue(argc, argv, "--result-obj");
         std::string ply = ArgValue(argc, argv, "--debug-ply");
         std::string iobj = ArgValue(argc, argv, "--input-obj");
+        std::string bobj = ArgValue(argc, argv, "--body-obj");
         if (!obj.empty()) opts.resultObj = fs::path(obj);
         if (!ply.empty()) opts.debugPly = fs::path(ply);
+        if (!bobj.empty()) opts.bodyObj = fs::path(bobj);
         if (!iobj.empty()) opts.inputObj = fs::path(iobj);
         return ReplaySolverCapture(fs::path(replay), opts);
     }
     if (!replayDir.empty())
         return ReplayCaptureDir(fs::path(replayDir));
 
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--continuity") {
+            if (i + 2 >= argc) {
+                std::cerr << "Error: --continuity requires two capture paths\n";
+                return 1;
+            }
+            return RunContinuityCheck(fs::path(argv[i + 1]), fs::path(argv[i + 2]));
+        }
+    }
+
     std::cerr
         << "Usage:\n"
         << "  drape-harness --self-test\n"
         << "  drape-harness --write-self-test <capture.drcap>\n"
         << "  drape-harness --replay <capture.drcap> [--result-obj out.obj] [--debug-ply out.ply]\n"
-        << "  drape-harness --replay-dir <capture_dir>\n";
+        << "  drape-harness --replay-dir <capture_dir>\n"
+        << "  drape-harness --continuity <captureA.drcap> <captureB.drcap>\n";
     return 1;
 }
 #else
@@ -9020,6 +10238,22 @@ static void Detour_GenResult(
                                                solvedDiff, stats);
             if (captureThis)
                 MaybeWriteSolverCapture(std::move(solverCapture), passOk, solvedDiff, solvedVerts);
+            // U2 degradation ladder, top rung: even a "successful" solve (no crash,
+            // passOk=true) gets sanity-checked before it's allowed to overwrite the
+            // vanilla result already sitting in the host. Any failure here means we
+            // simply don't call HostSetResultDiff below - vanilla stays untouched.
+            if (passOk) {
+                SolveValidation validation = ValidateSolveOutput(vertsIt->second, solvedVerts, edges);
+                if (!validation.ok) {
+                    HLog("SOLVE REJECTED: shape='%s' slider='%s' preset='%s' reason='%s' "
+                         "nanCount=%d worstStretch=%.2f maxDisplacement=%.2f - "
+                         "falling back to vanilla conform result",
+                         shapeName->c_str(), sliderName->c_str(), PresetName(preset),
+                         validation.reason, validation.nanCount, validation.worstStretch,
+                         validation.maxDisplacement);
+                    passOk = false;
+                }
+            }
             if (passOk) {
                 if (HostSetResultDiff(self, shapeName, sliderName, solvedDiff)) {
                     // Cache this mesh only after the host accepted the diff, so later

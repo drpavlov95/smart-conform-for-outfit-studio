@@ -5,3 +5,5 @@ dist/*.exe
 .vs/
 reference/
 reference/tmp/
+captures/
+tmp/
