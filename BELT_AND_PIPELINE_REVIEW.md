@@ -790,3 +790,50 @@ the shadow's scope from "all non-belt presets" to "LOOSE_DRAPED only", since the
 - Multi-limb / non-torso garments (sleeves, boots) were not in this corpus; the axis-free
   design should generalize (that was the whole point of replacing `RadialBin`), but is
   unverified beyond the belt/dress/cloak/pants corpus.
+
+## Part 14 - M3 INVESTIGATION (2026-07-03, Opus, autonomous session)
+
+**Status: M3.1 built + MEASURED + left gated-OFF as a knob. Key finding: folding the
+finishing tower's contact/stretch does NOT improve this outfit - the tower is already
+near the pen<->stretch Pareto frontier. M3's payoff is architectural, not metric.**
+
+### 14.1 What was tried
+M3's first fold (D2): a FINAL convergence loop after the whole finishing tower (placed
+after the belt-ARAP block, before the diff-write) that projects body-contact (one-way
+push) and edge-length (stretch cap) TOGETHER in one Gauss-Seidel loop, so the two stop
+overriding each other (the tower's LAST body pushes run after its LAST stretch cap, so an
+edge can leave over-stretched - `worstStretch('final')` exists to catch exactly this).
+Flag `kUnifiedContact` (default false) + `DRAPE_UNIFIED=1` / `DRAPE_UNIFIED_PUSH` env
+knobs for harness A/B. Belt excluded (its ARAP result is authoritative).
+
+### 14.2 The finding (dress, dir-replay)
+A hard joint projection eliminated body penetration but TORE the mesh; softening the push
+(compliance) traced the whole frontier - and every point is a straight pen<->stretch
+trade, none beats the tower:
+
+| push stiffness | worstEdgeStretch | bodyPenetrations | faceResidual |
+|---|---|---|---|
+| OFF (tower) | **3.02** | 40 | 62 |
+| 0.15 | 3.18 | 35 | 61 |
+| 0.30 | 3.20 | 29 | 56 |
+| 0.50 | 3.45 | 23 | 55 |
+| 1.00 | 4.50 | **0** | 47 |
+
+There is NO corner with stretch <= 3.02 AND pen < 40. Folding contact+stretch just
+re-parameterizes the frontier the tower already sits near. So: (a) NOT auto-enabled -
+picking a corner (e.g. halve body-poke at +0.4 stretch) is an aesthetic call that needs
+the user's eye, left as a gated knob; (b) gated-off output is byte-identical to the M4
+golden (corpus checker green), so zero risk to the shipped result.
+
+### 14.3 Implication for M3 (course-correction)
+The premise "passes fight => folding them improves results" is only PARTLY true. For
+contact/stretch on this outfit the tower already reaches a decent frontier point (low
+stretch, some pen), so folding is a lateral move. M3's genuine value is therefore
+**code cleanliness + robustness** (fewer passes that can't fight on FUTURE changes /
+other outfits), NOT a visible win here. Given the user's priority ("resultado ser bom")
+and that further folding is (a) invisible-payoff and (b) needs a live visual gate that an
+autonomous session can't provide, the safe M3 progress is **retiring the already-dead /
+flag-off passes** (the `!kBeltArap` nudge tower, retired PoC flags) - corpus byte-verifies
+they're dead, so deleting them cuts pass count with zero result risk - rather than folding
+live passes blind. The unified-solver rewrite (all constraints compliant, XPBD stiffness
+weights) remains the eventual D2 endpoint but wants visual tuning, i.e. the user present.

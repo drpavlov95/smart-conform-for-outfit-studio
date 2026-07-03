@@ -2400,6 +2400,19 @@ static constexpr bool  kGravityShadow = true;   // M4 DONE + user-confirmed live
 static constexpr float kShadowCell    = 1.0f;   // column-grid resolution (world units)
 static constexpr int   kShadowMaxRing = 24;     // max outward push search (cells)
 
+// M3 (2026-07-03): unified-projection seed + FINDING. A final convergence loop that
+// projects body-contact and edge-length TOGETHER (Gauss-Seidel) as the last word.
+// MEASURED (BELT_AND_PIPELINE_REVIEW.md Part 14): folding contact+stretch does NOT beat
+// the existing tower - it only slides along the SAME pen<->stretch frontier the tower
+// already sits near (push 1.0 => pen 40->0 but stretch 3.0->4.5; push 0.15 => pen 40->35
+// stretch 3.0->3.2). No corner strictly dominates, so this is NOT auto-enabled: picking a
+// corner (e.g. less body-poke at some stretch cost) is an aesthetic call needing the
+// user's eye. Left as a gated, tunable KNOB: DRAPE_UNIFIED=1 + DRAPE_UNIFIED_PUSH (default
+// 0.3, a low-stretch/modest-pen-reduction corner). Ships OFF => zero change to the result.
+// Lesson: for THIS outfit the finishing tower is already near-Pareto on contact/stretch,
+// so M3's real payoff is code cleanliness/robustness, not this outfit's metrics.
+static constexpr bool  kUnifiedContact = false;
+
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
     switch (NormalizePreset(preset)) {
@@ -9138,6 +9151,62 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                      supName.c_str(), hIdx.size());
             }
         }
+    }
+
+    // ── M3.1: final unified contact+stretch convergence (kUnifiedContact / DRAPE_UNIFIED) ──
+    // The last word on body-contact AND edge-length, projected TOGETHER. Every finishing
+    // pass above moves verts and can re-violate the OTHER's invariant (a body push
+    // re-stretches an edge; a stretch cap pulls a vert back into the body); running them
+    // as one Gauss-Seidel loop lets them reach a mutual fixpoint instead of the last pass
+    // winning outright. One-way body push (never pulls in => no magnetism) + symmetric
+    // edge cap, cap first so the body push is the final word (body-clean priority, matching
+    // the tower it replaces). Belt excluded (its M1 ARAP result is authoritative).
+    // Deterministic: fixed iterations, fixed edge/vertex order. Ships OFF.
+    if ((kUnifiedContact || EnvToggleOn("DRAPE_UNIFIED")) &&
+        params.verletCloth && !useEdges.empty() &&
+        NormalizePreset(preset) != DRAPE_PRESET_BELT) {
+        const float kPostCap    = 1.12f;   // same cap the tower's stretch pass uses
+        const float kBodyFloor  = 0.06f;   // same tiny floor as the post-seam reclear
+        const int   kIters      = 24;      // enough Gauss-Seidel passes to propagate
+        // Body push is COMPLIANT (stiffness < 1): a hard push slams deep verts out and
+        // tears edges; a soft push lets the edge cap and the contact reach a compromise
+        // (some residual pen, some residual stretch) instead of one winning outright.
+        const float pushK = EnvFloat("DRAPE_UNIFIED_PUSH", 0.3f);
+        int capped = 0, pushed = 0;
+        for (int it = 0; it < kIters; ++it) {
+            // (a) edge stretch cap (symmetric 50/50, pin-aware — a pinned/free edge lets
+            //     the free end take the whole correction so the edge can't escape).
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const auto& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                if (rest <= 1.0e-6f) continue;
+                Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                float len = Len(dir);
+                float cap = rest * kPostCap;
+                if (len <= cap || len <= 1.0e-6f) continue;
+                float wa = (e.a < invMass.size() && invMass[e.a] > 0.0f) ? 1.0f : 0.0f;
+                float wb = (e.b < invMass.size() && invMass[e.b] > 0.0f) ? 1.0f : 0.0f;
+                if (wa + wb <= 0.0f) { wa = 0.5f; wb = 0.5f; }
+                Vec3 delta = Scale(dir, ((len - cap) / len) / (wa + wb));
+                finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, wa));
+                finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, wb));
+                if (it == kIters - 1) ++capped;
+            }
+            // (b) one-way body push-out (tiny floor). Rigid islands keep exact shape at
+            //     0.06 anyway (their edges are unstretched, so the cap never moves them).
+            if (bodyBVH && bodyBVH->valid) {
+                for (size_t i = 0; i < n; ++i) {
+                    Vec3 target = finalVerts[i];
+                    if (BVHCollideVertex(*bodyBVH, target, kBodyFloor)) {
+                        finalVerts[i] = Add(finalVerts[i], Scale(Sub(target, finalVerts[i]), pushK));
+                        if (it == kIters - 1) ++pushed;
+                    }
+                }
+            }
+        }
+        HLog("detour: M3 unified-contact shape='%s' iters=%d lastCap=%d lastPush=%d",
+             shapeName.c_str(), kIters, capped, pushed);
     }
 
     static constexpr float kWriteEps2 = 1.0e-10f;
