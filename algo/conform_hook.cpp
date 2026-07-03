@@ -2396,9 +2396,16 @@ static constexpr bool kLayerSolveOrder = true;
 // impossible; no central-axis assumption => correct for limbs / off-axis straps /
 // split skirts. Ships dark (flag OFF) so the harness can A/B it against the golden
 // before it becomes the default; DRAPE_SHADOW=1 forces it on at runtime for A/B.
-static constexpr bool  kGravityShadow = true;   // M4 DONE + user-confirmed live (2026-07-02)
+static constexpr bool  kGravityShadow = true;   // M4 DONE (2026-07-02); ruled OUT as the thigh-bump cause (2026-07-03 A/B)
 static constexpr float kShadowCell    = 1.0f;   // column-grid resolution (world units)
 static constexpr int   kShadowMaxRing = 24;     // max outward push search (cells)
+// M4.1 (2026-07-03): catenary return rate — how fast loose cloth falls back toward the
+// body per unit-Z below a protrusion. MEASURED at 0.10 on the Yarl corpus: HARMFUL
+// (dress magnetism +207, worstGarmentPen 1.4->6.7, cascades to Pants bodyPen +56) and it
+// was NOT the thigh-bump fix (that's the panel-flatten pass — the bump garments are
+// correction-mode presets the shadow never touches). Default 0 = the user-approved plumb
+// hang; the knob (DRAPE_SHADOW_RETURN) stays for future per-preset tuning with eyes on.
+static constexpr float kShadowReturnRate = 0.0f;
 
 // M3 (2026-07-03): unified-projection seed + FINDING. A final convergence loop that
 // projects body-contact and edge-length TOGETHER (Gauss-Seidel) as the last word.
@@ -2412,6 +2419,11 @@ static constexpr int   kShadowMaxRing = 24;     // max outward push search (cell
 // Lesson: for THIS outfit the finishing tower is already near-Pareto on contact/stretch,
 // so M3's real payoff is code cleanliness/robustness, not this outfit's metrics.
 static constexpr bool  kUnifiedContact = false;
+
+// Thigh-bump fix (2026-07-03): flatten LOCAL lumps on garment regions whose AUTHORED
+// body-gap says "hanging, not fitted" (apron/skirt panels). Root cause + measurement in
+// BELT_AND_PIPELINE_REVIEW.md Part 15. OFF until eyeballed live (DRAPE_PANELS=1 to A/B).
+static constexpr bool  kPanelFlatten = false;
 
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
@@ -3211,21 +3223,21 @@ static bool BuildGravityShadow(const std::vector<Vec3>& verts,
 // push; the collision is one-sided so a free vertex is never pulled in). maxRingCells
 // caps the outward search (verts start near the body surface, so this is short).
 static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
-                                 float clearance, float wallSlope, int maxRingCells,
+                                 float clearance, float returnRate, int maxRingCells,
                                  float& outX, float& outY) {
     if (!s.valid) return false;
     int ci = s.cx(p.x), cj = s.cy(p.y);
     if (!s.inGrid(ci, cj)) return false;
-    // "empty at height p.z" allows for a wall that tilts inward with depth below the
-    // contact: a column counts as clear if its top is more than wallSlope*(contactTop
-    // - p.z) below p.z. wallSlope 0 = strictly vertical wall (pure plumb hang).
     float top = s.topAt(ci, cj);
     if (top <= GravityShadow::kNeg || top < p.z) return false;   // vertex is free
+    // Pure-plumb shadow detection: a neighbour column is "clear" if its body top is
+    // below the vertex's own height (nothing above the vertex there). The catenary
+    // "return inward below a protrusion" is applied to the push DISTANCE below, not
+    // here (tilting the clear test was the wrong axis - it pushed cloth further OUT
+    // with depth, the opposite of a hanging chain falling back toward the body).
     auto isClear = [&](int i, int j) -> bool {
         float t = s.topAt(i, j);
-        if (t <= GravityShadow::kNeg) return true;               // no body in column
-        float allowed = p.z - wallSlope * std::max(0.0f, top - p.z);
-        return t < allowed;
+        return t <= GravityShadow::kNeg || t < p.z;
     };
     // Ring search outward for the nearest clear column (deterministic scan order).
     for (int ring = 1; ring <= maxRingCells; ++ring) {
@@ -3255,6 +3267,16 @@ static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
             // horizontal direction. The exact contact is refined by the body BVH pass.
             float boundaryDist = len - 0.5f * s.cell;
             float targetDist = std::max(boundaryDist, 0.0f) + clearance;
+            // Catenary return: below a protrusion the cloth falls BACK toward the body
+            // by returnRate per unit-Z of depth (top - p.z), instead of hanging dead-
+            // plumb forever. This softens the "shelf" a short garment forms behind a
+            // receded limb (thigh under a wide RM_Heavy hip) - the pure-plumb wall held
+            // it out at hip width all the way down. Negative targetDist pulls the vertex
+            // inward (toward the body); clamped so it can't overshoot past the body-side
+            // (the body-collision pass owns the hard non-penetration floor).
+            float depth = std::max(0.0f, top - p.z);
+            targetDist -= returnRate * depth;
+            if (targetDist < -boundaryDist) targetDist = -boundaryDist;   // limit inward pull
             outX = p.x + dx * invLen * targetDist;
             outY = p.y + dy * invLen * targetDist;
             return true;
@@ -6112,7 +6134,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                !bodyBVH->verts.empty() && !bodyBVH->tris.empty();
         GravityShadow shadowGrid;
         bool  shadowReady = false;
-        float shadowWallSlope = 0.0f;
+        float shadowReturn = 0.0f;
         if (useShadow) {
             float ceiling = -1.0e30f;
             for (size_t i = 0; i < n; ++i)
@@ -6120,7 +6142,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (ceiling > -1.0e29f)
                 shadowReady = BuildGravityShadow(bodyBVH->verts, bodyBVH->tris,
                                                  kShadowCell, ceiling, shadowGrid);
-            shadowWallSlope = std::max(0.0f, params.drapeReturnRate);  // catenary knob
+            // Catenary return rate: how fast loose cloth falls back toward the body per
+            // unit-Z below a protrusion (0 = dead-plumb hang; higher = follows a receded
+            // limb back in, killing the "shelf behind the thigh" on short RM_Heavy
+            // garments). Tunable live via DRAPE_SHADOW_RETURN for eyeball A/B.
+            shadowReturn = EnvFloat("DRAPE_SHADOW_RETURN", kShadowReturnRate);
         }
         // Soft push strength: a full absolute snap to the silhouette per vertex jags
         // the curved SIDES (neighbours quantise to different grid columns). A PARTIAL
@@ -6137,7 +6163,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (drapeEl[i] < 0.20f) continue;
                     float ox = 0.0f, oy = 0.0f;
                     if (GravityShadowPushOut(shadowGrid, finalVerts[i], params.bodyClearance,
-                                             shadowWallSlope, kShadowMaxRing, ox, oy)) {
+                                             shadowReturn, kShadowMaxRing, ox, oy)) {
                         finalVerts[i].x += (ox - finalVerts[i].x) * kShadowPush;
                         finalVerts[i].y += (oy - finalVerts[i].y) * kShadowPush;
                         ++stats.envelopeAdjusted;
@@ -9209,6 +9235,149 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), kIters, capped, pushed);
     }
 
+    // ── Hanging-panel flatten (thigh-bump fix, 2026-07-03; kPanelFlatten / DRAPE_PANELS) ──
+    // ROOT CAUSE (measured, captures/Fur+Blacksmith): a garment authored HANGING off the
+    // base body (per-vert authored gap grows where the body recedes, e.g. an apron over
+    // the back of the thigh) gets its per-vert authored gaps re-applied over the MORPHED
+    // body by vanilla conform. When proportions change (RM_Heavy), the varying gaps stop
+    // forming a straight hang and become a LOCAL LUMP over the thigh ("bump"), inherited
+    // by our correction-mode presets (Fitted/Tubular preserve the authored gap by design).
+    // RULE-BASED FIX (minimal): cloth with a large AUTHORED gap is not in designed contact
+    // there — it is hanging — and hanging cloth between contacts is straight/smooth; a
+    // local lump has nothing supporting it. So: Laplacian-smooth ONLY the verts whose
+    // authored gap says "hanging" (>= gapMin), inside a small convergence loop with the
+    // edge cap + one-way body floor (M3.1 mechanics) so smoothing can't stretch or clip.
+    // No body-position target anywhere => cannot introduce magnetism; only removes local
+    // curvature => cannot balloon fitted regions (their authored gap is small => excluded).
+    // Rigid islands and the belt are excluded. OFF by default until eyeballed (DRAPE_PANELS=1).
+    bool panelsOn = kPanelFlatten || EnvToggleOn("DRAPE_PANELS");
+#if !defined(DRAPE_HARNESS_BUILD)
+    // Live-only file gate (MO2 can't set env vars): drop/delete panels_on.flag to A/B in
+    // OutfitStudio. Harness/golden runs ignore the file so the corpus baseline stays clean.
+    panelsOn = panelsOn || fs::exists("E:/SkyrimDev/Drape/panels_on.flag");
+#endif
+    if (panelsOn &&
+        !params.verletCloth && params.enabled && !useEdges.empty() &&
+        NormalizePreset(preset) != DRAPE_PRESET_BELT &&
+        g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
+        const float gapMin  = EnvFloat("DRAPE_PANELS_GAP", 1.5f);
+        const float smoothK = EnvFloat("DRAPE_PANELS_SMOOTH", 0.5f);
+        const int   iters   = (int)EnvFloat("DRAPE_PANELS_ITERS", 8.0f);
+        const float kPostCap = 1.12f, kBodyFloor = 0.06f;
+        auto vertRigid = [&](size_t i) -> bool {
+            if (islandIdOut.size() != n) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+        std::vector<uint8_t> eligible(n, 0);
+        size_t nElig = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (vertRigid(i)) continue;
+            float aGap = 0.0f;
+            if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], aGap, nullptr)) continue;
+            if (aGap >= gapMin) { eligible[i] = 1; ++nElig; }
+        }
+        if (nElig >= 8) {
+            std::vector<Vec3> sum(n);
+            std::vector<int>  cnt(n);
+            std::vector<Vec3> vnorm(n);
+            // AUTHORED curvature field c0: the normal component of each vert's Laplacian
+            // in the BASE mesh. The pass restores this field rather than flattening to
+            // zero — a fur tuft or sculpted fold (authored curvature) satisfies c≈c0 and
+            // is untouched; only curvature the MORPH created (the lump: authored smooth,
+            // morphed bumpy) is removed. Same D3 principle as the belt's authored offset.
+            std::vector<float> c0(n, 0.0f);
+            {
+                std::fill(sum.begin(), sum.end(), Vec3{});
+                std::fill(cnt.begin(), cnt.end(), 0);
+                std::fill(vnorm.begin(), vnorm.end(), Vec3{});
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    sum[e.a] = Add(sum[e.a], baseVerts[e.b]); ++cnt[e.a];
+                    sum[e.b] = Add(sum[e.b], baseVerts[e.a]); ++cnt[e.b];
+                }
+                if (tris) {
+                    for (const auto& t : *tris) {
+                        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                        Vec3 fn = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                        Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                        vnorm[t[0]] = Add(vnorm[t[0]], fn);
+                        vnorm[t[1]] = Add(vnorm[t[1]], fn);
+                        vnorm[t[2]] = Add(vnorm[t[2]], fn);
+                    }
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (cnt[i] < 2) continue;
+                    float nl = Len(vnorm[i]);
+                    if (nl < 1.0e-6f) continue;
+                    Vec3 lap = Sub(Scale(sum[i], 1.0f / (float)cnt[i]), baseVerts[i]);
+                    c0[i] = Dot(lap, Scale(vnorm[i], 1.0f / nl));
+                }
+            }
+            for (int it = 0; it < iters; ++it) {
+                // (a) NORMAL-component Laplacian toward the AUTHORED curvature (c -> c0),
+                //     hanging verts only. Normal-only: the tangential part would slide
+                //     verts along the surface, curling hems / shrinking open boundaries
+                //     (measured: full Laplacian moved Fur Pants verts up to 7.4u).
+                std::fill(sum.begin(), sum.end(), Vec3{});
+                std::fill(cnt.begin(), cnt.end(), 0);
+                std::fill(vnorm.begin(), vnorm.end(), Vec3{});
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                    sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                }
+                if (tris) {
+                    for (const auto& t : *tris) {
+                        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                        Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                        Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                        vnorm[t[0]] = Add(vnorm[t[0]], fn);   // area-weighted
+                        vnorm[t[1]] = Add(vnorm[t[1]], fn);
+                        vnorm[t[2]] = Add(vnorm[t[2]], fn);
+                    }
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (!eligible[i] || cnt[i] < 2) continue;
+                    float nl = Len(vnorm[i]);
+                    if (nl < 1.0e-6f) continue;
+                    Vec3 nrm = Scale(vnorm[i], 1.0f / nl);
+                    Vec3 lap = Sub(Scale(sum[i], 1.0f / (float)cnt[i]), finalVerts[i]);
+                    float c = Dot(lap, nrm);
+                    finalVerts[i] = Add(finalVerts[i], Scale(nrm, (c - c0[i]) * smoothK));
+                }
+                // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
+                for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                    const auto& e = useEdges[ei];
+                    if (e.a >= n || e.b >= n) continue;
+                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    if (rest <= 1.0e-6f) continue;
+                    Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
+                    float len = Len(dir);
+                    float cap = rest * kPostCap;
+                    if (len <= cap || len <= 1.0e-6f) continue;
+                    float wa = (e.a < invMass.size() && invMass[e.a] > 0.0f) ? 1.0f : 0.0f;
+                    float wb = (e.b < invMass.size() && invMass[e.b] > 0.0f) ? 1.0f : 0.0f;
+                    if (wa + wb <= 0.0f) { wa = 0.5f; wb = 0.5f; }
+                    Vec3 delta = Scale(dir, ((len - cap) / len) / (wa + wb));
+                    finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, wa));
+                    finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, wb));
+                }
+                // (c) one-way body floor on the smoothed verts — smoothing can't clip.
+                if (bodyBVH && bodyBVH->valid) {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!eligible[i]) continue;
+                        Vec3 target = finalVerts[i];
+                        if (BVHCollideVertex(*bodyBVH, target, kBodyFloor))
+                            finalVerts[i] = target;
+                    }
+                }
+            }
+            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu gapMin=%.2f iters=%d",
+                 shapeName.c_str(), nElig, n, gapMin, iters);
+        }
+    }
+
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
         Vec3 finalDiff = Sub(finalVerts[i], baseVerts[i]);
@@ -9806,8 +9975,43 @@ struct ReplayOptions {
     fs::path debugPly;
     fs::path inputObj;
     fs::path bodyObj;
+    fs::path floatCsv;   // per-vertex authored/vanilla/solved body-gap dump (bump diagnosis)
     bool quiet = false;
 };
+
+// Per-vertex float diagnosis (2026-07-03, thigh-bump investigation): for every vertex,
+// its position and its signed gap to the body in three states — AUTHORED (base vert vs
+// base body), VANILLA (rawDiff-conformed vert vs morphed body), SOLVED (our result vs
+// morphed body). float = gap - authoredGap localizes WHERE a garment floats beyond its
+// design clearance and WHO introduced it (vanilla input vs our solve).
+static bool WriteFloatCsv(const fs::path& path,
+                          const SolverCapture& cap,
+                          const std::vector<Vec3>& solvedVerts) {
+    if (!cap.hasBodyBVH || !cap.hasRefBodyBVH) return false;
+    BodyBVH body, baseBody;
+    BuildBodyBVH(cap.bodyBVHVerts, cap.bodyBVHTris, body);
+    BuildBodyBVH(cap.refBodyBVHVerts, cap.refBodyBVHTris, baseBody);
+    if (!body.valid || !baseBody.valid) return false;
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+    out << "idx,x,y,z,authoredGap,vanillaGap,solvedGap,vanillaFloat,solvedFloat,mask\n";
+    size_t n = std::min(cap.baseVerts.size(), solvedVerts.size());
+    for (size_t i = 0; i < n; ++i) {
+        float aGap = 0.0f, vGap = 0.0f, sGap = 0.0f;
+        if (!BVHSignedGap(baseBody, cap.baseVerts[i], aGap, nullptr)) continue;
+        Vec3 vanillaPos = Add(cap.baseVerts[i],
+                              DiffAt(cap.rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+        if (!BVHSignedGap(body, vanillaPos, vGap, nullptr)) continue;
+        if (!BVHSignedGap(body, solvedVerts[i], sGap, nullptr)) continue;
+        float mask = 1.0f;
+        auto mit = cap.presetMask.find((uint16_t)std::min<size_t>(i, 0xFFFF));
+        if (mit != cap.presetMask.end()) mask = mit->second;
+        out << i << ',' << solvedVerts[i].x << ',' << solvedVerts[i].y << ','
+            << solvedVerts[i].z << ',' << aGap << ',' << vGap << ',' << sGap << ','
+            << (vGap - aGap) << ',' << (sGap - aGap) << ',' << mask << '\n';
+    }
+    return out.good();
+}
 
 struct ReplayOutcome {
     int code = 0;
@@ -9959,6 +10163,10 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         out.code = 6;
         return out;
     }
+    if (!opts.floatCsv.empty() && !WriteFloatCsv(opts.floatCsv, cap, out.solvedVerts)) {
+        std::cerr << "Error: failed to write float CSV: " << opts.floatCsv.string() << "\n";
+    }
+
     if (!opts.debugPly.empty() && !WriteDebugPly(opts.debugPly, cap, out.solvedVerts)) {
         std::cerr << "Error: failed to write PLY: " << opts.debugPly.string() << "\n";
         out.code = 7;
@@ -10457,6 +10665,8 @@ int main(int argc, char** argv) {
         if (!ply.empty()) opts.debugPly = fs::path(ply);
         if (!bobj.empty()) opts.bodyObj = fs::path(bobj);
         if (!iobj.empty()) opts.inputObj = fs::path(iobj);
+        std::string fcsv = ArgValue(argc, argv, "--float-csv");
+        if (!fcsv.empty()) opts.floatCsv = fs::path(fcsv);
         return ReplaySolverCapture(fs::path(replay), opts);
     }
     if (!replayDir.empty())

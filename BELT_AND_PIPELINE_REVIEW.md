@@ -837,3 +837,49 @@ flag-off passes** (the `!kBeltArap` nudge tower, retired PoC flags) - corpus byt
 they're dead, so deleting them cuts pass count with zero result risk - rather than folding
 live passes blind. The unified-solver rewrite (all constraints compliant, XPBD stiffness
 weights) remains the eventual D2 endpoint but wants visual tuning, i.e. the user present.
+
+## Part 15 - THIGH-BUMP ROOT CAUSE + PANEL-FLATTEN (2026-07-03, Opus session)
+
+**Symptom (user, multi-outfit test):** a rounded "bump" floating off the back of the
+thigh at RM_Heavy on Fur/Blacksmith (and "almost all" short garments). Confirmed by the
+user to ALSO appear with VANILLA Conform All -> inherited from the input (tent-pole
+precedent #2), NOT created by our passes. M4 shadow ruled out by live A/B (bump identical
+with shadow compiled off - those garments are Fitted/Tubular, the shadow never ran on them).
+
+### 15.1 Root cause (measured via new `--float-csv` + z-profile analysis)
+A garment authored HANGING off the base body has a per-vert authored gap that GROWS where
+the body recedes (apron over the back of the thigh: gap 2-5u; fitted chest: 0.4u). Vanilla
+conform re-applies each vert's authored gap over the MORPHED body; when proportions change
+the gap field stops describing a straight hang and materializes as a LOCAL LUMP (measured:
+back-thigh profile gap jumps 1.8->4.5u at z 38-46, a +0.6u local silhouette max). Our
+correction-mode presets (Fitted/Tubular, `bodyGapPreserve`) faithfully preserve it.
+
+### 15.2 Fix: hanging-panel flatten (gated `kPanelFlatten` / DRAPE_PANELS / panels_on.flag)
+Rule-based minimal fix: authored gap >= 1.5u means "authored hanging, not fitted" (D3's
+offset field as classifier - presetMask does NOT separate here, measured). For those verts
+only: NORMAL-component Laplacian toward the vert's AUTHORED curvature (c0 from the base
+mesh), in a convergence loop with the edge cap + one-way body floor (M3.1 mechanics).
+- normal-only: full Laplacian slid verts tangentially (Fur Pants moved 7.4u - hem curl).
+- toward c0, not 0: flattening to zero curvature erased AUTHORED detail (fur tufts).
+- Results: bump silhouette max +0.56 -> +0.14; Fur Pants (neg control) meanMove 0.06;
+  Yarl corpus: Pants stretchEnergy/supportStretch actually improved slightly; dress/cloak
+  untouched (verlet path). Deterministic.
+- Live A/B without env vars: file gate `E:/SkyrimDev/Drape/panels_on.flag` (DLL only,
+  ignored by harness so the golden stays clean).
+
+### 15.3 Catenary return (M4.1) - measured HARMFUL, default 0
+The first bump hypothesis (shadow hangs dead-plumb -> shelf) was WRONG. The catenary
+return implemented for it (push distance shrinks with depth below the contact) at 0.10
+regressed the Yarl corpus badly (dress magnetism 544->751, worstGarmentPen 1.4->6.7,
+cascading Pants bodyPen 80->136). Reverted to 0.0 (the user-approved plumb); the knob
+(`DRAPE_SHADOW_RETURN`) and the cleaner push-distance formulation remain. The
+`GravityShadowPushOut` isClear refactor (slope moved out of the clear-test) causes a
+5th-decimal golden drift; Pants worstGarmentPen improved 5.19->3.84. Golden updated.
+
+### 15.4 Infrastructure added
+- `--float-csv <file>` on `--replay`: per-vert authored/vanilla/solved body-gap dump -
+  the tool that localized the bump and measured both fix candidates.
+- `corpus/fur_blacksmith_rm_heavy/` (4 captures) + golden: the bump outfits are now
+  permanent regression cases. Falmer captures also exist in captures/yarl (not yet corpus).
+- Pending live visual: panels_on.flag is ACTIVE - user eyeballs Blacksmith/Fur bump and
+  re-confirms the Yarl dress; then flip kPanelFlatten default or keep file-gated.
