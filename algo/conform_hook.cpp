@@ -9281,6 +9281,41 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             std::vector<Vec3> sum(n);
             std::vector<int>  cnt(n);
             std::vector<Vec3> vnorm(n);
+            // Seam-twin groups: verts COINCIDENT in the base mesh (UV/normal-island
+            // seams duplicate them) have different edge neighbourhoods, so the smoother
+            // would move each twin differently and SPLIT the seam (user-visible tear on
+            // the Blacksmith apron's back seam). Weld each group to its mean after every
+            // round. Same quantized-key pattern as the verlet path's final seam weld.
+            std::vector<std::vector<uint32_t>> seamGroups;
+            {
+                std::unordered_map<uint64_t, std::vector<uint32_t>> coin;
+                coin.reserve(n);
+                auto qk = [](const Vec3& p) -> uint64_t {
+                    auto q = [](float v) -> uint64_t {
+                        return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+                    };
+                    return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+                };
+                for (size_t i = 0; i < n; ++i)
+                    coin[qk(baseVerts[i])].push_back((uint32_t)i);
+                std::vector<uint64_t> keys;
+                keys.reserve(coin.size());
+                for (const auto& kv : coin)
+                    if (kv.second.size() >= 2) keys.push_back(kv.first);
+                std::sort(keys.begin(), keys.end());   // deterministic order
+                for (uint64_t k : keys) seamGroups.push_back(std::move(coin[k]));
+            }
+            auto weldSeams = [&]() {
+                for (const auto& g : seamGroups) {
+                    bool any = false;
+                    for (uint32_t vi : g) if (eligible[vi]) { any = true; break; }
+                    if (!any) continue;
+                    Vec3 m{0.0f, 0.0f, 0.0f};
+                    for (uint32_t vi : g) m = Add(m, finalVerts[vi]);
+                    m = Scale(m, 1.0f / (float)g.size());
+                    for (uint32_t vi : g) finalVerts[vi] = m;
+                }
+            };
             // AUTHORED curvature field c0: the normal component of each vert's Laplacian
             // in the BASE mesh. The pass restores this field rather than flattening to
             // zero — a fur tuft or sculpted fold (authored curvature) satisfies c≈c0 and
@@ -9372,9 +9407,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             finalVerts[i] = target;
                     }
                 }
+                // (d) weld seam twins every round so the smoother can't split seams.
+                weldSeams();
             }
-            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu gapMin=%.2f iters=%d",
-                 shapeName.c_str(), nElig, n, gapMin, iters);
+            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu seamGroups=%zu gapMin=%.2f iters=%d",
+                 shapeName.c_str(), nElig, n, seamGroups.size(), gapMin, iters);
         }
     }
 
