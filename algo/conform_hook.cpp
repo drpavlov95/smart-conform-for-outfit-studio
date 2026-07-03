@@ -9269,13 +9269,29 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             int id = islandIdOut[i];
             return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
         };
+        // Per-vert weight instead of a hard on/off (hard cutoffs read as visible lines):
+        //  - authored feather: ramps in over 1u above gapMin ("authored hanging").
+        //  - contact feather: curvature at verts NEAR the morphed body is the body
+        //    PUSHING the cloth (the user's rule — a legitimate contact shape like the
+        //    butt apex, measured solvedGap 1.3-2.2 there), NOT a morph lump (bump verts
+        //    float at 2.4-5.5). Ramp 1.8->3.0 excludes contact-shaped verts smoothly.
         std::vector<uint8_t> eligible(n, 0);
+        std::vector<float>   weight(n, 0.0f);
         size_t nElig = 0;
         for (size_t i = 0; i < n; ++i) {
             if (vertRigid(i)) continue;
             float aGap = 0.0f;
             if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], aGap, nullptr)) continue;
-            if (aGap >= gapMin) { eligible[i] = 1; ++nElig; }
+            float wAuth = ClampRange((aGap - gapMin) / 1.0f, 0.0f, 1.0f);
+            if (wAuth <= 0.0f) continue;
+            float wContact = 1.0f;
+            if (bodyBVH && bodyBVH->valid) {
+                float cGap = 0.0f;
+                if (BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr))
+                    wContact = ClampRange((cGap - 1.8f) / 1.2f, 0.0f, 1.0f);
+            }
+            float w = wAuth * wContact;
+            if (w > 0.0f) { eligible[i] = 1; weight[i] = w; ++nElig; }
         }
         if (nElig >= 8) {
             std::vector<Vec3> sum(n);
@@ -9316,37 +9332,53 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     for (uint32_t vi : g) finalVerts[vi] = m;
                 }
             };
+            // Representative map: all seam twins share one accumulator slot, so their
+            // Laplacian/normal see the UNION of both sides' neighbourhoods (a full disc).
+            // Without this each twin has a one-sided half-disc whose average sits INSIDE
+            // a convex surface — a persistent inward bias that (c - c0) cannot cancel
+            // once the morph rescales it, visibly pulling the seam line inward (user-
+            // caught: crease down the apron's centre-back seam, front fine).
+            std::vector<uint32_t> rep(n);
+            for (size_t i = 0; i < n; ++i) rep[i] = (uint32_t)i;
+            for (const auto& g : seamGroups)
+                for (uint32_t vi : g) rep[vi] = g[0];
             // AUTHORED curvature field c0: the normal component of each vert's Laplacian
             // in the BASE mesh. The pass restores this field rather than flattening to
             // zero — a fur tuft or sculpted fold (authored curvature) satisfies c≈c0 and
             // is untouched; only curvature the MORPH created (the lump: authored smooth,
             // morphed bumpy) is removed. Same D3 principle as the belt's authored offset.
             std::vector<float> c0(n, 0.0f);
+            std::vector<float> d0(n, 0.0f);   // base mean neighbour distance (local scale ref)
             {
                 std::fill(sum.begin(), sum.end(), Vec3{});
                 std::fill(cnt.begin(), cnt.end(), 0);
                 std::fill(vnorm.begin(), vnorm.end(), Vec3{});
+                std::vector<float> sumd(n, 0.0f);
                 for (const auto& e : useEdges) {
                     if (e.a >= n || e.b >= n) continue;
-                    sum[e.a] = Add(sum[e.a], baseVerts[e.b]); ++cnt[e.a];
-                    sum[e.b] = Add(sum[e.b], baseVerts[e.a]); ++cnt[e.b];
+                    float dl = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+                    sum[rep[e.a]] = Add(sum[rep[e.a]], baseVerts[e.b]); ++cnt[rep[e.a]];
+                    sum[rep[e.b]] = Add(sum[rep[e.b]], baseVerts[e.a]); ++cnt[rep[e.b]];
+                    sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
                 }
                 if (tris) {
                     for (const auto& t : *tris) {
                         if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
                         Vec3 fn = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
                                         Sub(baseVerts[t[2]], baseVerts[t[0]]));
-                        vnorm[t[0]] = Add(vnorm[t[0]], fn);
-                        vnorm[t[1]] = Add(vnorm[t[1]], fn);
-                        vnorm[t[2]] = Add(vnorm[t[2]], fn);
+                        vnorm[rep[t[0]]] = Add(vnorm[rep[t[0]]], fn);
+                        vnorm[rep[t[1]]] = Add(vnorm[rep[t[1]]], fn);
+                        vnorm[rep[t[2]]] = Add(vnorm[rep[t[2]]], fn);
                     }
                 }
                 for (size_t i = 0; i < n; ++i) {
-                    if (cnt[i] < 2) continue;
-                    float nl = Len(vnorm[i]);
+                    uint32_t r = rep[i];
+                    if (cnt[r] < 2) continue;
+                    float nl = Len(vnorm[r]);
                     if (nl < 1.0e-6f) continue;
-                    Vec3 lap = Sub(Scale(sum[i], 1.0f / (float)cnt[i]), baseVerts[i]);
-                    c0[i] = Dot(lap, Scale(vnorm[i], 1.0f / nl));
+                    Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), baseVerts[i]);
+                    c0[i] = Dot(lap, Scale(vnorm[r], 1.0f / nl));
+                    d0[i] = sumd[r] / (float)cnt[r];
                 }
             }
             for (int it = 0; it < iters; ++it) {
@@ -9357,29 +9389,43 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 std::fill(sum.begin(), sum.end(), Vec3{});
                 std::fill(cnt.begin(), cnt.end(), 0);
                 std::fill(vnorm.begin(), vnorm.end(), Vec3{});
+                std::vector<float> sumd(n, 0.0f);
                 for (const auto& e : useEdges) {
                     if (e.a >= n || e.b >= n) continue;
-                    sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
-                    sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                    float dl = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+                    sum[rep[e.a]] = Add(sum[rep[e.a]], finalVerts[e.b]); ++cnt[rep[e.a]];
+                    sum[rep[e.b]] = Add(sum[rep[e.b]], finalVerts[e.a]); ++cnt[rep[e.b]];
+                    sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
                 }
                 if (tris) {
                     for (const auto& t : *tris) {
                         if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
                         Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
                                         Sub(finalVerts[t[2]], finalVerts[t[0]]));
-                        vnorm[t[0]] = Add(vnorm[t[0]], fn);   // area-weighted
-                        vnorm[t[1]] = Add(vnorm[t[1]], fn);
-                        vnorm[t[2]] = Add(vnorm[t[2]], fn);
+                        vnorm[rep[t[0]]] = Add(vnorm[rep[t[0]]], fn);   // area-weighted
+                        vnorm[rep[t[1]]] = Add(vnorm[rep[t[1]]], fn);
+                        vnorm[rep[t[2]]] = Add(vnorm[rep[t[2]]], fn);
                     }
                 }
                 for (size_t i = 0; i < n; ++i) {
-                    if (!eligible[i] || cnt[i] < 2) continue;
-                    float nl = Len(vnorm[i]);
+                    uint32_t r = rep[i];
+                    if (!eligible[i] || cnt[r] < 2) continue;
+                    float nl = Len(vnorm[r]);
                     if (nl < 1.0e-6f) continue;
-                    Vec3 nrm = Scale(vnorm[i], 1.0f / nl);
-                    Vec3 lap = Sub(Scale(sum[i], 1.0f / (float)cnt[i]), finalVerts[i]);
+                    Vec3 nrm = Scale(vnorm[r], 1.0f / nl);
+                    Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), finalVerts[i]);
                     float c = Dot(lap, nrm);
-                    finalVerts[i] = Add(finalVerts[i], Scale(nrm, (c - c0[i]) * smoothK));
+                    // Scale the authored curvature to the CURRENT local mesh scale: a
+                    // uniformly inflated surface (RM_Heavy widening the back panel) has
+                    // c ~ s*c0 with the same shape — comparing against unscaled c0 left
+                    // a persistent (c - c0) < 0 wherever the panel grew, strongest at the
+                    // most-curved centre-back line (user-caught inward crease). Against
+                    // s*c0, pure scaling is equilibrium; only SHAPE change (the lump) moves.
+                    float s = 1.0f;
+                    if (d0[i] > 1.0e-6f && cnt[r] > 0)
+                        s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
+                    finalVerts[i] = Add(finalVerts[i],
+                                        Scale(nrm, (c - c0[i] * s) * smoothK * weight[i]));
                 }
                 // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
