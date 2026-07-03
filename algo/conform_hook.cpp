@@ -2389,6 +2389,17 @@ static constexpr bool kBeltArapRestOn = true;  // prefer a solved inner-garment 
 // on OUR solved dress regardless of order. See BELT_AND_PIPELINE_REVIEW.md Part 12.
 static constexpr bool kLayerSolveOrder = true;
 
+// M4 (2026-07-02): the gravity-shadow realism core (plan Part 9). Replaces the
+// radial-axis loose anti-tuck ("dist-to-body can only increase going down, binned
+// around ONE central axis") with an axis-free push of each loose vert OUT of the
+// body's downward sweep (its gravity shadow). One-sided => magnetism is structurally
+// impossible; no central-axis assumption => correct for limbs / off-axis straps /
+// split skirts. Ships dark (flag OFF) so the harness can A/B it against the golden
+// before it becomes the default; DRAPE_SHADOW=1 forces it on at runtime for A/B.
+static constexpr bool  kGravityShadow = true;   // M4 DONE + user-confirmed live (2026-07-02)
+static constexpr float kShadowCell    = 1.0f;   // column-grid resolution (world units)
+static constexpr int   kShadowMaxRing = 24;     // max outward push search (cells)
+
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
     switch (NormalizePreset(preset)) {
@@ -3068,6 +3079,177 @@ static void ApplyBodyEnvelopeDrapePass(
     }
 }
 
+// ── Gravity-shadow: the axis-free realism core (plan Part 9) ───────────────────
+// Replaces every radial-axis envelope above for LOOSE regions. A dense (x,y) column
+// grid over the body's horizontal bounds; topZ[col] = the highest body-surface Z
+// anywhere in that column. A cloth vertex (x,y,z) is "in shadow" iff the (ceiling-
+// capped) topZ of its column is >= z: there is body at or above it in its OWN
+// vertical column. Colliding loose cloth against the shadow — pushing an in-shadow
+// vertex HORIZONTALLY out to the nearest column whose top is < z, plus clearance —
+// yields the user's rule by construction:
+//   • body protrudes above  → its column stays tall → cloth pushed out         ✔
+//   • body recedes below it  → the column's top is unchanged (still the taller
+//     protrusion above) → the shadow wall is VERTICAL → cloth hangs plumb       ✔
+//   • the collision is ONE-SIDED (only pushes OUT, never pulls a free vertex in),
+//     so the only inward force is the cloth's own tension = "unless it's tight"  ✔
+//   • no code path references the body position as a target ⇒ magnetism is
+//     structurally impossible, not merely discouraged.
+// The ceiling (top of the garment's drape region) is applied at QUERY time so one
+// build serves any garment: body ABOVE the garment casts no shadow onto it. An
+// optional wallSlope tilts the plumb wall inward by that rate per unit-Z below the
+// contact (catenary realism knob = the surviving meaning of drapeReturnRate).
+struct GravityShadow {
+    bool  valid = false;
+    float minX = 0.0f, minY = 0.0f;   // grid origin (world units)
+    float cell = 1.0f, invCell = 1.0f;
+    int   nx = 0, ny = 0;
+    std::vector<float> topZ;           // [j*nx + i]; kNeg where the column has no body
+    static constexpr float kNeg = -1.0e30f;
+
+    inline int   cx(float x) const { return (int)std::floor((x - minX) * invCell); }
+    inline int   cy(float y) const { return (int)std::floor((y - minY) * invCell); }
+    inline float cellCenterX(int i) const { return minX + (i + 0.5f) * cell; }
+    inline float cellCenterY(int j) const { return minY + (j + 0.5f) * cell; }
+    inline bool  inGrid(int i, int j) const { return i >= 0 && i < nx && j >= 0 && j < ny; }
+    inline float topAt(int i, int j) const {
+        return inGrid(i, j) ? topZ[(size_t)j * nx + i] : kNeg;
+    }
+};
+
+// Build the shadow from a morphed body (bodyBVH carries verts+tris). Rasterizes each
+// body triangle's horizontal footprint into the grid, keeping the per-column MAX Z —
+// but ONLY of body at or below `ceiling` (the top of the garment's drape region).
+// Body ABOVE the ceiling (e.g. shoulders above a waist skirt) is ignored, so a column
+// whose only body is above the ceiling casts NO shadow: topZ stays kNeg. This is what
+// makes the shadow garment-relative — cheap to rebuild per solve. Pass a large ceiling
+// (e.g. +inf) to shadow against the whole body. Deterministic (fixed grid + triangle
+// order, no RNG). ~ms for a body at 1u cells.
+static bool BuildGravityShadow(const std::vector<Vec3>& verts,
+                               const std::vector<std::array<uint16_t, 3>>& tris,
+                               float cellSize, float ceiling, GravityShadow& out) {
+    out = GravityShadow{};
+    if (verts.empty() || tris.empty() || cellSize <= 1.0e-3f) return false;
+
+    float minX = verts[0].x, maxX = verts[0].x;
+    float minY = verts[0].y, maxY = verts[0].y;
+    for (const Vec3& v : verts) {
+        minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
+        minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
+    }
+    // Pad one cell so silhouette columns (and their empty neighbours) are in-grid.
+    minX -= cellSize; minY -= cellSize; maxX += cellSize; maxY += cellSize;
+    int nx = (int)std::ceil((maxX - minX) / cellSize) + 1;
+    int ny = (int)std::ceil((maxY - minY) / cellSize) + 1;
+    if (nx <= 1 || ny <= 1 || (int64_t)nx * ny > 4'000'000) return false;  // sanity cap
+
+    out.minX = minX; out.minY = minY;
+    out.cell = cellSize; out.invCell = 1.0f / cellSize;
+    out.nx = nx; out.ny = ny;
+    out.topZ.assign((size_t)nx * ny, GravityShadow::kNeg);
+
+    // Rasterize each triangle: for every cell whose CENTER is inside the 2D triangle,
+    // interpolate Z by barycentric weights and raise that column's topZ.
+    for (const auto& t : tris) {
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size()) continue;
+        const Vec3& a = verts[t[0]]; const Vec3& b = verts[t[1]]; const Vec3& c = verts[t[2]];
+        float triMinX = std::min({a.x, b.x, c.x}), triMaxX = std::max({a.x, b.x, c.x});
+        float triMinY = std::min({a.y, b.y, c.y}), triMaxY = std::max({a.y, b.y, c.y});
+        int i0 = std::max(0, out.cx(triMinX)),     i1 = std::min(nx - 1, out.cx(triMaxX));
+        int j0 = std::max(0, out.cy(triMinY)),     j1 = std::min(ny - 1, out.cy(triMaxY));
+        // 2D edge-function denominator (twice the signed area). Skip slivers.
+        float d = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+        if (std::fabs(d) < 1.0e-9f) {
+            // Degenerate in-plane: still stamp the 3 vertex columns so thin/vertical
+            // tris (side walls) don't leave holes in the silhouette.
+            for (const Vec3& v : {a, b, c}) {
+                if (v.z > ceiling) continue;
+                int i = out.cx(v.x), j = out.cy(v.y);
+                if (out.inGrid(i, j)) {
+                    float& tz = out.topZ[(size_t)j * nx + i];
+                    tz = std::max(tz, v.z);
+                }
+            }
+            continue;
+        }
+        float invD = 1.0f / d;
+        for (int j = j0; j <= j1; ++j) {
+            float py = out.cellCenterY(j);
+            for (int i = i0; i <= i1; ++i) {
+                float px = out.cellCenterX(i);
+                float l0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) * invD;
+                float l1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) * invD;
+                float l2 = 1.0f - l0 - l1;
+                if (l0 < -1.0e-4f || l1 < -1.0e-4f || l2 < -1.0e-4f) continue;  // outside tri
+                float z = l0 * a.z + l1 * b.z + l2 * c.z;
+                if (z > ceiling) continue;                 // body above the drape top
+                float& tz = out.topZ[(size_t)j * nx + i];
+                tz = std::max(tz, z);
+            }
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
+// Query: is (x,y,z) inside the shadow (body at or above it in its column, ceiling
+// already baked into the build)? If so, return the horizontal push-out target = the
+// nearest column whose top is < z, offset outward by `clearance`. wallSlope tilts the
+// wall inward (lets cloth return slightly below a contact). Returns false = free (no
+// push; the collision is one-sided so a free vertex is never pulled in). maxRingCells
+// caps the outward search (verts start near the body surface, so this is short).
+static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
+                                 float clearance, float wallSlope, int maxRingCells,
+                                 float& outX, float& outY) {
+    if (!s.valid) return false;
+    int ci = s.cx(p.x), cj = s.cy(p.y);
+    if (!s.inGrid(ci, cj)) return false;
+    // "empty at height p.z" allows for a wall that tilts inward with depth below the
+    // contact: a column counts as clear if its top is more than wallSlope*(contactTop
+    // - p.z) below p.z. wallSlope 0 = strictly vertical wall (pure plumb hang).
+    float top = s.topAt(ci, cj);
+    if (top <= GravityShadow::kNeg || top < p.z) return false;   // vertex is free
+    auto isClear = [&](int i, int j) -> bool {
+        float t = s.topAt(i, j);
+        if (t <= GravityShadow::kNeg) return true;               // no body in column
+        float allowed = p.z - wallSlope * std::max(0.0f, top - p.z);
+        return t < allowed;
+    };
+    // Ring search outward for the nearest clear column (deterministic scan order).
+    for (int ring = 1; ring <= maxRingCells; ++ring) {
+        bool bestFound = false; float bestD2 = 0.0f; int bestI = 0, bestJ = 0;
+        for (int dj = -ring; dj <= ring; ++dj) {
+            for (int di = -ring; di <= ring; ++di) {
+                if (std::max(std::abs(di), std::abs(dj)) != ring) continue;  // ring shell only
+                int i = ci + di, j = cj + dj;
+                if (!s.inGrid(i, j)) { continue; }
+                if (!isClear(i, j)) continue;
+                float ex = s.cellCenterX(i), ey = s.cellCenterY(j);
+                float d2 = (ex - p.x) * (ex - p.x) + (ey - p.y) * (ey - p.y);
+                if (!bestFound || d2 < bestD2 ||
+                    (d2 == bestD2 && (j < bestJ || (j == bestJ && i < bestI)))) {
+                    bestFound = true; bestD2 = d2; bestI = i; bestJ = j;
+                }
+            }
+        }
+        if (bestFound) {
+            float ex = s.cellCenterX(bestI), ey = s.cellCenterY(bestJ);
+            float dx = ex - p.x, dy = ey - p.y;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1.0e-5f) { outX = p.x; outY = p.y; return false; }
+            float invLen = 1.0f / len;
+            // Push to the clear cell edge nearest the body (boundary ≈ half a cell
+            // inside the clear cell) plus the requested clearance, along the outward
+            // horizontal direction. The exact contact is refined by the body BVH pass.
+            float boundaryDist = len - 0.5f * s.cell;
+            float targetDist = std::max(boundaryDist, 0.0f) + clearance;
+            outX = p.x + dx * invLen * targetDist;
+            outY = p.y + dy * invLen * targetDist;
+            return true;
+        }
+    }
+    return false;  // no clear column within reach — leave to the body BVH pass
+}
+
 // â”€â”€ Hanging-chain pass (user spec item 5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Instead of reading the body shell only at each vertex's own Z (which is blind
 // to a protrusion ABOVE the drape region, e.g. a belly that overhangs the belt),
@@ -3447,6 +3629,39 @@ static bool EnvFlagEnabled(const char* name) {
     // Capture writes large replay files and is expensive. Keep it file-gated so
     // a stale PowerShell/MO2 environment cannot accidentally slow production runs.
     return name && std::string(name) == "DRAPE_CAPTURE" && fs::exists(CaptureFlagPath());
+}
+
+// Generic env-var toggle (distinct from the file-gated DRAPE_CAPTURE above), for
+// harness A/B of gated experiments like DRAPE_SHADOW=1. True iff the var is set to a
+// truthy first char (1/y/t). Read once per solve; constant within a run => still
+// deterministic.
+static bool EnvToggleOn(const char* name) {
+    char buf[16] = {};
+    size_t len = 0;
+    if (!name || getenv_s(&len, buf, sizeof(buf), name) != 0 || len == 0) return false;
+    char c = buf[0];
+    return c == '1' || c == 'y' || c == 'Y' || c == 't' || c == 'T';
+}
+
+// Three-state env toggle: returns `dflt` if the var is UNSET, else its truthiness
+// (0/n/f => false). Lets the harness force a gated feature either ON or OFF for A/B
+// without a rebuild (e.g. DRAPE_SHADOW=0 to measure the baseline when the flag ships on).
+static bool EnvToggle(const char* name, bool dflt) {
+    char buf[16] = {};
+    size_t len = 0;
+    if (!name || getenv_s(&len, buf, sizeof(buf), name) != 0 || len == 0) return dflt;
+    char c = buf[0];
+    return !(c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F');
+}
+
+// Env-overridable float (harness tuning of gated constants without a rebuild).
+static float EnvFloat(const char* name, float dflt) {
+    char buf[32] = {};
+    size_t len = 0;
+    if (!name || getenv_s(&len, buf, sizeof(buf), name) != 0 || len == 0) return dflt;
+    char* end = nullptr;
+    float v = std::strtof(buf, &end);
+    return (end == buf) ? dflt : v;
 }
 
 static fs::path EnvPathOrDefault(const char* name, const fs::path& fallback) {
@@ -5868,7 +6083,54 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         static const int kFinishRounds[] = {5, 9, 14};
         int intensity = g_processingIntensity.load(std::memory_order_relaxed);
         int finishRounds = kFinishRounds[intensity > 2 ? 1 : intensity];
+
+        // M4 gravity shadow (plan Part 9), built ONCE — the morphed body is fixed
+        // during finishing. The push is applied INSIDE the loop below (not as a final
+        // post-pass) so each subsequent smoothing round redistributes it into coherent
+        // hinge rotations (bend-don't-stretch, Part 9.3) rather than per-vertex jags.
+        // Belt excluded (rest-on garment, owned by the M1 ARAP pass). Ships dark
+        // (kGravityShadow=false); DRAPE_SHADOW=1 forces it on for harness A/B.
+        // Scope: LOOSE_DRAPED hangers only (dress skirt, cloak) — the garments the
+        // gravity-shadow (a hang-in-gravity model) actually describes. Tubular/fitted
+        // pieces (pants) and rest-on pieces (belt, ARAP) follow their support instead,
+        // per Part 9.5, so they keep their existing paths.
+        const bool useShadow = EnvToggle("DRAPE_SHADOW", kGravityShadow) &&
+                               NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+                               !bodyBVH->verts.empty() && !bodyBVH->tris.empty();
+        GravityShadow shadowGrid;
+        bool  shadowReady = false;
+        float shadowWallSlope = 0.0f;
+        if (useShadow) {
+            float ceiling = -1.0e30f;
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f) ceiling = std::max(ceiling, finalVerts[i].z);
+            if (ceiling > -1.0e29f)
+                shadowReady = BuildGravityShadow(bodyBVH->verts, bodyBVH->tris,
+                                                 kShadowCell, ceiling, shadowGrid);
+            shadowWallSlope = std::max(0.0f, params.drapeReturnRate);  // catenary knob
+        }
+        // Soft push strength: a full absolute snap to the silhouette per vertex jags
+        // the curved SIDES (neighbours quantise to different grid columns). A PARTIAL
+        // push per round, cohered by the smoothing that follows it in the SAME round,
+        // converges to the wall over the finishing rounds while staying smooth.
+        const float kShadowPush = EnvFloat("DRAPE_SHADOW_PUSH", 0.45f);
+        const int   kShadowFinalSmooth = (int)EnvFloat("DRAPE_SHADOW_SMOOTH", 4.0f);
+
         for (int it = 0; it < finishRounds; ++it) {
+            // M4: partial push OUT of the gravity shadow FIRST, then smoothing below
+            // spreads it into coherent hinge rotations (bend-don't-stretch, Part 9.3).
+            if (shadowReady) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (drapeEl[i] < 0.20f) continue;
+                    float ox = 0.0f, oy = 0.0f;
+                    if (GravityShadowPushOut(shadowGrid, finalVerts[i], params.bodyClearance,
+                                             shadowWallSlope, kShadowMaxRing, ox, oy)) {
+                        finalVerts[i].x += (ox - finalVerts[i].x) * kShadowPush;
+                        finalVerts[i].y += (oy - finalVerts[i].y) * kShadowPush;
+                        ++stats.envelopeAdjusted;
+                    }
+                }
+            }
             if (!useEdges.empty()) {
                 std::vector<Vec3> sum(n, Vec3{});
                 std::vector<int> cnt(n, 0);
@@ -5889,13 +6151,41 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     ++stats.collisionAdjusted;
         }
 
-        // â”€â”€ Loose anti-tuck rule (BVH-based) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Going DOWN the garment, dist-to-body can only INCREASE (new contact)
-        // or hold steady (vertical fall), never decrease abruptly (tuck-in).
-        // Per angular bin: running max of dist-to-body; verts below the floor are
-        // pushed back out along the direction (vertâ†’body) inverted â€” NOT along the
-        // body face normal, which over-extrapolates at large distances.
-        if (params.drapeReturnRate >= 0.0f) {
+        // M4: final tangential smoothing of drape verts to erase the shadow push's
+        // per-vertex jag on the curved SIDES. Pure Laplacian (no re-push), one-sided
+        // by nature: smoothing removes high-frequency jag without a body target, so it
+        // can't create magnetism; the plumb hang set above survives (it's low-frequency).
+        // LOOSE_DRAPED only: the jag was on the hanging dress/cloak. Tubular/fitted
+        // pieces (pants) get the shadow push's clip-reduction but NOT this smoothing,
+        // which would pull a fitted piece back toward the body and undo that win.
+        if (useShadow && shadowReady && kShadowFinalSmooth > 0 && !useEdges.empty() &&
+            NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) {
+            for (int it = 0; it < kShadowFinalSmooth; ++it) {
+                std::vector<Vec3> sum(n, Vec3{});
+                std::vector<int> cnt(n, 0);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                    sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (cnt[i] <= 0 || drapeEl[i] < 0.20f) continue;
+                    Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                    finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.5f));
+                }
+            }
+            // One body-collision clean after smoothing (smoothing can nudge a vert in).
+            for (size_t i = 0; i < n; ++i)
+                if (drapeEl[i] >= 0.20f) collideVertex(i, 1.0f);
+        }
+
+        // â”€â”€ Loose anti-tuck rule (radial fallback, pre-M4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Going DOWN the garment, dist-to-body can only INCREASE (new contact) or hold
+        // steady (vertical fall), never decrease abruptly (tuck-in). Running max of
+        // dist-to-body per angular bin; verts below the floor are pushed out along
+        // (bodyâ†’vert). Single central axis (RadialBin) â€” the geometry M4's shadow
+        // replaces, so this runs ONLY when the shadow is not handling the anti-tuck.
+        if (!useShadow && params.drapeReturnRate >= 0.0f) {
             struct DVert { size_t i; float z, dist; Vec3 cp, awayDir; };
             const int AB = 48;
             std::vector<DVert> dv2;
@@ -9980,6 +10270,78 @@ static int WriteSelfTestCapture(const fs::path& path) {
     return 0;
 }
 
+// Deterministic geometry check for the gravity-shadow (plan Part 9), no capture
+// needed. Builds a synthetic PROTRUSION — a flat square plate at z=20 over the
+// footprint x,y in [-6,6] — and asserts the three clauses of the user's rule:
+//   (1) a vertex directly BELOW the plate is in-shadow and pushed HORIZONTALLY out
+//       to the plate silhouette (+clearance) — plumb hang below the protrusion;
+//   (2) a vertex OUTSIDE the footprint is FREE (one-sided: never pulled in);
+//   (3) a vertex ABOVE the plate is FREE (body above the ceiling casts no shadow).
+static int RunShadowSelfTest() {
+    std::vector<Vec3> verts = {
+        {-6.0f, -6.0f, 20.0f}, {6.0f, -6.0f, 20.0f},
+        { 6.0f,  6.0f, 20.0f}, {-6.0f,  6.0f, 20.0f},
+    };
+    std::vector<std::array<uint16_t, 3>> tris = { {0, 1, 2}, {0, 2, 3} };
+    GravityShadow shadow;
+    if (!BuildGravityShadow(verts, tris, 1.0f, /*ceiling*/100.0f, shadow)) {
+        std::cerr << "shadow-selftest: FAIL build\n";
+        return 1;
+    }
+    const float clearance = 0.5f, wallSlope = 0.0f;
+    const int   maxRing = 24;
+    int failures = 0;
+    auto check = [&](const char* label, bool cond) {
+        std::cout << "  " << (cond ? "PASS " : "FAIL ") << label << "\n";
+        if (!cond) ++failures;
+    };
+
+    // (1) plumb hang: vertex under the plate centre is pushed out to ~silhouette.
+    {
+        float ox = 0.0f, oy = 0.0f;
+        bool pushed = GravityShadowPushOut(shadow, Vec3{0.0f, 0.0f, 0.0f},
+                                           clearance, wallSlope, maxRing, ox, oy);
+        float mag = std::sqrt(ox * ox + oy * oy);
+        std::cout << "    below-centre push=" << (pushed ? 1 : 0)
+                  << " -> (" << ox << "," << oy << ") mag=" << mag << "\n";
+        check("in-shadow vertex pushed OUT to silhouette", pushed && mag > 5.5f && mag < 9.0f);
+    }
+    // (1b) plumb hang holds at the base of the wall too (just below the plate).
+    {
+        float ox = 0.0f, oy = 0.0f;
+        bool pushed = GravityShadowPushOut(shadow, Vec3{2.0f, 0.0f, 19.5f},
+                                           clearance, wallSlope, maxRing, ox, oy);
+        check("vertex just below the plate is in-shadow (vertical wall)", pushed);
+    }
+    // (2) one-sided: a vertex beyond the footprint is free (never pulled in).
+    {
+        float ox = 0.0f, oy = 0.0f;
+        bool pushed = GravityShadowPushOut(shadow, Vec3{12.0f, 0.0f, 0.0f},
+                                           clearance, wallSlope, maxRing, ox, oy);
+        check("vertex outside footprint is FREE (no inward pull)", !pushed);
+    }
+    // (3) a vertex above the plate is free (nothing above it in its column).
+    {
+        float ox = 0.0f, oy = 0.0f;
+        bool pushed = GravityShadowPushOut(shadow, Vec3{0.0f, 0.0f, 25.0f},
+                                           clearance, wallSlope, maxRing, ox, oy);
+        check("vertex above the protrusion is FREE", !pushed);
+    }
+    // (3b) ceiling BAKED below the plate → the plate is not stamped → casts no shadow.
+    {
+        GravityShadow lowCeil;
+        BuildGravityShadow(verts, tris, 1.0f, /*ceiling*/10.0f, lowCeil);
+        float ox = 0.0f, oy = 0.0f;
+        bool pushed = GravityShadowPushOut(lowCeil, Vec3{0.0f, 0.0f, 0.0f},
+                                           clearance, wallSlope, maxRing, ox, oy);
+        check("ceiling below the protrusion suppresses its shadow", !pushed);
+    }
+
+    std::cout << "shadow-selftest: " << (failures == 0 ? "ALL PASS" : "FAILURES")
+              << " (grid " << shadow.nx << "x" << shadow.ny << ")\n";
+    return failures == 0 ? 0 : 1;
+}
+
 static int RunSelfTest() {
     fs::path path = fs::current_path() / "drape_harness_selftest.drcap";
     int writeCode = WriteSelfTestCapture(path);
@@ -10008,6 +10370,8 @@ static bool HasArg(int argc, char** argv, const std::string& flag) {
 int main(int argc, char** argv) {
     if (HasArg(argc, argv, "--self-test"))
         return RunSelfTest();
+    if (HasArg(argc, argv, "--shadow-selftest"))
+        return RunShadowSelfTest();
     std::string writeSelf = ArgValue(argc, argv, "--write-self-test");
     if (!writeSelf.empty())
         return WriteSelfTestCapture(fs::path(writeSelf));

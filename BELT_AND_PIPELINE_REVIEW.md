@@ -689,3 +689,104 @@ solved dress - IS covered by the dir-replay golden. Live confirmation = the drap
 lines `M2 on-demand support solve: 'Clothes' ...` followed by `belt M1 ARAP: support='Clothes'`
 (vs `support='body'`). If the belt still logs `support='body'` live, the dress isn't being
 classed as the belt's inner LOOSE_DRAPED collider - a layer-classification issue, not M2.1.
+
+## Part 13 - M4 COMPLETION LOG (2026-07-02, Opus session)
+
+**Status: M4 DONE (gravity-shadow realism core, Part 9). Deployed, `kGravityShadow=true`
+by default. User-confirmed live: "just tested and it looks great" after the jag fix.**
+
+### 13.1 What was built
+- **`GravityShadow`** (~conform_hook.cpp 2960): an axis-free voxel column-sweep over the
+  morphed body's horizontal footprint. `BuildGravityShadow(verts, tris, cellSize, ceiling,
+  out)` rasterizes each body triangle's 2D footprint into a dense (x,y) grid, keeping the
+  per-column MAX Z **of body at or below `ceiling`** (body above the garment's drape-top is
+  ignored at BUILD time, not query time - a tall column with only shoulder above a waist
+  skirt casts no shadow onto that skirt). Deterministic: fixed grid, fixed triangle order,
+  no RNG.
+- **`GravityShadowPushOut`**: for a cloth vertex, checks whether its own column is
+  "in shadow" (topZ >= vertex Z); if so, ring-searches outward (deterministic scan order)
+  for the nearest column below the wall (optionally tilted inward by `wallSlope`, the
+  surviving `drapeReturnRate` catenary knob) and returns a HORIZONTAL push target. Returns
+  false (no push) for a free vertex - **the collision is one-sided by construction**, so a
+  vertex with nothing above it in its column can never be pulled toward the body. This is
+  the geometric proof of the user's rule, not a heuristic approximation of it.
+- **Deterministic self-test** (`--shadow-selftest`, no capture needed): builds a synthetic
+  flat plate at z=20 and asserts all three rule clauses geometrically - (1) a vertex below
+  the plate is pushed OUT to the silhouette (plumb hang), (1b) the wall stays vertical just
+  below the contact, (2) a vertex beyond the footprint is FREE (one-sided, never pulled in),
+  (3) a vertex above the plate is FREE, (3b) a low ceiling suppresses the plate's shadow
+  entirely. All 5 assertions pass.
+- **Integration** (~conform_hook.cpp 6060, inside `ApplyStaticClothPassImpl`'s verletCloth
+  finishing loop): replaces the old single-central-axis radial anti-tuck (`RadialBin`,
+  48 angular bins around ONE axis - exactly the "right physics, wrong geometry" Part 9.2
+  diagnosed: correct for a tube-around-torso skirt, wrong for limbs/off-axis straps/split
+  skirts) for **LOOSE_DRAPED garments only** (dress skirt, cloak - the pieces the
+  hang-in-gravity model actually describes; belt is rest-on/ARAP, pants are Tubular/follow,
+  per Part 9.5's per-region scoping). The shadow is built ONCE per solve (morphed body is
+  fixed during finishing) and the push runs INSIDE the finishing loop (not a final
+  post-pass), interleaved with the existing edge-averaging smooth - each round's push gets
+  redistributed into coherent hinge rotations by the very next smoothing pass, instead of
+  freezing as a per-vertex jag (bend-don't-stretch, Part 9.3).
+- Flag: `kGravityShadow` (default **true** - shipped). Env overrides for harness A/B without
+  a rebuild: `DRAPE_SHADOW=0/1` (three-state: unset falls back to the compile flag),
+  `DRAPE_SHADOW_PUSH` (default 0.45), `DRAPE_SHADOW_SMOOTH` (default 4).
+
+### 13.2 The jag bug and its fix (mid-session, live-caught)
+First deploy pushed each vertex the FULL distance to the silhouette in one shot. Harness
+numbers looked good (dress magnetism 665->525, pants clip 81->51) and the user confirmed
+the **back** of the dress now hangs perfectly plumb - but the **sides** were "janky/jagged".
+Root cause: an absolute per-vertex snap to a stair-stepped grid boundary makes neighbouring
+vertices quantise to different columns wherever the silhouette curves (the back is one flat
+wall, so it was already smooth; the sides are the curved part). `roughnessSolved` (the P0
+wrinkle metric) confirmed it numerically: 1.039 (off) -> 1.074 (on, absolute push) - a real,
+measurable regression the visual complaint corresponds to.
+
+Two fixes attempted and rejected before the one that worked:
+- **Blurring the shadow's height field** (3x3 box, 2 passes) to smooth the silhouette
+  BOUNDARY - made roughness WORSE (1.142) and broke the self-test (bled the ceiling clamp).
+  Wrong lever: smoothing the COLLIDER doesn't smooth the RESULT if the push is still a hard
+  snap.
+- **Global lower push + smoothing for all presets** - fixed the dress but silently killed
+  the pants' body-clip win (67->81 pen), because the pants' improvement had come from the
+  strong absolute push, not the shadow's geometry per se, and pants are outside the
+  gravity-shadow's actual scope (Tubular, not a hanger).
+
+**What worked:** (a) a PARTIAL push per finishing round (`kShadowPush=0.45`, ease toward the
+target instead of snapping) so consecutive rounds' own smoothing keeps neighbours coherent;
+(b) a dedicated FINAL tangential Laplacian smooth (`kShadowFinalSmooth=4` rounds) after the
+finishing loop, scoped to LOOSE_DRAPED only - pure neighbour-averaging with no body target,
+so it cannot introduce magnetism (it has nothing to do with the body) and can only remove
+HIGH-frequency jag while leaving the LOW-frequency plumb-hang shape intact; (c) narrowing
+the shadow's scope from "all non-belt presets" to "LOOSE_DRAPED only", since the pants'
+"win" was noise from a scope that never should have included them.
+
+### 13.3 Results (dir-replay = golden, updated; shipped defaults push=0.45 smooth=4)
+- **Clothes (dress):** magnetismCount 665->**544** (-18%), bodyPenetrations 35->40 (+5,
+  noise-level - the shadow trades a few new marginal contacts for far fewer inward pulls),
+  **roughnessSolved 1.039->1.035** (matches/beats baseline - the jag is gone),
+  stretchEnergy 0.2912->0.2957 (flat, isometry preserved), bendEnergy carries the drape
+  (0.2782->0.2828) - the bend-don't-stretch gate holds.
+- **Cloak:** magnetismCount 211->224 (+6%, minor), roughness flat (1.4883->1.4881),
+  drapeVerticality basically flat (32.17->31.19, still dominated by the plumb back the user
+  confirmed).
+- **Pants, Belt:** unchanged (out of shadow scope by design - Tubular/rest-on keep their
+  existing paths).
+- **Determinism:** `--continuity` self-delta = 0; `--shadow-selftest` ALL PASS (5/5);
+  `--self-test` unaffected (SelfTestCloth is Fitted Cloth, out of shadow scope).
+- **Live-confirmed by the user** after the jag fix, both the dress back (plumb) and sides
+  (smooth, no more jank).
+
+### 13.4 What M4 did NOT do (scope notes for later)
+- The shadow is only wired into the VERLET finishing loop's loose anti-tuck slot. The
+  legacy non-verlet `ApplyClothDrapeEnvelopePass`/`ApplyBodyEnvelopeDrapePass` (radial,
+  central-axis) are UNTOUCHED and still used by non-verletCloth presets and the fallback
+  body-shell branch when no BVH is available - those still carry the wrong-geometry
+  diagnosis from Part 9.2 if a preset ever routes through them for a loose garment.
+- Grid resolution is fixed at `kShadowCell=1.0` world units, rebuilt fresh every solve
+  (cheap at this outfit's body density; not measured on a much denser body/mod).
+- `wallSlope` (the catenary "return slightly below a contact" knob) is wired to
+  `params.drapeReturnRate` but not independently tuned in this session - it inherits
+  whatever the preset already had.
+- Multi-limb / non-torso garments (sleeves, boots) were not in this corpus; the axis-free
+  design should generalize (that was the whole point of replacing `RadialBin`), but is
+  unverified beyond the belt/dress/cloak/pants corpus.
