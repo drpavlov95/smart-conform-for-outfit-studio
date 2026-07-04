@@ -8148,9 +8148,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         return worst;
     };
 
-    auto applyFinalExactSeamWeld = [&](const char* stageLabel) -> int {
+    // `force` bypasses the preset/size gate: callers that themselves BREAK the seam
+    // invariant (the body-volume rounds push twins along diverging normals — measured
+    // 272 base-coincident pairs torn to 10.4u on the 10k-vert Vampire robes, which the
+    // compact-loose gate excludes) must be able to restore it regardless of preset.
+    auto applyFinalExactSeamWeld = [&](const char* stageLabel, bool force = false) -> int {
         if (exactSeamGroups.empty()) return 0;
-        if (normPreset != DRAPE_PRESET_FITTED_CLOTH &&
+        if (!force &&
+            normPreset != DRAPE_PRESET_FITTED_CLOTH &&
             normPreset != DRAPE_PRESET_TUBULAR &&
             !finalExactSeamForCompactLoose)
             return 0;
@@ -8331,6 +8336,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (roundAdjusted == 0) break;
             totalVolumeAdjusted += roundAdjusted;
             applyFinalSupportCap(16, nullptr);
+            // The volume push moves verts along their LOCAL body normal; twins across an
+            // island junction ride diverging normals and split (Vampire robes: junctions
+            // opened to 10u+, only partially recovered by the final prox cap). Restore
+            // the seam invariant every round instead of repairing a huge tear at the end.
+            applyFinalExactSeamWeld(nullptr, /*force=*/true);
+            applyFinalProxSeamCap(6, nullptr);
         }
         if (totalVolumeAdjusted > 0)
             HLog("detour: loose-outer-body-volume shape='%s' adjusted=%d faceSamples=%d target=[%.2f,%.2f]",
