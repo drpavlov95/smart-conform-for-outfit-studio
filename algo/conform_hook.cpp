@@ -9269,14 +9269,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             int id = islandIdOut[i];
             return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
         };
-        // Per-vert weight instead of a hard on/off (hard cutoffs read as visible lines):
-        //  - authored feather: ramps in over 1u above gapMin ("authored hanging").
-        //  - contact feather: curvature at verts NEAR the morphed body is the body
-        //    PUSHING the cloth (the user's rule — a legitimate contact shape like the
-        //    butt apex, measured solvedGap 1.3-2.2 there), NOT a morph lump (bump verts
-        //    float at 2.4-5.5). Ramp 1.8->3.0 excludes contact-shaped verts smoothly.
+        // Per-vert weights instead of a hard on/off (hard cutoffs read as visible lines):
+        //  - authored feather (wAuth): ramps in over 1u above gapMin ("authored hanging").
+        //  - contact feather (wContact): curvature at verts NEAR the morphed body is the
+        //    body PUSHING the cloth (the user's rule — legitimate contact like the butt
+        //    apex, measured solvedGap 1.3-2.2), NOT a morph lump (bump floats at 2.4-5.5).
+        //    Ramp 1.8->3.0. Applied DIRECTIONALLY below: INWARD corrections are gated by
+        //    wAuth*wContact (never flatten a contact shape), while OUTWARD corrections use
+        //    wAuth alone — cloth spanning a CONCAVE body feature (the gluteal fold the
+        //    drape "draws" through the panel) may lift out of the hollow ("hollows get
+        //    BRIDGED", the rule's third clause) without ever being pulled into the body.
         std::vector<uint8_t> eligible(n, 0);
-        std::vector<float>   weight(n, 0.0f);
+        std::vector<float>   wIn(n, 0.0f), wOut(n, 0.0f);
         size_t nElig = 0;
         for (size_t i = 0; i < n; ++i) {
             if (vertRigid(i)) continue;
@@ -9290,8 +9294,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr))
                     wContact = ClampRange((cGap - 1.8f) / 1.2f, 0.0f, 1.0f);
             }
-            float w = wAuth * wContact;
-            if (w > 0.0f) { eligible[i] = 1; weight[i] = w; ++nElig; }
+            wIn[i]  = wAuth * wContact;
+            wOut[i] = wAuth;
+            if (wOut[i] > 0.0f) { eligible[i] = 1; ++nElig; }
         }
         if (nElig >= 8) {
             std::vector<Vec3> sum(n);
@@ -9424,8 +9429,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float s = 1.0f;
                     if (d0[i] > 1.0e-6f && cnt[r] > 0)
                         s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
-                    finalVerts[i] = Add(finalVerts[i],
-                                        Scale(nrm, (c - c0[i] * s) * smoothK * weight[i]));
+                    float delta = (c - c0[i] * s) * smoothK;
+                    // Directional gating: outward (+normal) may bridge hollows even in
+                    // contact zones; inward is blocked near contact (see weights above).
+                    delta *= (delta > 0.0f) ? wOut[i] : wIn[i];
+                    finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
                 }
                 // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -10059,6 +10067,7 @@ struct ReplayOptions {
     fs::path inputObj;
     fs::path bodyObj;
     fs::path floatCsv;   // per-vertex authored/vanilla/solved body-gap dump (bump diagnosis)
+    fs::path baseObj;    // authored base mesh (tear diagnosis: base-near vs vanilla-near pairs)
     bool quiet = false;
 };
 
@@ -10248,6 +10257,10 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     }
     if (!opts.floatCsv.empty() && !WriteFloatCsv(opts.floatCsv, cap, out.solvedVerts)) {
         std::cerr << "Error: failed to write float CSV: " << opts.floatCsv.string() << "\n";
+    }
+
+    if (!opts.baseObj.empty() && !WriteResultObj(opts.baseObj, cap.baseVerts, cap.tris)) {
+        std::cerr << "Error: failed to write base OBJ: " << opts.baseObj.string() << "\n";
     }
 
     if (!opts.debugPly.empty() && !WriteDebugPly(opts.debugPly, cap, out.solvedVerts)) {
@@ -10750,6 +10763,8 @@ int main(int argc, char** argv) {
         if (!iobj.empty()) opts.inputObj = fs::path(iobj);
         std::string fcsv = ArgValue(argc, argv, "--float-csv");
         if (!fcsv.empty()) opts.floatCsv = fs::path(fcsv);
+        std::string basbj = ArgValue(argc, argv, "--base-obj");
+        if (!basbj.empty()) opts.baseObj = fs::path(basbj);
         return ReplaySolverCapture(fs::path(replay), opts);
     }
     if (!replayDir.empty())
