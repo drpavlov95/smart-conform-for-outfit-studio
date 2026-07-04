@@ -883,3 +883,42 @@ cascading Pants bodyPen 80->136). Reverted to 0.0 (the user-approved plumb); the
   permanent regression cases. Falmer captures also exist in captures/yarl (not yet corpus).
 - Pending live visual: panels_on.flag is ACTIVE - user eyeballs Blacksmith/Fur bump and
   re-confirms the Yarl dress; then flip kPanelFlatten default or keep file-gated.
+
+## Part 16 - VAMPIRE TEAR ROOT CAUSE + IN-ROUND JUNCTION WELD (2026-07-03, autonomous)
+
+**Symptom:** Vampire Armor (10k-vert multi-plate robes) visibly tearing between plates at
+RM_Heavy. User-confirmed OURS: vanilla Conform All is clean - opposite of the bump case.
+
+### 16.1 Root cause (measured on the user's capture)
+272 of 282 torn near-pairs are base-COINCIDENT twins across plate-island junctions.
+The log tells the exact story: `seam-close` closes everything to 0.000, then the
+`loose-outer-body-volume` rounds (anti-collapse: one-way outward push toward a base-gap
+window) move verts/face-samples along their LOCAL body normal - twins across a junction
+ride DIVERGING normals and split to 10.4u. The final prox cap recovered only ~9.4u->7.7.
+Two latent gates made it invisible before: `applyFinalExactSeamWeld` excluded this mesh
+(compact-loose gate: n<=2500, groups<=260; vampire = 10100/848) and the between-round
+support cap does not include prox pairs.
+
+### 16.2 Fix (committed f3fb977)
+Restore the invariant every round instead of repairing the wreck at the end: `force`
+param on `applyFinalExactSeamWeld` (bypasses the preset/size gate for callers that
+themselves break seams) + short `applyFinalProxSeamCap(6)` after each volume round.
+- Vampire: torn pairs 282 -> 29 (-90%), worst gap 10.44 -> 2.59, final worstStretch
+  2.04 -> 1.40 with over-1.5x edges 13 -> 0.
+- Yarl corpus drift all-improvement (Cloak bodyPen 2 -> 0, Belt supportMagnetism
+  3.30 -> 3.14). Goldens updated. Deterministic.
+- Remaining 29 pairs (<=2.6u) are prox pairs within the final cap's allowed ratio -
+  tightening that globally risks fighting legitimate stretch; needs eyes first.
+
+### 16.3 Corpus
++ `corpus/vampire_rm_heavy/` (2 shapes) and `corpus/falmer_rm_heavy/` (8 shapes) with
+goldens. Corpus now: 4 outfits / 18+ shapes at RM_Heavy.
+
+### 16.4 Same-day related work (Part 15 follow-ups, committed 406f46b/590b8a9/02851e0)
+Panel-flatten hardening from live feedback: (a) seam-twin weld per round; (b) UNION
+neighbourhoods for twins (kills one-sided half-disc bias); (c) c0 scaled by local
+edge-length ratio; (d) contact-aware feathering (inward corrections gated near the body -
+the butt apex is the body PUSHING, a legitimate contact shape); (e) directional weights -
+outward corrections bypass the contact gate so cloth BRIDGES concave features (softens
+the "drawn" gluteal fold, the rule's own third clause). Blacksmith/Fur bump confirmed
+~98% fixed by the user; butt-soften awaiting eyes.
