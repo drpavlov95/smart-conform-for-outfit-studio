@@ -10067,6 +10067,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             radialInK = 0.06f;
 #endif
         const float radialMaxStep = EnvFloat("DRAPE_PANELS_RADIAL_STEP", 0.35f);
+        // 0.8: measured to take the Blacksmith hem centre-line bow from +0.49 to +0.11
+        // (vanilla-inherited: nearest-point projection is unstable between the legs and
+        // snaps centre verts sideways). Bump/seams/corpus unaffected at this strength.
+        const float azimuthK = EnvFloat("DRAPE_PANELS_AZIMUTH", 0.8f);
         const int   iters   = (int)EnvFloat("DRAPE_PANELS_ITERS", 8.0f);
         const float kPostCap = 1.12f;
         const float kBodyFloor = EnvFloat("DRAPE_PANELS_BODY_FLOOR", 0.20f);
@@ -10160,6 +10164,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // morphed bumpy) is removed. Same D3 principle as the belt's authored offset.
             std::vector<float> c0(n, 0.0f);
             std::vector<float> r0(n, 0.0f);   // authored radial curvature (neighbour avg R - own R)
+            std::vector<float> a0(n, 0.0f);   // authored azimuthal Laplacian (lateral bow ref)
             std::vector<float> d0(n, 0.0f);   // base mean neighbour distance (local scale ref)
             {
                 std::fill(sum.begin(), sum.end(), Vec3{});
@@ -10197,6 +10202,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     c0[i] = Dot(lap, Scale(vnorm[r], 1.0f / nl));
                     r0[i] = (sumr[r] / (float)cnt[r]) - baseR[i];
                     d0[i] = sumd[r] / (float)cnt[r];
+                    // Authored AZIMUTHAL Laplacian (sideways around the body axis).
+                    // Restoring it fixes LATERAL bows the normal-only smoother cannot
+                    // see: vanilla's nearest-point projection is unstable between two
+                    // body masses (the legs), snapping centre-line verts sideways
+                    // (measured: authored hem centre-line straight at -0.04, vanilla
+                    // bends it to +0.51). Lateral deviation is tangential, so c0/r0
+                    // never touch it; a0 completes the authored local-shape basis.
+                    if (baseR[i] > 1.0e-5f) {
+                        float azx = -(baseVerts[i].y - g_refCenterY) / baseR[i];
+                        float azy =  (baseVerts[i].x - g_refCenterX) / baseR[i];
+                        a0[i] = lap.x * azx + lap.y * azy;
+                    }
                 }
             }
             for (int it = 0; it < iters; ++it) {
@@ -10272,6 +10289,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         float newR = std::max(0.0f, curRad + dR);
                         finalVerts[i].x = g_refCenterX + dirX * newR;
                         finalVerts[i].y = g_refCenterY + dirY * newR;
+                    }
+                }
+                // Azimuthal restore (lateral bow fix): pull each hanging vert's SIDEWAYS
+                // Laplacian back to its authored value. Direction is tangent around the
+                // body axis, so it can neither approach nor leave the body (no magnetism,
+                // no ballooning) — it only slides the panel laterally back to the authored
+                // line where vanilla's between-the-legs projection bent it.
+                if (azimuthK > 0.0f) {
+                    for (size_t i = 0; i < n; ++i) {
+                        uint32_t r = rep[i];
+                        if (!eligible[i] || cnt[r] < 2) continue;
+                        float curRad = RadialRadius(finalVerts[i]);
+                        if (curRad <= 1.0e-5f) continue;
+                        float azx = -(finalVerts[i].y - g_refCenterY) / curRad;
+                        float azy =  (finalVerts[i].x - g_refCenterX) / curRad;
+                        Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), finalVerts[i]);
+                        float a = lap.x * azx + lap.y * azy;
+                        float s = 1.0f;
+                        if (d0[i] > 1.0e-6f && cnt[r] > 0)
+                            s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
+                        // Move OPPOSITE to the deviation: if the neighbourhood average sits
+                        // to the vert's left more than authored, the vert itself drifted
+                        // right — slide it back left toward the authored lateral line.
+                        float dA = ClampRange((a - a0[i] * s) * azimuthK * wOut[i],
+                                              -radialMaxStep, radialMaxStep);
+                        if (std::fabs(dA) <= 1.0e-5f) continue;
+                        finalVerts[i].x += azx * dA;
+                        finalVerts[i].y += azy * dA;
                     }
                 }
                 // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
