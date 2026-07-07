@@ -5996,7 +5996,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         struct LayerBind { uint32_t v; int tri; float bu, bv, bw, off; };
         std::vector<LayerBind> layerBinds;
         const float kLayerBindMax = EnvFloat("DRAPE_LAYER_BIND_MAX", 2.5f);
-        const float kLayerBindK   = ClampRange(EnvFloat("DRAPE_LAYER_BIND_K", 0.5f), 0.0f, 1.0f);
+        // Dark until the inward-hit detection fix + corpus/visual validation (binds DO
+        // fire on multi-layer shapes: vampire/falmer drifted the corpus at 0.5).
+        const float kLayerBindK   = ClampRange(EnvFloat("DRAPE_LAYER_BIND_K", 0.0f), 0.0f, 1.0f);
         BodyBVH selfBVH;
         if (kLayerBindK > 0.0f && kLayerBindMax > 0.0f && tris && !tris->empty() && n <= 0xFFFF) {
             BuildBodyBVH(baseVerts, *tris, selfBVH);
