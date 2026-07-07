@@ -2463,7 +2463,7 @@ static constexpr bool  kUnifiedContact = false;
 // Thigh-bump fix (2026-07-03): flatten LOCAL lumps on garment regions whose AUTHORED
 // body-gap says "hanging, not fitted" (apron/skirt panels). Root cause + measurement in
 // BELT_AND_PIPELINE_REVIEW.md Part 15. OFF until eyeballed live (DRAPE_PANELS=1 to A/B).
-static constexpr bool  kPanelFlatten = false;
+static constexpr bool  kPanelFlatten = true;   // P0 2026-07-07: promoted (bump fix, user-approved; corpus-validated)
 
 // Horizontal hollow bridge (2026-07-05): M4 gravity-shadow bridges VERTICAL hollows
 // (body recedes below a protrusion), but it cannot see a same-Z concavity such as the
@@ -2472,7 +2472,7 @@ static constexpr bool  kPanelFlatten = false;
 // that hollow. It only moves outward, inside the finishing loop, so smoothing and the
 // existing body/stretch gates keep the result coherent. DRAPE_HBRIDGE=1 enables harness
 // A/B; hbridge_on.flag enables live OutfitStudio A/B where env vars are awkward.
-static constexpr bool  kHorizontalBridge = false;
+static constexpr bool  kHorizontalBridge = true;   // P0 2026-07-07: promoted (falmer/vampire wins; dress-neutral)
 static constexpr int   kHBridgeAngleBins = 96;
 static constexpr float kHBridgeZCell = 1.0f;
 static constexpr int   kHBridgeZWindow = 2;
@@ -9740,18 +9740,22 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             return 0;
         }
 
-        bool useLineLocks = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
-#if !defined(DRAPE_HARNESS_BUILD)
-        useLineLocks = useLineLocks || fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
-#endif
-        if (!useLineLocks) return 0;
+        // P0 split (2026-07-07): the CENTRE lock is promoted default-ON (measured seam
+        // meander fix, roughness cost +1.5%); the HEM z-lock stays experimental
+        // (measured +11% roughnessSolved on the Yarl dress - a full snap of the hem band
+        // to VANILLA Z - exactly the up-close bumpiness the user asked to remove).
+        const bool useHemLock = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
+        const bool useCenterLock = EnvToggle("DRAPE_CENTER_LINE_LOCK", true);
+        if (!useHemLock && !useCenterLock) return 0;
 
         const float hemBand = EnvFloat("DRAPE_HEM_LOCK_BAND", 6.0f);
-        const float hemStrength = Clamp01(EnvFloat("DRAPE_HEM_LOCK_STRENGTH", 1.0f));
+        const float hemStrength = useHemLock
+            ? Clamp01(EnvFloat("DRAPE_HEM_LOCK_STRENGTH", 1.0f)) : 0.0f;
         const float centerBand = EnvFloat("DRAPE_CENTER_LINE_BAND", 0.75f);
         const float centerHeight = EnvFloat("DRAPE_CENTER_LINE_HEIGHT", 80.0f);
         const float centerBackMargin = EnvFloat("DRAPE_CENTER_LINE_BACK_MARGIN", 2.0f);
-        const float centerStrength = Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.85f));
+        const float centerStrength = useCenterLock
+            ? Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.85f)) : 0.0f;
         if ((hemBand <= 0.0f || hemStrength <= 0.0f) &&
             (centerBand <= 0.0f || centerStrength <= 0.0f)) {
             return 0;

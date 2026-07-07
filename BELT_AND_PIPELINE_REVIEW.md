@@ -1017,3 +1017,21 @@ ONE preset-aware TARGET ENVELOPE built BEFORE the solve + ONE projection loop:
 Safety net that did NOT exist when M3 was first deferred: 5-outfit corpus (Yarl, Fur,
 Blacksmith, Vampire, Falmer), determinism harness, honest metrics, preset-resolve
 logging, capture pipeline. The refactor is now measurable end-to-end.
+
+### 18.4 P0 DONE (2026-07-07): flag consolidation - "live == git"
+Measured triage of the 3 live flags (full-config corpus A/B vs baseline, then isolation):
+- **PROMOTED to default ON:** panel-flatten (kPanelFlatten; bump fix, user-approved),
+  horizontal bridge (kHorizontalBridge; falmer residuals -112, vampire pen -6,
+  dress-neutral), centre-line lock (DRAPE_CENTER_LINE_LOCK default true; seam meander
+  fix, roughness cost +1.5%).
+- **KEPT OFF:** contact-radial stack (loose-contact-rest, contact-radial, implied
+  shadowMaxGap 0.85) - measured MAGNETISM signature: Yarl dress magnetism +175,
+  roughness +11%, and it pulls loose cloth to <=0.85u of the envelope = the very
+  "skintight" complaint; the dates match its activation (Jul 6). Hem z-lock also off
+  (+11% roughness from full hem snap to VANILLA Z). Both remain env-gated for study.
+- All three live flag FILES deleted; goldens rebaselined on the new defaults;
+  deterministic; DLL deployed. Note: BlackSmithTorso magnetism +144 with panels ON is
+  the honest-metric caveat again (bump flattening moves verts inward vs vanilla's float
+  - user-approved visually).
+- P1 kill-list additions: no-contact-radial + hem-pins (inactive, unvalidated),
+  contact-radial stack (if live A/B confirms the skintight hypothesis), hem z-lock.
