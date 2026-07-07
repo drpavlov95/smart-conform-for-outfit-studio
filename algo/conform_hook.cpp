@@ -5591,7 +5591,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         normPreset == DRAPE_PRESET_FITTED_CLOTH ||
         normPreset == DRAPE_PRESET_TUBULAR;
     if (needsNonTopoSeamCaps && n <= 0xFFFF) {
-        const float kProxDist  = 0.50f;
+        // Env-tunable (P2): layered sub-panels (Blacksmith under-flap) sit farther than
+        // 0.5u from their parent panel and got NO bracing - gravity smeared them into
+        // the "fan" seen in wire.png. Larger radius = authored layer relations held.
+        const float kProxDist  = EnvFloat("DRAPE_PROX_DIST", 0.50f);
         const float kProxDist2 = kProxDist * kProxDist;
         const float pcell = kProxDist;
         auto pkey = [&](const Vec3& p) -> uint64_t {
@@ -5924,6 +5927,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // melted sag or tear open at the back. (Seam welding handles real splits.)
         const float kMaxStretch = 1.10f;
 
+        // ENGINE null-space #2 fix (2026-07-07): COMPRESSION resistance. A fold preserves
+        // 3D edge length (bending changes angles, not lengths) - fabric is inextensible
+        // AND incompressible along its threads. "Fold freely" let gravity+collision
+        // funnel verts into pile-ups (fans of collapsed tris SEEN at the Blacksmith
+        // centre-front hem/waist, wire.png). Soft + floored: edges may compress to
+        // compressFloor*rest (conformed slack tolerated) but resist piling beyond it.
+        // Ships dark: measured on Blacksmith - no fan improvement (fan = layer collapse,
+        // not pile-up; see Part 18.5) and slivers 43->55. Knob for P2 tuning.
+        const float compressK     = ClampRange(EnvFloat("DRAPE_COMPRESS_K", 0.0f), 0.0f, 1.0f);
+        const float compressFloor = ClampRange(EnvFloat("DRAPE_COMPRESS_FLOOR", 0.85f), 0.3f, 1.0f);
         auto solveStretch = [&](float k) {
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                 const auto& e = useEdges[ei];
@@ -5935,7 +5948,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 float len = Len(dir);
                 if (len <= kLenEps) continue;
                 float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
-                if (len <= rest) continue;            // slack/compressed â†’ fold freely
+                if (len <= rest) {
+                    float floorLen = rest * compressFloor;
+                    if (compressK > 0.0f && len < floorLen) {
+                        Vec3 cd = Scale(dir, ((len - floorLen) / len) * compressK / wSum);
+                        finalVerts[e.a] = Sub(finalVerts[e.a], Scale(cd, w1));
+                        finalVerts[e.b] = Add(finalVerts[e.b], Scale(cd, w2));
+                    }
+                    continue;
+                }
                 Vec3 delta = Scale(dir, ((len - rest) / len) * k / wSum);
                 finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
                 finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, w2));

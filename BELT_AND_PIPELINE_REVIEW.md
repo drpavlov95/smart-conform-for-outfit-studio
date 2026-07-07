@@ -1035,3 +1035,25 @@ Measured triage of the 3 live flags (full-config corpus A/B vs baseline, then is
   - user-approved visually).
 - P1 kill-list additions: no-contact-radial + hem-pins (inactive, unvalidated),
   contact-radial stack (if live A/B confirms the skintight hypothesis), hem z-lock.
+
+### 18.5 P2 ENGINE DIAGNOSIS COMPLETE (2026-07-07, autonomous; SEEN not just measured)
+New ritual that changed everything: **render the solved OBJ wireframe (matplotlib) and
+LOOK** (tmp/bump_analysis/wire*.png). Metrics said "fine"; the render showed the truth.
+The engine has THREE structural holes; every patch to date approximates one of them:
+1. **Lateral null-space** (isometric shear): verlet edges don't constrain sideways slide.
+   Partially closed by azimuthal authored-restore (post-pass ON; in-loop machinery dark).
+2. **Compression pile-ups**: solveStretch is stretch-only ("fold freely"); compression
+   knob built (DRAPE_COMPRESS_K, dark - measured no benefit on the fan, because...)
+3. **NO INTER-LAYER BINDING (the fan's real cause, = roadmap U9 twin-shell)**: the
+   Blacksmith front under-flap (authored dense arch, z 8-32) ROTATES/FALLS around its
+   attachment by exactly clothMaxDrop=8u and smears over the outer panel. Vanilla holds
+   it at its authored offset; we hold NOTHING surface-to-surface: prox pairs only stitch
+   boundary<->boundary edges. The fix is the M1 belt mechanism generalized INTRA-garment:
+   bind stacked-layer verts to their parent layer's face (barycentric + authored offset,
+   bidirectional). This also covers vampire plate overlaps and the front crease (the
+   "wave" is the flap's top edge dragging the outer panel).
+P2 BUILD LIST (priority order): (a) intra-garment layer detection (base-pose face-to-face
+overlap, opposing normals) + authored-offset binds in the solve; (b) tune in-loop azimuth
+(retire post-pass); (c) region shape-matching (ARAP) for wave-scale folds if (a) doesn't
+subsume it. Acceptance: the Blacksmith fan/arch keeps authored shape; front crease
+5.76 -> ~4.3; wire.png clean; corpus green; then USER eyes.
