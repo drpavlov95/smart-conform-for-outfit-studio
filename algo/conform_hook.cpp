@@ -9734,6 +9734,93 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
     logProxSeamState("after-final-prox-cap");
 
+    // Loose-path AZIMUTHAL authored-Laplacian restore (2026-07-07). Measured: the
+    // verlet solve leaves the whole loose panel laterally INCOHERENT (near-seam lateral
+    // shear strain mean 0.475 with NO lock at all - the seam meander is just its most
+    // visible symptom, and the user sees the sheared faces up close). Restore each
+    // drape vert's azimuthal (sideways-around-the-axis) Laplacian toward its AUTHORED
+    // value - same a0 basis as the panel-flatten - moving the strip coherently.
+    // Tangent-direction moves cannot approach/leave the body radially (no magnetism);
+    // seam twins share union neighbourhoods via exact-seam groups; welded after.
+    auto applyLooseAzimuthalRestore = [&]() -> int {
+        if (NormalizePreset(preset) != DRAPE_PRESET_LOOSE_DRAPED ||
+            !params.physicsDrape || n == 0 || useEdges.empty()) return 0;
+        if (!EnvToggle("DRAPE_LOOSE_AZIMUTH", true)) return 0;
+        const float k = ClampRange(EnvFloat("DRAPE_LOOSE_AZIMUTH_K", 0.5f), 0.0f, 1.0f);
+        const int   iters = (int)EnvFloat("DRAPE_LOOSE_AZIMUTH_ITERS", 4.0f);
+        const float maxStep = EnvFloat("DRAPE_LOOSE_AZIMUTH_STEP", 0.35f);
+        if (k <= 0.0f || iters <= 0) return 0;
+
+        std::vector<uint32_t> rep(n);
+        for (size_t i = 0; i < n; ++i) rep[i] = (uint32_t)i;
+        for (const auto& grp : exactSeamGroups)
+            for (uint32_t vi : grp)
+                if (vi < n && !grp.empty()) rep[vi] = grp[0];
+
+        auto azOf = [&](const Vec3& v, float& ax, float& ay) -> bool {
+            float dx = v.x - g_refCenterX, dy = v.y - g_refCenterY;
+            float r = std::sqrt(dx * dx + dy * dy);
+            if (r <= 1.0e-5f) return false;
+            ax = -dy / r; ay = dx / r;
+            return true;
+        };
+
+        std::vector<Vec3>  sum(n);
+        std::vector<int>   cnt(n, 0);
+        std::vector<float> sumd(n, 0.0f);
+        std::vector<float> a0(n, 0.0f), d0(n, 0.0f);
+        for (const auto& e : useEdges) {
+            if (e.a >= n || e.b >= n) continue;
+            float dl = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+            sum[rep[e.a]] = Add(sum[rep[e.a]], baseVerts[e.b]); ++cnt[rep[e.a]];
+            sum[rep[e.b]] = Add(sum[rep[e.b]], baseVerts[e.a]); ++cnt[rep[e.b]];
+            sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t r = rep[i];
+            if (cnt[r] < 2) continue;
+            float ax, ay;
+            if (!azOf(baseVerts[i], ax, ay)) continue;
+            Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), baseVerts[i]);
+            a0[i] = lap.x * ax + lap.y * ay;
+            d0[i] = sumd[r] / (float)cnt[r];
+        }
+
+        int moved = 0;
+        for (int it = 0; it < iters; ++it) {
+            std::fill(sum.begin(), sum.end(), Vec3{});
+            std::fill(cnt.begin(), cnt.end(), 0);
+            std::fill(sumd.begin(), sumd.end(), 0.0f);
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                float dl = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+                sum[rep[e.a]] = Add(sum[rep[e.a]], finalVerts[e.b]); ++cnt[rep[e.a]];
+                sum[rep[e.b]] = Add(sum[rep[e.b]], finalVerts[e.a]); ++cnt[rep[e.b]];
+                sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
+            }
+            for (size_t i = 0; i < n; ++i) {
+                uint32_t r = rep[i];
+                if (i >= drapeEl.size() || drapeEl[i] < 0.20f || cnt[r] < 2) continue;
+                float ax, ay;
+                if (!azOf(finalVerts[i], ax, ay)) continue;
+                Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), finalVerts[i]);
+                float a = lap.x * ax + lap.y * ay;
+                float sc = 1.0f;
+                if (d0[i] > 1.0e-6f)
+                    sc = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
+                float dA = ClampRange((a - a0[i] * sc) * k, -maxStep, maxStep);
+                if (std::fabs(dA) <= 1.0e-5f) continue;
+                finalVerts[i].x += ax * dA;
+                finalVerts[i].y += ay * dA;
+                ++moved;
+            }
+        }
+        if (moved > 0)
+            HLog("detour: loose-azimuth-restore shape='%s' slider='%s' moved=%d k=%.2f iters=%d",
+                 shapeName.c_str(), sliderName.c_str(), moved, k, iters);
+        return moved;
+    };
+
     auto applyLooseAuthoredLineLocks = [&]() -> int {
         if (NormalizePreset(preset) != DRAPE_PRESET_LOOSE_DRAPED ||
             !params.physicsDrape || n == 0) {
@@ -9768,6 +9855,43 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         int hemMoved = 0;
         int centerMoved = 0;
         int bodyPushed = 0;
+
+        // Feathered centre-line restore (2026-07-07, user-caught shear): snapping ONLY
+        // the seam column (|baseX|<band) back to authored X sheared the adjacent faces -
+        // the meander is a STRIP-level drift, so the correction must move the strip
+        // coherently. Pre-pass: bin the seam verts' lateral drift (authoredX - solvedX)
+        // by z and by side (front/back). Application below adds the LOCAL bin correction
+        // to every vert within featherW of the seam, scaled by a smooth lateral falloff.
+        const float centerFeatherW = EnvFloat("DRAPE_CENTER_LINE_FEATHER", 4.0f);
+        const float kZBin = 4.0f;
+        std::unordered_map<int64_t, std::pair<double, int>> seamCorr;  // key: side*2^32+zbin
+        auto corrKey = [&](bool back, float z) -> int64_t {
+            int zb = (int)std::floor(z / kZBin);
+            return ((int64_t)(back ? 1 : 0) << 32) | (uint32_t)(zb + 100000);
+        };
+        if (useCenterLock && centerBand > 0.0f && centerStrength > 0.0f) {
+            for (size_t i = 0; i < n; ++i) {
+                if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+                if (std::fabs(baseVerts[i].x - g_refCenterX) > centerBand) continue;
+                if (centerHeight > 0.0f && baseVerts[i].z > minBaseZ + centerHeight) continue;
+                if (std::fabs(baseVerts[i].y - g_refCenterY) <= centerBackMargin) continue;
+                auto& acc = seamCorr[corrKey(baseVerts[i].y > g_refCenterY, baseVerts[i].z)];
+                acc.first += (double)(baseVerts[i].x - finalVerts[i].x);
+                acc.second += 1;
+            }
+        }
+        auto seamCorrAt = [&](bool back, float z) -> float {
+            for (int dz = 0; dz <= 2; ++dz) {
+                for (int sgn = (dz == 0 ? 1 : -1); sgn <= 1; sgn += 2) {
+                    auto it = seamCorr.find(corrKey(back, z + (float)(sgn * dz) * kZBin));
+                    if (it != seamCorr.end() && it->second.second > 0)
+                        return (float)(it->second.first / it->second.second);
+                    if (dz == 0) break;
+                }
+            }
+            return 0.0f;
+        };
+
         for (size_t i = 0; i < n; ++i) {
             if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
 
@@ -9791,11 +9915,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // as target would CEMENT whatever lateral error vanilla carries (+1.0 at the
             // waist band on this outfit).
             if (centerBand > 0.0f && centerStrength > 0.0f &&
-                std::fabs(baseVerts[i].x - g_refCenterX) <= centerBand &&
+                std::fabs(baseVerts[i].x - g_refCenterX) <= centerFeatherW &&
                 (centerHeight <= 0.0f || baseVerts[i].z <= minBaseZ + centerHeight) &&
                 std::fabs(baseVerts[i].y - g_refCenterY) > centerBackMargin) {
+                float lat = std::fabs(baseVerts[i].x - g_refCenterX) / std::max(centerFeatherW, 1.0e-3f);
+                float w = (1.0f - lat) * (1.0f - lat);   // smooth lateral falloff
+                float dx = seamCorrAt(baseVerts[i].y > g_refCenterY, baseVerts[i].z);
                 float oldX = finalVerts[i].x;
-                finalVerts[i].x += (baseVerts[i].x - finalVerts[i].x) * centerStrength;
+                finalVerts[i].x += dx * centerStrength * w;
                 if (std::fabs(finalVerts[i].x - oldX) > 1.0e-4f) {
                     ++centerMoved;
                     touched = true;
@@ -9829,8 +9956,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // the outer shell. It excludes boundary/seam verts, so it does not disturb the
     // seam welds above (unlike the de-spike).
     applyFinalSelfCollisionTuck("final");
-    if (applyLooseAuthoredLineLocks() > 0)
-        applyFinalExactSeamWeld("post-line-lock-exact-seam");
+    {
+        int lateralMoved = applyLooseAzimuthalRestore();
+        lateralMoved += applyLooseAuthoredLineLocks();
+        if (lateralMoved > 0)
+            applyFinalExactSeamWeld("post-line-lock-exact-seam");
+    }
 
     worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
@@ -10964,6 +11095,7 @@ struct ReplayOptions {
     fs::path bodyObj;
     fs::path floatCsv;   // per-vertex authored/vanilla/solved body-gap dump (bump diagnosis)
     fs::path baseObj;    // authored base mesh (tear diagnosis: base-near vs vanilla-near pairs)
+    fs::path expectedObj; // capture's stored live output (config-regression diagnosis)
     bool quiet = false;
 };
 
@@ -11157,6 +11289,11 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
 
     if (!opts.baseObj.empty() && !WriteResultObj(opts.baseObj, cap.baseVerts, cap.tris)) {
         std::cerr << "Error: failed to write base OBJ: " << opts.baseObj.string() << "\n";
+    }
+
+    if (!opts.expectedObj.empty() && cap.hasExpected && !cap.expectedSolvedVerts.empty() &&
+        !WriteResultObj(opts.expectedObj, cap.expectedSolvedVerts, cap.tris)) {
+        std::cerr << "Error: failed to write expected OBJ: " << opts.expectedObj.string() << "\n";
     }
 
     if (!opts.debugPly.empty() && !WriteDebugPly(opts.debugPly, cap, out.solvedVerts)) {
@@ -11661,6 +11798,8 @@ int main(int argc, char** argv) {
         if (!fcsv.empty()) opts.floatCsv = fs::path(fcsv);
         std::string basbj = ArgValue(argc, argv, "--base-obj");
         if (!basbj.empty()) opts.baseObj = fs::path(basbj);
+        std::string eobj = ArgValue(argc, argv, "--expected-obj");
+        if (!eobj.empty()) opts.expectedObj = fs::path(eobj);
         return ReplaySolverCapture(fs::path(replay), opts);
     }
     if (!replayDir.empty())
