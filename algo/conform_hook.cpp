@@ -5986,6 +5986,78 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         };
 
+        // ENGINE layer-bind (2026-07-07, Part 18.5 hole #3 = roadmap U9 twin-shell):
+        // stacked layers of the SAME garment (Blacksmith under-flap vs outer panel) had
+        // NOTHING holding their authored face-to-face relation - prox pairs only stitch
+        // boundary edges - so the flap fell by clothMaxDrop and smeared (wire.png fan).
+        // Detect in BASE pose: vert whose nearest OTHER-surface face (opposing normal,
+        // not its own 1-ring) lies within kLayerBindMax; constrain to barycentric anchor
+        // + authored offset during the solve. The M1 belt->dress bind, intra-garment.
+        struct LayerBind { uint32_t v; int tri; float bu, bv, bw, off; };
+        std::vector<LayerBind> layerBinds;
+        const float kLayerBindMax = EnvFloat("DRAPE_LAYER_BIND_MAX", 2.5f);
+        const float kLayerBindK   = ClampRange(EnvFloat("DRAPE_LAYER_BIND_K", 0.5f), 0.0f, 1.0f);
+        BodyBVH selfBVH;
+        if (kLayerBindK > 0.0f && kLayerBindMax > 0.0f && tris && !tris->empty() && n <= 0xFFFF) {
+            BuildBodyBVH(baseVerts, *tris, selfBVH);
+            if (selfBVH.valid) {
+                // base vert normals (area-weighted) for the opposition test
+                std::vector<Vec3> vn(n, Vec3{});
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    Vec3 fn = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                    Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                    vn[t[0]] = Add(vn[t[0]], fn); vn[t[1]] = Add(vn[t[1]], fn); vn[t[2]] = Add(vn[t[2]], fn);
+                }
+                std::vector<std::unordered_set<uint32_t>> ring(n);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    ring[e.a].insert(e.b); ring[e.b].insert(e.a);
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    if (m[i] <= 0.0f) continue;                    // pinned verts stay
+                    Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                    int tri = -1; float bu=0, bv=0, bw=0;
+                    // search from a point nudged along -normal so the nearest hit is the
+                    // OTHER layer, not the vert's own surface
+                    float nl = Len(vn[i]);
+                    if (nl < 1.0e-6f) continue;
+                    Vec3 ni = Scale(vn[i], 1.0f / nl);
+                    Vec3 probe = Sub(baseVerts[i], Scale(ni, 0.05f));
+                    if (!BVHClosestPointEx(selfBVH, probe, cp, nrm, d2, &tri, &bu, &bv, &bw)) continue;
+                    if (tri < 0 || tri >= (int)tris->size()) continue;
+                    const auto& t = (*tris)[(size_t)tri];
+                    if (t[0] == i || t[1] == i || t[2] == i) continue;
+                    if (ring[i].count(t[0]) || ring[i].count(t[1]) || ring[i].count(t[2])) continue;
+                    float dist = Len(Sub(baseVerts[i], cp));
+                    if (dist < 0.05f || dist > kLayerBindMax) continue;
+                    if (Dot(ni, selfBVH.faceNormal[(size_t)tri]) > -0.20f) continue;  // must OPPOSE
+                    float off = dist;
+                    if (Dot(Sub(baseVerts[i], cp), selfBVH.faceNormal[(size_t)tri]) < 0.0f) off = -off;
+                    layerBinds.push_back({(uint32_t)i, tri, bu, bv, bw, off});
+                }
+                if (!layerBinds.empty())
+                    HLog("detour: layer-binds shape='%s' binds=%zu max=%.2f k=%.2f",
+                         shapeName.c_str(), layerBinds.size(), kLayerBindMax, kLayerBindK);
+            }
+        }
+        auto solveLayerBinds = [&](float k) {
+            if (k <= 0.0f || layerBinds.empty()) return;
+            for (const LayerBind& lb : layerBinds) {
+                const auto& t = (*tris)[(size_t)lb.tri];
+                if (t[0] >= n || t[1] >= n || t[2] >= n || lb.v >= n) continue;
+                Vec3 p = Add(Add(Scale(finalVerts[t[0]], lb.bu), Scale(finalVerts[t[1]], lb.bv)),
+                             Scale(finalVerts[t[2]], lb.bw));
+                Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                float fl = Len(fn);
+                if (fl < 1.0e-8f) continue;
+                Vec3 target = Add(p, Scale(fn, lb.off / fl));
+                Vec3 d = Sub(target, finalVerts[lb.v]);
+                finalVerts[lb.v] = Add(finalVerts[lb.v], Scale(d, k));
+            }
+        };
+
         // ENGINE shape stiffness (2026-07-07, Part 18 P2): azimuthal shear resistance
         // INSIDE the solve. Edge lengths alone leave an isometric null-space (cloth can
         // shear/slide laterally at constant edge length); the solver was blind there and
@@ -6092,6 +6164,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         ++stats.bendingAdjusted;
                     }
                 }
+
+                // Inter-layer authored-offset binds (U9 twin-shell).
+                solveLayerBinds(kLayerBindK);
 
                 // Azimuthal shear stiffness (engine shape-matching, lateral axis).
                 solveAzimuthShear(engineAzK);
