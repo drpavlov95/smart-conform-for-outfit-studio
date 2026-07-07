@@ -8,3 +8,8 @@ reference/tmp/
 captures/
 tmp/
 panels_on.flag
+hbridge_on.flag
+panel_radial_in.flag
+contact_radial_on.flag
+loose_contact_floor_on.flag
+no_contact_radial_on.flag

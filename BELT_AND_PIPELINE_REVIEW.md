@@ -922,3 +922,45 @@ the butt apex is the body PUSHING, a legitimate contact shape); (e) directional 
 outward corrections bypass the contact gate so cloth BRIDGES concave features (softens
 the "drawn" gluteal fold, the rule's own third clause). Blacksmith/Fur bump confirmed
 ~98% fixed by the user; butt-soften awaiting eyes.
+
+## Part 17 - HORIZONTAL HOLLOW BRIDGE (2026-07-05, Codex session)
+
+**Status: implemented as a gated live A/B, not accepted into goldens.** User clarified
+the butt issue with a cross-section sketch: the requested behavior is not mesh inflation,
+but loose cloth bridging a SAME-Z horizontal hollow (butt cleft) instead of following the
+body's V inward. M4 gravity-shadow only bridges VERTICAL hollows (body receding below a
+protrusion), so the missing complement is a horizontal slice rule.
+
+Built `kHorizontalBridge=false` / `DRAPE_HBRIDGE=1` / live `hbridge_on.flag`:
+- Builds a body profile by Z slice + radial angle.
+- Builds the current loose-cloth profile each finishing round.
+- Moves only LOOSE_DRAPED verts outward when BOTH profiles agree: the body slice has
+  left/right convex support and the cloth dipped inward between its neighboring cloth
+  supports.
+- Target is conservative: body convex bridge + clearance, capped by neighboring cloth
+  radius and by `DRAPE_HBRIDGE_MAX_STEP` per round. It runs inside the existing finishing
+  loop before smoothing/body collision/stretch caps.
+
+Validation:
+- Default gate OFF: `scripts/check_corpus.py` green on all 4 corpora; self-test and
+  shadow-selftest green. Goldens unchanged.
+- Gate ON A/B (`DRAPE_HBRIDGE=1`): intended metric drift only. Vampire robe moved mildly
+  (`floatIndexMean -0.039 -> -0.029`, bodyPen 73 -> 72). Falmer Cloth/Yarl loose layers
+  show magnetism reductions with small dependent-layer drift. Needs live eyes before
+  accepting/tuning/updating goldens.
+- DLL rebuilt and deployed. `hbridge_on.flag` is active for OutfitStudio live A/B and
+  ignored by git; delete/restore that file to toggle without rebuild.
+
+### 17.1 Follow-up from live Blacksmith test
+User confirmed the butt/thigh issue is on Blacksmith/Fur-style correction-mode panels, not
+only LOOSE_DRAPED robes. The first HBridge pass was too narrow because it only ran inside
+the verlet/LOOSE finishing path. Added a radial-curvature component to `panel-flatten`:
+it restores the panel's authored radial curvature directly, so same-Z cleft dips can bridge
+outward in Fitted/Tubular panels too. Inward radial relax (for thigh convexity) exists as
+`DRAPE_PANELS_RADIAL_IN` / `panel_radial_in.flag`, but is default-off because harness A/B
+showed it raises BlackSmithTorso magnetism/penetration unless visually justified.
+
+Current live A/B state: `panels_on.flag` active, `hbridge_on.flag` active,
+`panel_radial_in.flag` absent. Harness default remains green; with `DRAPE_PANELS=1`,
+radial-out improves BlackSmithTorso versus the prior live panel path (magnetism 511 -> 471,
+roughness 0.9759 -> 0.9746) but still needs eyes.

@@ -254,6 +254,7 @@ struct CachedPresetMask {
 };
 static std::unordered_map<std::string, CachedPresetMask> g_shapePresetMaskCache;
 static std::unordered_map<std::string, int> g_shapePresets;
+static std::unordered_set<std::string> g_presetResolutionLogged;
 static std::unordered_set<std::string> g_missingShapesLogged;
 static std::unordered_set<std::string> g_appliedShapesLogged;
 static std::unordered_set<std::string> g_staticShapesLogged;
@@ -588,6 +589,17 @@ static int GuessPresetFromGeometry(const std::vector<Vec3>& verts,
     bool longGarment = shapeH > bodyH * 0.38f &&
         lowerFrac > 0.20f &&
         upperFrac > 0.12f;
+    // Some long dresses/robes have most of their vertices in the bodice/upper panels,
+    // so a pure lower-vertex fraction misses them even though their vertical span is
+    // unmistakably a hanging garment. BlackSmithTorso is the regression case: only
+    // ~18% of verts are below the lower cut, but the mesh spans ankle-to-torso and has
+    // strong torso/pelvis weights. Use span as a secondary signal when bone profiles
+    // are available; the torso-weight gate below keeps pants/sleeves out.
+    bool longGarmentBySpan = shapeH > bodyH * 0.38f &&
+        lowerFrac > 0.12f &&
+        upperFrac > 0.12f &&
+        minZ < lowerCut - bodyH * 0.03f &&
+        maxZ > upperCut;
     bool notSkinTightOverall = avgW < 0.86f;
 
     // Bone-weight based classification (more reliable than geometry/distance alone).
@@ -607,7 +619,7 @@ static int GuessPresetFromGeometry(const std::vector<Vec3>& verts,
             return DRAPE_PRESET_TUBULAR;
 
         // Long torso-dominant garment spanning upper+lower body = draped shell.
-        if (longGarment && avgTorso > 0.42f && notSkinTightOverall)
+        if ((longGarment || longGarmentBySpan) && avgTorso > 0.42f && notSkinTightOverall)
             return DRAPE_PRESET_LOOSE_DRAPED;
     }
 
@@ -850,31 +862,43 @@ static int GuessPresetFromShapeName(const std::string& shapeName) {
     return DRAPE_PRESET_AUTO;
 }
 
-static int PresetForShapeLocked(const std::string& shapeName) {
+struct ResolvedPresetChoice {
+    int uiPreset = DRAPE_PRESET_AUTO;
+    int geometryPreset = DRAPE_PRESET_AUTO;
+    int effectivePreset = DRAPE_PRESET_AUTO;
+    const char* source = "auto";
+};
+
+static ResolvedPresetChoice ResolvePresetForShapeLocked(const std::string& shapeName) {
+    ResolvedPresetChoice out;
     auto it = g_shapePresets.find(shapeName);
-    int preset = it != g_shapePresets.end()
+    out.uiPreset = it != g_shapePresets.end()
         ? NormalizePreset(it->second)
         : DRAPE_PRESET_AUTO;
 
-    int geometryPreset = DRAPE_PRESET_AUTO;
     auto geoIt = g_shapeGeometryPresets.find(shapeName);
     if (geoIt != g_shapeGeometryPresets.end())
-        geometryPreset = NormalizePreset(geoIt->second);
+        out.geometryPreset = NormalizePreset(geoIt->second);
 
-    if (preset == DRAPE_PRESET_AUTO) {
-        if (geometryPreset != DRAPE_PRESET_AUTO)
-            return geometryPreset;
-        return GuessPresetFromShapeName(shapeName);
+    if (out.uiPreset == DRAPE_PRESET_AUTO) {
+        if (out.geometryPreset != DRAPE_PRESET_AUTO) {
+            out.effectivePreset = out.geometryPreset;
+            out.source = "geometry";
+            return out;
+        }
+        out.effectivePreset = GuessPresetFromShapeName(shapeName);
+        out.source = (out.effectivePreset != DRAPE_PRESET_AUTO) ? "shape-name" : "auto";
+        return out;
     }
 
-    // The UI can only guess from names. "Torso" is often a whole dress/skirt
-    // mesh, so let geometry override the weak Fitted Cloth default.
-    if (preset == DRAPE_PRESET_FITTED_CLOTH &&
-        geometryPreset == DRAPE_PRESET_LOOSE_DRAPED) {
-        return geometryPreset;
-    }
+    // Manual UI choice wins. Geometry is only a fallback for AUTO.
+    out.effectivePreset = out.uiPreset;
+    out.source = "manual";
+    return out;
+}
 
-    return preset;
+static int PresetForShapeLocked(const std::string& shapeName) {
+    return ResolvePresetForShapeLocked(shapeName).effectivePreset;
 }
 
 static float PresetFollowWeight(int preset, float rawWeight) {
@@ -907,7 +931,18 @@ static void BuildPresetMaskLocked(const std::string& shapeName,
                                   const std::vector<EdgeConstraint>* edges,
                                    std::unordered_map<uint16_t, float>& outMask,
                                    int& outPreset) {
-    outPreset = PresetForShapeLocked(shapeName);
+    ResolvedPresetChoice resolved = ResolvePresetForShapeLocked(shapeName);
+    outPreset = resolved.effectivePreset;
+
+    if (g_presetResolutionLogged.insert(shapeName).second) {
+        HLog("preset-resolve: shape='%s' ui='%s' geometry='%s' effective='%s' source=%s",
+             shapeName.c_str(),
+             PresetName(resolved.uiPreset),
+             PresetName(resolved.geometryPreset),
+             PresetName(resolved.effectivePreset),
+             resolved.source);
+    }
+
     auto cacheIt = g_shapePresetMaskCache.find(shapeName);
     if (cacheIt != g_shapePresetMaskCache.end() && cacheIt->second.preset == outPreset) {
         outMask = cacheIt->second.mask;
@@ -1637,6 +1672,7 @@ static void RebuildCacheLocked() {
     g_shapeMask.clear();
     g_shapePresetMaskCache.clear();
     g_missingShapesLogged.clear();
+    g_presetResolutionLogged.clear();
     g_appliedShapesLogged.clear();
     g_staticShapesLogged.clear();
     g_fallbackShapesLogged.clear();
@@ -2237,6 +2273,10 @@ struct StaticSolveParams {
     float clearanceSlack = 0.35f;
     float bodyCollisionStrength = 0.55f;
     float bodyClearance = 0.20f;
+    // Actual contact floor used by BVH collision. bodyClearance is a visual drape
+    // offset for shadow/envelope passes; using that large value as collision distance
+    // makes limbs repel loose cloth before they touch it.
+    float bodyContactClearance = -1.0f;  // <0 => use bodyClearance
     float bodyGapPreserve = 0.45f;
     float bodyGapCap = 2.0f;
     float bodyColumnStrength = 0.45f;
@@ -2424,6 +2464,37 @@ static constexpr bool  kUnifiedContact = false;
 // body-gap says "hanging, not fitted" (apron/skirt panels). Root cause + measurement in
 // BELT_AND_PIPELINE_REVIEW.md Part 15. OFF until eyeballed live (DRAPE_PANELS=1 to A/B).
 static constexpr bool  kPanelFlatten = false;
+
+// Horizontal hollow bridge (2026-07-05): M4 gravity-shadow bridges VERTICAL hollows
+// (body recedes below a protrusion), but it cannot see a same-Z concavity such as the
+// butt cleft in a horizontal section. This gated pass fills only when BOTH profiles agree:
+// the body slice has a left/right convex support and the loose cloth itself dipped into
+// that hollow. It only moves outward, inside the finishing loop, so smoothing and the
+// existing body/stretch gates keep the result coherent. DRAPE_HBRIDGE=1 enables harness
+// A/B; hbridge_on.flag enables live OutfitStudio A/B where env vars are awkward.
+static constexpr bool  kHorizontalBridge = false;
+static constexpr int   kHBridgeAngleBins = 96;
+static constexpr float kHBridgeZCell = 1.0f;
+static constexpr int   kHBridgeZWindow = 2;
+static constexpr int   kHBridgeMaxAngle = 10;
+static constexpr float kHBridgeBodyDepth = 0.45f;
+static constexpr float kHBridgeClothDip = 0.08f;
+static constexpr float kHBridgeMaxStep = 0.75f;
+
+// Contact-seeded radial envelope (2026-07-05): removes false outward bumps on
+// hanging loose cloth. Unlike gravity shadow, this can pull a non-contact bump
+// inward toward the plumb/contact envelope; unlike vanilla conform, only actual
+// body collision/contact can seed a new outward expansion. Ships behind a live
+// flag for OutfitStudio A/B without changing harness goldens.
+static constexpr bool kContactSeededRadial = false;
+
+// No-contact radial gate (2026-07-05): vanilla conform can push a hanging panel
+// outward just because the body expanded nearby, even when the body is still far
+// from the cloth. That violates the radial rule: body expansion affects cloth
+// only through contact. This pre-solve gate removes outward radial support motion
+// on authored-far, currently-non-contact verts so the solver does not preserve
+// a thigh/butt bump as its rest shape.
+static constexpr bool kNoContactRadialGate = false;
 
 static StaticSolveParams StaticParamsForPreset(int preset) {
     StaticSolveParams p;
@@ -3228,6 +3299,7 @@ static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
     if (!s.valid) return false;
     int ci = s.cx(p.x), cj = s.cy(p.y);
     if (!s.inGrid(ci, cj)) return false;
+
     float top = s.topAt(ci, cj);
     if (top <= GravityShadow::kNeg || top < p.z) return false;   // vertex is free
     // Pure-plumb shadow detection: a neighbour column is "clear" if its body top is
@@ -3296,6 +3368,308 @@ static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
 // Effect: once a vert is pushed out by a contact, everything hanging below it in
 // the same cloth column stays out and falls vertical â€” it never returns inward
 // unless a new (wider) contact appears. Two-sided projection also de-jags.
+// Horizontal same-Z hollow bridge: fills lateral concavities such as the butt cleft.
+struct HorizontalBridgeProfile {
+    bool valid = false;
+    float zMin = 0.0f, zCell = 1.0f, invZCell = 1.0f;
+    int zBins = 0, angleBins = 0;
+    std::vector<float> bodyR;
+    static constexpr float kInvalid = -1.0e30f;
+
+    inline int zc(float z) const { return (int)std::floor((z - zMin) * invZCell); }
+    inline bool inZ(int z) const { return z >= 0 && z < zBins; }
+    inline int idx(int z, int b) const { return z * angleBins + b; }
+};
+
+static int WrapAngularBin(int b, int bins) {
+    if (bins <= 0) return 0;
+    b %= bins;
+    if (b < 0) b += bins;
+    return b;
+}
+
+static bool BuildHorizontalBridgeProfile(
+    const std::vector<Vec3>& verts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    float zCell,
+    int angleBins,
+    float ceiling,
+    HorizontalBridgeProfile& out)
+{
+    out = HorizontalBridgeProfile{};
+    if (verts.empty() || zCell <= 1.0e-3f || angleBins < 16) return false;
+
+    bool have = false;
+    float minZ = 1.0e30f, maxZ = -1.0e30f;
+    for (const Vec3& v : verts) {
+        if (v.z > ceiling) continue;
+        have = true;
+        minZ = std::min(minZ, v.z);
+        maxZ = std::max(maxZ, v.z);
+    }
+    if (!have || maxZ <= minZ) return false;
+
+    minZ -= zCell;
+    maxZ += zCell;
+    int zBins = (int)std::ceil((maxZ - minZ) / zCell) + 1;
+    if (zBins <= 1 || (int64_t)zBins * angleBins > 2'000'000) return false;
+
+    out.valid = true;
+    out.zMin = minZ;
+    out.zCell = zCell;
+    out.invZCell = 1.0f / zCell;
+    out.zBins = zBins;
+    out.angleBins = angleBins;
+    out.bodyR.assign((size_t)zBins * angleBins, HorizontalBridgeProfile::kInvalid);
+
+    auto stamp = [&](const Vec3& v) {
+        if (v.z > ceiling) return;
+        float dx = 0.0f, dy = 0.0f, r = 0.0f;
+        if (!RadialDir(v, dx, dy, r)) return;
+        int z = out.zc(v.z);
+        if (!out.inZ(z)) return;
+        int b = RadialBin(dx, dy, out.angleBins);
+        float& slot = out.bodyR[(size_t)out.idx(z, b)];
+        slot = std::max(slot, r);
+    };
+
+    for (const Vec3& v : verts)
+        stamp(v);
+
+    // Deterministic triangle samples fill sparse rows without changing the silhouette rule.
+    for (const auto& t : tris) {
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size()) continue;
+        const Vec3& a = verts[t[0]];
+        const Vec3& b = verts[t[1]];
+        const Vec3& c = verts[t[2]];
+        stamp(Scale(Add(Add(a, b), c), 1.0f / 3.0f));
+        stamp(Scale(Add(a, b), 0.5f));
+        stamp(Scale(Add(b, c), 0.5f));
+        stamp(Scale(Add(c, a), 0.5f));
+    }
+
+    return true;
+}
+
+static void BuildHorizontalBridgeClothProfile(
+    const HorizontalBridgeProfile& p,
+    const std::vector<Vec3>& verts,
+    const std::vector<float>& drapeEl,
+    std::vector<float>& clothR)
+{
+    clothR.assign(p.bodyR.size(), HorizontalBridgeProfile::kInvalid);
+    if (!p.valid) return;
+    const size_t n = verts.size();
+    for (size_t i = 0; i < n; ++i) {
+        if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+        float dx = 0.0f, dy = 0.0f, r = 0.0f;
+        if (!RadialDir(verts[i], dx, dy, r)) continue;
+        int z = p.zc(verts[i].z);
+        if (!p.inZ(z)) continue;
+        int b = RadialBin(dx, dy, p.angleBins);
+        float& slot = clothR[(size_t)p.idx(z, b)];
+        slot = std::max(slot, r);
+    }
+}
+
+static float HBridgeSampleMax(const HorizontalBridgeProfile& p,
+                              const std::vector<float>& values,
+                              int zc, int bc,
+                              int zWindow, int angleWindow)
+{
+    float best = HorizontalBridgeProfile::kInvalid;
+    if (!p.valid || values.size() != p.bodyR.size()) return best;
+    for (int dz = -zWindow; dz <= zWindow; ++dz) {
+        int z = zc + dz;
+        if (!p.inZ(z)) continue;
+        for (int da = -angleWindow; da <= angleWindow; ++da) {
+            int b = WrapAngularBin(bc + da, p.angleBins);
+            best = std::max(best, values[(size_t)p.idx(z, b)]);
+        }
+    }
+    return best;
+}
+
+static bool HorizontalBridgeTargetR(const HorizontalBridgeProfile& p,
+                                    const std::vector<float>& clothR,
+                                    const Vec3& v,
+                                    float clearance,
+                                    int zWindow,
+                                    int maxAngle,
+                                    float bodyDepthMin,
+                                    float clothDipMin,
+                                    float& outTargetR,
+                                    float& outDirX,
+                                    float& outDirY)
+{
+    if (!p.valid) return false;
+    float curR = 0.0f;
+    if (!RadialDir(v, outDirX, outDirY, curR)) return false;
+    int zc = p.zc(v.z);
+    if (!p.inZ(zc)) return false;
+    int bc = RadialBin(outDirX, outDirY, p.angleBins);
+
+    float bodyHere = HBridgeSampleMax(p, p.bodyR, zc, bc, zWindow, 1);
+    if (bodyHere <= HorizontalBridgeProfile::kInvalid * 0.5f) return false;
+
+    float bestBodyBridge = bodyHere;
+    float bestClothBridge = HorizontalBridgeProfile::kInvalid;
+    int angleLimit = (int)ClampRange((float)maxAngle, 2.0f, (float)(p.angleBins / 4));
+
+    for (int off = 2; off <= angleLimit; ++off) {
+        float bodyL = HBridgeSampleMax(p, p.bodyR, zc,
+                                       WrapAngularBin(bc - off, p.angleBins),
+                                       zWindow, 1);
+        float bodyR = HBridgeSampleMax(p, p.bodyR, zc,
+                                       WrapAngularBin(bc + off, p.angleBins),
+                                       zWindow, 1);
+        if (bodyL <= HorizontalBridgeProfile::kInvalid * 0.5f ||
+            bodyR <= HorizontalBridgeProfile::kInvalid * 0.5f) {
+            continue;
+        }
+        float bridge = std::min(bodyL, bodyR);
+        if (bridge <= bestBodyBridge) continue;
+        bestBodyBridge = bridge;
+
+        float clothL = HBridgeSampleMax(p, clothR, zc,
+                                        WrapAngularBin(bc - off, p.angleBins),
+                                        zWindow, 1);
+        float clothRr = HBridgeSampleMax(p, clothR, zc,
+                                         WrapAngularBin(bc + off, p.angleBins),
+                                         zWindow, 1);
+        if (clothL > HorizontalBridgeProfile::kInvalid * 0.5f &&
+            clothRr > HorizontalBridgeProfile::kInvalid * 0.5f) {
+            bestClothBridge = std::max(bestClothBridge, std::min(clothL, clothRr));
+        }
+    }
+
+    if (bestBodyBridge - bodyHere < bodyDepthMin)
+        return false;
+
+    if (bestClothBridge <= HorizontalBridgeProfile::kInvalid * 0.5f ||
+        bestClothBridge <= curR + clothDipMin) {
+        return false;
+    }
+
+    float target = std::min(bestBodyBridge + clearance, bestClothBridge);
+    if (target <= curR + clothDipMin)
+        return false;
+
+    outTargetR = target;
+    return true;
+}
+
+// Contact-seeded radial envelope for loose Verlet cloth.
+//
+// Gravity shadow is one-sided: it can push cloth out of the body's vertical
+// shadow, but it cannot erase an outward bump that vanilla conform already
+// stamped into a hanging panel. This pass is the complementary rule: per angular
+// column, the top/current contact establishes a radial ceiling; non-contact
+// drape verts below may be pulled inward toward that ceiling, but they do not
+// become new seeds. Outward bridge remains owned by gravity-shadow/hbridge/body
+// collision so this pass cannot create new belt/layer protrusions.
+static int ApplyContactSeededRadialEnvelope(
+    std::vector<Vec3>& finalVerts,
+    const std::vector<float>& drapeEl,
+    const BodyBVH& body,
+    int radialBins,
+    float contactFloor,
+    float minFreeGap,
+    float seedSlack,
+    float returnRate,
+    float strength,
+    float maxStep)
+{
+    const size_t n = finalVerts.size();
+    if (!body.valid || n == 0 || radialBins < 8 || strength <= 0.0f || maxStep <= 0.0f)
+        return 0;
+
+    struct RVert {
+        size_t i = 0;
+        float z = 0.0f;
+        float r = 0.0f;
+        float dx = 0.0f;
+        float dy = 0.0f;
+        bool contact = false;
+    };
+
+    contactFloor = std::max(0.0f, contactFloor);
+    minFreeGap = std::max(0.0f, minFreeGap);
+    seedSlack = std::max(0.0f, seedSlack);
+
+    std::vector<std::vector<RVert>> bins((size_t)radialBins);
+    for (size_t i = 0; i < n; ++i) {
+        if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+        float dx = 0.0f, dy = 0.0f, r = 0.0f;
+        if (!RadialDir(finalVerts[i], dx, dy, r)) continue;
+
+        float gap = 1.0e30f;
+        bool contact = BVHSignedGap(body, finalVerts[i], gap, nullptr) &&
+                       gap <= contactFloor + std::max(0.0f, seedSlack);
+
+        int b = RadialBin(dx, dy, radialBins);
+        bins[(size_t)b].push_back(RVert{i, finalVerts[i].z, r, dx, dy, contact});
+    }
+
+    int moved = 0;
+    const float eps = 0.01f;
+    returnRate = std::max(0.0f, returnRate);
+    strength = Clamp01(strength);
+
+    for (auto& bin : bins) {
+        if (bin.empty()) continue;
+        std::sort(bin.begin(), bin.end(),
+                  [](const RVert& a, const RVert& b) { return a.z > b.z; });
+
+        bool haveEnvelope = false;
+        float envR = 0.0f;
+        float lastZ = bin.front().z;
+
+        for (const RVert& rv : bin) {
+            if (!haveEnvelope) {
+                // The topmost drape vert is the garment boundary/hang line for this
+                // angular column. It may seed the envelope even when not in body
+                // contact, but pull-in below is clamped by minFreeGap so this cannot
+                // collapse free cloth onto the body.
+                envR = rv.r;
+                lastZ = rv.z;
+                haveEnvelope = true;
+                continue;
+            }
+
+            float dz = std::max(0.0f, lastZ - rv.z);
+            envR = std::max(0.0f, envR - returnRate * dz);
+
+            if (rv.contact) {
+                // Real contact may push the cloth wider. A narrower lower contact
+                // must not make loose cloth retract below the existing hang line.
+                envR = std::max(envR, rv.r);
+            } else {
+                float deltaR = rv.r - envR;
+                if (deltaR > eps) {
+                    float step = std::min(deltaR * strength, maxStep);
+                    float newR = std::max(0.0f, rv.r - step);
+                    Vec3 cand = finalVerts[rv.i];
+                    cand.x = g_refCenterX + rv.dx * newR;
+                    cand.y = g_refCenterY + rv.dy * newR;
+                    // Pull-in removes false distance-field bumps. Keep the optional
+                    // gap clamp off by default: a BVH normal at a distant closest
+                    // point can shove a free panel toward the wrong local contour.
+                    if (minFreeGap > 0.0f)
+                        BVHCollideVertex(body, cand, minFreeGap);
+                    finalVerts[rv.i] = cand;
+                    ++moved;
+                }
+            }
+
+            lastZ = rv.z;
+        }
+    }
+
+    return moved;
+}
+
+// Hanging-chain pass (older radial helper; kept for fallback paths).
 static void ApplyHangingChainPass(
     std::vector<Vec3>& finalVerts,
     const std::vector<float>& drapeEl,
@@ -4132,6 +4506,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     const int normPreset = NormalizePreset(preset);
     const bool isLoosePreset = normPreset == DRAPE_PRESET_LOOSE_DRAPED;
+    const bool looseContactFloorLive =
+#if defined(DRAPE_HARNESS_BUILD)
+        false;
+#else
+        fs::exists("E:/SkyrimDev/Drape/loose_contact_floor_on.flag");
+#endif
+    if (isLoosePreset && params.physicsDrape) {
+        float floor = EnvFloat("DRAPE_LOOSE_CONTACT_FLOOR",
+                               looseContactFloorLive ? 0.12f : -1.0f);
+        if (floor >= 0.0f)
+            params.bodyContactClearance = ClampRange(floor, 0.02f, params.bodyClearance);
+    }
 
     size_t n = std::min<size_t>(baseVerts.size(), 0x10000);
     std::vector<Vec3> supportVerts(n);
@@ -4294,8 +4680,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     float bodyZRange = (g_refMaxZ > g_refMinZ + 1.0f)
         ? (g_refMaxZ - g_refMinZ) : 1.0f;
 
+    const float contactClearance =
+        (params.bodyContactClearance >= 0.0f) ? params.bodyContactClearance : params.bodyClearance;
     std::vector<float> drapeAmount(n, 0.0f);
-    std::vector<float> vertClearance(n, params.bodyClearance);
+    std::vector<float> vertClearance(n, contactClearance);
     // Surfaced to the rigid-island pass below: per-vert island id + per-island
     // "rigid plate/accessory" flag (medallion/buckle/chain â†’ translate, keep shape).
     std::vector<int>     islandIdOut;
@@ -4506,7 +4894,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // We deliberately do NOT blend in the island mean here: a whole-dress island
         // has a low mean (dominated by the bodice) that would wrongly drag the skirt
         // verts toward anchor. The island pass is used ONLY to flag rigid plates.
-        const float kSkirtClear = params.bodyClearance;  // full drape gap
+        const float kSkirtClear = contactClearance;      // collision floor, not visual gap
         const float kHugClear   = 0.12f;                 // fitted hugs the body
         const float kRigidClear = 0.08f;                 // rigid trim near-zero
 
@@ -4691,6 +5079,123 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // For sliders that expand the body (RM_Heavy, BigHips, etc.), ALL diffs are
     // outward â†’ no suppression â†’ result equals vanilla conform. For concave sliders
     // (belly curve-in below a bulge) the inward component is cancelled.
+    const bool noContactPresetEligible =
+        (normPreset == DRAPE_PRESET_FITTED_CLOTH && !params.physicsDrape);
+    bool useNoContactRadial =
+        EnvToggle("DRAPE_NO_CONTACT_RADIAL", kNoContactRadialGate) &&
+        noContactPresetEligible &&
+        bodyBVH && bodyBVH->valid && g_refBodyBVH.valid;
+#if !defined(DRAPE_HARNESS_BUILD)
+    useNoContactRadial = useNoContactRadial || (
+        noContactPresetEligible &&
+        bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
+        fs::exists("E:/SkyrimDev/Drape/no_contact_radial_on.flag"));
+#endif
+    if (useNoContactRadial) {
+        const float authGapMin = EnvFloat("DRAPE_NO_CONTACT_AUTH_GAP", 0.25f);
+        const float fittedAuthGapMin = EnvFloat("DRAPE_NO_CONTACT_FITTED_AUTH_GAP", 0.25f);
+        const float contactSlack = EnvFloat("DRAPE_NO_CONTACT_SLACK", 0.05f);
+        const float contactFloor = EnvFloat("DRAPE_NO_CONTACT_FLOOR",
+                                            isLoosePreset ? 0.18f : -1.0f);
+        const float farGap = EnvFloat("DRAPE_NO_CONTACT_FAR_GAP", 0.55f);
+        const float strength = Clamp01(EnvFloat("DRAPE_NO_CONTACT_STRENGTH",
+                                                isLoosePreset ? 0.45f : 1.00f));
+        const float maxStep = EnvFloat("DRAPE_NO_CONTACT_STEP",
+                                       isLoosePreset ? 1.20f : 3.00f);
+        const float logContactBase = contactFloor >= 0.0f ? contactFloor : contactClearance;
+        int moved = 0;
+        int movedDrape = 0;
+        int movedFitted = 0;
+        int cappedEdges = 0;
+        float total = 0.0f;
+        float worst = 0.0f;
+        std::vector<Vec3> supportBefore = supportVerts;
+        std::vector<uint8_t> touched(n, 0);
+        for (size_t i = 0; i < n; ++i) {
+            float authoredGap = 0.0f;
+            if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], authoredGap, nullptr)) continue;
+            const bool drapeEligible = drapeEl[i] >= 0.15f;
+            const float minGap = drapeEligible ? authGapMin : fittedAuthGapMin;
+            float authoredW = ClampRange((authoredGap - minGap) / 1.0f, 0.0f, 1.0f);
+            if (authoredW <= 0.0f) continue;
+
+            float vanillaGap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, supportVerts[i], vanillaGap, nullptr)) continue;
+            float contactBase = contactFloor >= 0.0f ? contactFloor : std::max(0.0f, vertClearance[i]);
+            float contactGap = contactBase + contactSlack;
+            float nonContactW = ClampRange((vanillaGap - contactGap) /
+                                           std::max(0.05f, farGap - contactGap),
+                                           0.0f, 1.0f);
+            if (nonContactW <= 0.0f) continue;
+
+            float dirX = 0.0f, dirY = 0.0f, baseR = 0.0f;
+            if (!RadialDir(baseVerts[i], dirX, dirY, baseR)) continue;
+            Vec3 fullDiff = Sub(supportVerts[i], baseVerts[i]);
+            float outward = fullDiff.x * dirX + fullDiff.y * dirY;
+            if (outward <= 0.02f) continue;
+
+            float w = authoredW * nonContactW * strength;
+            float step = std::min(outward * w, maxStep);
+            if (step <= 1.0e-5f) continue;
+
+            Vec3 oldSupport = supportVerts[i];
+            Vec3 candidate = Sub(supportVerts[i], Vec3{dirX * step, dirY * step, 0.0f});
+            Vec3 clamped = candidate;
+            BVHCollideVertex(*bodyBVH, clamped, contactBase + 0.03f);
+            Vec3 actual = Sub(oldSupport, clamped);
+            float actualStep = std::sqrt(actual.x * actual.x + actual.y * actual.y);
+            if (actualStep <= 1.0e-5f) continue;
+
+            supportVerts[i] = clamped;
+            finalVerts[i] = Sub(finalVerts[i], actual);
+            touched[i] = 1;
+            ++moved;
+            if (drapeEligible) ++movedDrape;
+            else ++movedFitted;
+            total += actualStep;
+            worst = std::max(worst, actualStep);
+        }
+        if (moved > 0 && !useEdges.empty()) {
+            const float edgeCap = std::max(1.0f, EnvFloat("DRAPE_NO_CONTACT_EDGE_CAP", 1.035f));
+            for (int pass = 0; pass < 8; ++pass) {
+                bool any = false;
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    float wa = touched[e.a] ? 1.0f : 0.0f;
+                    float wb = touched[e.b] ? 1.0f : 0.0f;
+                    if (wa + wb <= 0.0f) continue;
+
+                    float rest = Len(Sub(supportBefore[e.a], supportBefore[e.b]));
+                    if (rest <= 1.0e-6f) rest = e.restLength;
+                    if (rest <= 1.0e-6f) continue;
+
+                    Vec3 dir = Sub(supportVerts[e.a], supportVerts[e.b]);
+                    float len = Len(dir);
+                    float cap = rest * edgeCap;
+                    if (len <= cap || len <= 1.0e-6f) continue;
+
+                    Vec3 corr = Scale(dir, ((len - cap) / len) / (wa + wb));
+                    Vec3 oldA = supportVerts[e.a];
+                    Vec3 oldB = supportVerts[e.b];
+                    supportVerts[e.a] = Sub(supportVerts[e.a], Scale(corr, wa));
+                    supportVerts[e.b] = Add(supportVerts[e.b], Scale(corr, wb));
+                    finalVerts[e.a] = Add(finalVerts[e.a], Sub(supportVerts[e.a], oldA));
+                    finalVerts[e.b] = Add(finalVerts[e.b], Sub(supportVerts[e.b], oldB));
+                    any = true;
+                    if (pass == 7) ++cappedEdges;
+                }
+                if (!any) break;
+            }
+        }
+        if (moved > 0) {
+            stats.envelopeAdjusted += moved;
+            HLog("detour: no-contact-radial shape='%s' slider='%s' preset='%s' moved=%d drape=%d fitted=%d edgeCap=%d floor=%.2f total=%.2f worst=%.2f",
+                 shapeName.c_str(), sliderName.c_str(), PresetName(normPreset),
+                 moved, movedDrape, movedFitted, cappedEdges,
+                 logContactBase + contactSlack, total, worst);
+        }
+    }
+
     if (!params.physicsDrape && params.inwardSuppressionStrength > 0.0f) {
         for (size_t i = 0; i < n; ++i) {
             float looseness = Clamp01((1.0f - follow[i]) * drapeEl[i]);
@@ -4887,23 +5392,87 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     };
 
-    // Support rest lengths: edge lengths in the VANILLA CONFORM result (supportVerts),
-    // not the base mesh. This prevents stretch constraints from fighting body-induced
-    // expansions (e.g., belly expansion shouldn't pull arm area inward). With support
-    // rest lengths, edges that are "correct" in vanilla conform have zero stretch force;
-    // only edges displaced by inward suppression or body collision need relaxation.
+    // Loose contact-rest: supportVerts is the vanilla-conformed pose. For fully
+    // draped, non-contact verts, that pose can encode body growth at a distance
+    // as if it were the garment's authored rest shape. Keep the solve position as-is,
+    // but shorten only the internal rest lengths used by stretch/bend constraints.
+    std::vector<Vec3> clothRestVerts = supportVerts;
+    bool useLooseContactRest =
+        EnvToggle("DRAPE_LOOSE_CONTACT_REST", false) &&
+        isLoosePreset && params.physicsDrape &&
+        bodyBVH && bodyBVH->valid && g_refBodyBVH.valid;
+#if !defined(DRAPE_HARNESS_BUILD)
+    useLooseContactRest = useLooseContactRest || (
+        isLoosePreset && params.physicsDrape &&
+        bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
+        fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag"));
+#endif
+    if (useLooseContactRest) {
+        const float drapeMin = EnvFloat("DRAPE_LOOSE_REST_DRAPE_MIN", 0.55f);
+        const float authoredGapMin = EnvFloat("DRAPE_LOOSE_REST_AUTH_GAP", 0.75f);
+        const float contactGap = EnvFloat("DRAPE_LOOSE_REST_CONTACT_GAP", 0.25f);
+        const float farGap = EnvFloat("DRAPE_LOOSE_REST_FAR_GAP", 1.45f);
+        const float strengthRest = Clamp01(EnvFloat("DRAPE_LOOSE_REST_STRENGTH", 0.45f));
+        const float maxStepRest = std::max(0.0f, EnvFloat("DRAPE_LOOSE_REST_STEP", 1.00f));
+        int movedRest = 0;
+        float totalRest = 0.0f;
+        float worstRest = 0.0f;
+
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= drapeEl.size() || drapeEl[i] < drapeMin) continue;
+
+            float authoredGap = 0.0f;
+            if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], authoredGap, nullptr)) continue;
+            float authoredW = ClampRange((authoredGap - authoredGapMin) / 1.0f, 0.0f, 1.0f);
+            if (authoredW <= 0.0f) continue;
+
+            float currentGap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, supportVerts[i], currentGap, nullptr)) continue;
+            float nonContactW = ClampRange((currentGap - contactGap) /
+                                           std::max(0.05f, farGap - contactGap),
+                                           0.0f, 1.0f);
+            if (nonContactW <= 0.0f) continue;
+
+            float dirX = 0.0f, dirY = 0.0f, baseR = 0.0f;
+            if (!RadialDir(baseVerts[i], dirX, dirY, baseR)) continue;
+            Vec3 fullDiff = Sub(supportVerts[i], baseVerts[i]);
+            float outward = fullDiff.x * dirX + fullDiff.y * dirY;
+            if (outward <= 0.02f) continue;
+
+            float step = std::min(outward * authoredW * nonContactW * strengthRest,
+                                  maxStepRest);
+            if (step <= 1.0e-5f) continue;
+
+            clothRestVerts[i] = Sub(supportVerts[i], Vec3{dirX * step, dirY * step, 0.0f});
+            ++movedRest;
+            totalRest += step;
+            worstRest = std::max(worstRest, step);
+        }
+
+        if (movedRest > 0) {
+            HLog("detour: loose-contact-rest shape='%s' slider='%s' moved=%d drapeMin=%.2f contact=%.2f far=%.2f total=%.2f worst=%.2f",
+                 shapeName.c_str(), sliderName.c_str(), movedRest, drapeMin,
+                 contactGap, farGap, totalRest, worstRest);
+        }
+    }
+
+    // Support rest lengths: normally edge lengths in the VANILLA CONFORM result
+    // (supportVerts), not the base mesh. This prevents stretch constraints from
+    // fighting real body-induced expansions (e.g. belly expansion should not pull
+    // arm area inward). For loose non-contact drape verts, clothRestVerts may carry
+    // a smaller internal rest pose so distant body expansion is not preserved as a
+    // fake cloth bulge.
     std::vector<float> supportRestLen(useEdges.size(), 0.0f);
     for (size_t ei = 0; ei < useEdges.size(); ++ei) {
         const auto& e = useEdges[ei];
         if (e.a >= n || e.b >= n) { supportRestLen[ei] = e.restLength; continue; }
-        Vec3 d = Sub(supportVerts[e.a], supportVerts[e.b]);
+        Vec3 d = Sub(clothRestVerts[e.a], clothRestVerts[e.b]);
         float l = Len(d);
         supportRestLen[ei] = l > kLenEps ? l : e.restLength;
     }
 
-    // Support rest lengths for bending constraints (conformed garment distances).
-    // Same rationale as supportRestLen: bending must not pull the cloth back to
-    // its slim base shape when the body grows.
+    // Support rest lengths for bending constraints (same rest-shape rationale as
+    // supportRestLen).
     const std::vector<BendingConstraint>* bendingPtr = nullptr;
     std::vector<float> supportBendRestLen;
     {
@@ -4915,7 +5484,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (size_t bi = 0; bi < bcs.size(); ++bi) {
                 const auto& bc = bcs[bi];
                 if (bc.c >= n || bc.d >= n) { supportBendRestLen[bi] = bc.restLength; continue; }
-                Vec3 d = Sub(supportVerts[bc.c], supportVerts[bc.d]);
+                Vec3 d = Sub(clothRestVerts[bc.c], clothRestVerts[bc.d]);
                 float l = Len(d);
                 supportBendRestLen[bi] = l > kLenEps ? l : bc.restLength;
             }
@@ -5208,6 +5777,33 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         for (size_t i = 0; i < n; ++i) {
             bool pinned = (invMass[i] <= 0.0f) || (drapeEl[i] < 0.20f);
             m[i] = pinned ? 0.0f : Clamp01(invMass[i]);
+        }
+
+        bool useAuthoredLineLocksPbd = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        useAuthoredLineLocksPbd = useAuthoredLineLocksPbd ||
+            fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
+#endif
+        if (useAuthoredLineLocksPbd && NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) {
+            const float hemBand = EnvFloat("DRAPE_HEM_PIN_BAND", 0.0f);
+            if (hemBand > 0.0f) {
+                float minBaseZ = 1.0e30f;
+                for (size_t j = 0; j < n; ++j)
+                    minBaseZ = std::min(minBaseZ, baseVerts[j].z);
+                int hemPins = 0;
+                for (size_t j = 0; j < n; ++j) {
+                    if (j >= drapeEl.size() || drapeEl[j] < 0.20f) continue;
+                    if (baseVerts[j].z <= minBaseZ + hemBand) {
+                        m[j] = 0.0f;
+                        finalVerts[j] = supportVerts[j];
+                        ++hemPins;
+                    }
+                }
+                if (hemPins > 0) {
+                    HLog("detour: authored-hem-pins shape='%s' slider='%s' pinned=%d band=%.2f",
+                         shapeName.c_str(), sliderName.c_str(), hemPins, hemBand);
+                }
+            }
         }
 
         // â”€â”€ Seam welding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5541,7 +6137,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // In physics drape, collision is the ONLY force holding the cloth on
                 // the body against gravity. It must stay active for every slider, even
                 // ones with low slider-source influence â€” otherwise the cloth sinks in.
-                if (params.physicsDrape) eff = std::max(eff, 0.60f);
+                if (params.physicsDrape) eff = std::max(eff, 0.50f);
                 if (collideVertex(i, collisionStep * freeMass * eff))
                     ++stats.bodyAdjusted;
                 ++stats.bodySamples;
@@ -6132,21 +6728,43 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const bool useShadow = EnvToggle("DRAPE_SHADOW", kGravityShadow) &&
                                NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
                                !bodyBVH->verts.empty() && !bodyBVH->tris.empty();
+        float drapeCeiling = -1.0e30f;
+        for (size_t i = 0; i < n; ++i)
+            if (drapeEl[i] >= 0.20f) drapeCeiling = std::max(drapeCeiling, finalVerts[i].z);
+
         GravityShadow shadowGrid;
         bool  shadowReady = false;
         float shadowReturn = 0.0f;
         if (useShadow) {
-            float ceiling = -1.0e30f;
-            for (size_t i = 0; i < n; ++i)
-                if (drapeEl[i] >= 0.20f) ceiling = std::max(ceiling, finalVerts[i].z);
-            if (ceiling > -1.0e29f)
+            if (drapeCeiling > -1.0e29f)
                 shadowReady = BuildGravityShadow(bodyBVH->verts, bodyBVH->tris,
-                                                 kShadowCell, ceiling, shadowGrid);
+                                                 kShadowCell, drapeCeiling, shadowGrid);
             // Catenary return rate: how fast loose cloth falls back toward the body per
             // unit-Z below a protrusion (0 = dead-plumb hang; higher = follows a receded
             // limb back in, killing the "shelf behind the thigh" on short RM_Heavy
             // garments). Tunable live via DRAPE_SHADOW_RETURN for eyeball A/B.
             shadowReturn = EnvFloat("DRAPE_SHADOW_RETURN", kShadowReturnRate);
+        }
+        bool useHBridge = EnvToggle("DRAPE_HBRIDGE", kHorizontalBridge) &&
+                          NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+                          !bodyBVH->verts.empty() && !bodyBVH->tris.empty();
+#if !defined(DRAPE_HARNESS_BUILD)
+        useHBridge = useHBridge || (
+            NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+            fs::exists("E:/SkyrimDev/Drape/hbridge_on.flag"));
+#endif
+        HorizontalBridgeProfile hBridgeProfile;
+        bool hBridgeReady = false;
+        if (useHBridge && drapeCeiling > -1.0e29f) {
+            hBridgeReady = BuildHorizontalBridgeProfile(
+                bodyBVH->verts, bodyBVH->tris, kHBridgeZCell,
+                kHBridgeAngleBins, drapeCeiling, hBridgeProfile);
+            HLog("detour: hbridge shape='%s' slider='%s' ready=%d zBins=%d angleBins=%d push=%.2f depth=%.2f angle=%d",
+                 shapeName.c_str(), sliderName.c_str(), hBridgeReady ? 1 : 0,
+                 hBridgeProfile.zBins, hBridgeProfile.angleBins,
+                 EnvFloat("DRAPE_HBRIDGE_PUSH", 0.35f),
+                 EnvFloat("DRAPE_HBRIDGE_DEPTH", kHBridgeBodyDepth),
+                 (int)EnvFloat("DRAPE_HBRIDGE_ANGLE", (float)kHBridgeMaxAngle));
         }
         // Soft push strength: a full absolute snap to the silhouette per vertex jags
         // the curved SIDES (neighbours quantise to different grid columns). A PARTIAL
@@ -6154,6 +6772,44 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // converges to the wall over the finishing rounds while staying smooth.
         const float kShadowPush = EnvFloat("DRAPE_SHADOW_PUSH", 0.45f);
         const int   kShadowFinalSmooth = (int)EnvFloat("DRAPE_SHADOW_SMOOTH", 4.0f);
+        float shadowMaxGap = EnvFloat("DRAPE_SHADOW_MAX_GAP", 0.0f);
+        const float hBridgePush = EnvFloat("DRAPE_HBRIDGE_PUSH", 0.35f);
+        const int   hBridgeAngle = (int)EnvFloat("DRAPE_HBRIDGE_ANGLE", (float)kHBridgeMaxAngle);
+        const float hBridgeDepth = EnvFloat("DRAPE_HBRIDGE_DEPTH", kHBridgeBodyDepth);
+        const float hBridgeDip = EnvFloat("DRAPE_HBRIDGE_DIP", kHBridgeClothDip);
+        const float hBridgeMaxStep = EnvFloat("DRAPE_HBRIDGE_MAX_STEP", kHBridgeMaxStep);
+        bool useContactRadial =
+            EnvToggle("DRAPE_CONTACT_RADIAL", kContactSeededRadial) &&
+            NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+            !bodyBVH->verts.empty() && !bodyBVH->tris.empty();
+#if !defined(DRAPE_HARNESS_BUILD)
+        const bool contactRadialLiveFlag =
+            NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+            fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
+        useContactRadial = useContactRadial || (
+            contactRadialLiveFlag);
+        if (shadowMaxGap <= 0.0f && contactRadialLiveFlag)
+            shadowMaxGap = 0.85f;
+#endif
+        const int   contactRadialBins = (int)EnvFloat("DRAPE_CONTACT_RADIAL_BINS", 96.0f);
+        const int   contactRadialIters = (int)EnvFloat("DRAPE_CONTACT_RADIAL_ITERS", 6.0f);
+        const float contactRadialFloor = EnvFloat("DRAPE_CONTACT_RADIAL_FLOOR", 0.08f);
+        const float contactRadialMinGap = EnvFloat("DRAPE_CONTACT_RADIAL_MIN_GAP", 0.0f);
+        const float contactRadialSeedSlack = EnvFloat("DRAPE_CONTACT_RADIAL_SEED", 0.08f);
+        const float contactRadialReturn = EnvFloat("DRAPE_CONTACT_RADIAL_RETURN", 0.0f);
+        const float contactRadialStrength = EnvFloat("DRAPE_CONTACT_RADIAL_STRENGTH", 0.65f);
+        const float contactRadialMaxStep = EnvFloat("DRAPE_CONTACT_RADIAL_STEP", 0.45f);
+        if (useContactRadial) {
+            HLog("detour: contact-radial shape='%s' slider='%s' bins=%d iters=%d floor=%.2f minGap=%.2f seed=%.2f strength=%.2f step=%.2f",
+                 shapeName.c_str(), sliderName.c_str(), contactRadialBins,
+                 contactRadialIters, contactRadialFloor, contactRadialMinGap,
+                 contactRadialSeedSlack,
+                 contactRadialStrength, contactRadialMaxStep);
+        }
+        if (shadowReady && shadowMaxGap > 0.0f) {
+            HLog("detour: gravity-shadow-gap shape='%s' slider='%s' maxGap=%.2f return=%.3f",
+                 shapeName.c_str(), sliderName.c_str(), shadowMaxGap, shadowReturn);
+        }
 
         for (int it = 0; it < finishRounds; ++it) {
             // M4: partial push OUT of the gravity shadow FIRST, then smoothing below
@@ -6161,11 +6817,35 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (shadowReady) {
                 for (size_t i = 0; i < n; ++i) {
                     if (drapeEl[i] < 0.20f) continue;
+                    if (shadowMaxGap > 0.0f) {
+                        float shadowGap = 0.0f;
+                        if (BVHSignedGap(*bodyBVH, finalVerts[i], shadowGap, nullptr) &&
+                            shadowGap > shadowMaxGap) {
+                            continue;
+                        }
+                    }
                     float ox = 0.0f, oy = 0.0f;
                     if (GravityShadowPushOut(shadowGrid, finalVerts[i], params.bodyClearance,
                                              shadowReturn, kShadowMaxRing, ox, oy)) {
                         finalVerts[i].x += (ox - finalVerts[i].x) * kShadowPush;
                         finalVerts[i].y += (oy - finalVerts[i].y) * kShadowPush;
+                        ++stats.envelopeAdjusted;
+                    }
+                }
+            }
+            if (hBridgeReady && hBridgePush > 0.0f) {
+                std::vector<float> clothR;
+                BuildHorizontalBridgeClothProfile(hBridgeProfile, finalVerts, drapeEl, clothR);
+                for (size_t i = 0; i < n; ++i) {
+                    if (drapeEl[i] < 0.20f) continue;
+                    float targetR = 0.0f, dirX = 0.0f, dirY = 0.0f;
+                    if (HorizontalBridgeTargetR(hBridgeProfile, clothR, finalVerts[i],
+                                                params.bodyClearance, kHBridgeZWindow,
+                                                hBridgeAngle, hBridgeDepth, hBridgeDip,
+                                                targetR, dirX, dirY) &&
+                        MoveRadiallyOut(finalVerts[i], dirX, dirY,
+                                        std::min(targetR, RadialRadius(finalVerts[i]) + hBridgeMaxStep),
+                                        hBridgePush)) {
                         ++stats.envelopeAdjusted;
                     }
                 }
@@ -6224,6 +6904,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // dist-to-body per angular bin; verts below the floor are pushed out along
         // (bodyâ†’vert). Single central axis (RadialBin) â€” the geometry M4's shadow
         // replaces, so this runs ONLY when the shadow is not handling the anti-tuck.
+        if (useContactRadial) {
+            int movedTotal = 0;
+            int rounds = std::max(1, contactRadialIters);
+            for (int it = 0; it < rounds; ++it) {
+                int moved = ApplyContactSeededRadialEnvelope(
+                    finalVerts, drapeEl, *bodyBVH,
+                    std::max(8, contactRadialBins),
+                    contactRadialFloor,
+                    contactRadialMinGap,
+                    contactRadialSeedSlack,
+                    contactRadialReturn,
+                    contactRadialStrength,
+                    contactRadialMaxStep);
+                movedTotal += moved;
+                for (size_t i = 0; i < n; ++i) {
+                    if (drapeEl[i] < 0.20f) continue;
+                    Vec3 target = finalVerts[i];
+                    if (BVHCollideVertex(*bodyBVH, target, contactRadialFloor))
+                        finalVerts[i] = target;
+                }
+                if (moved == 0) break;
+            }
+            if (movedTotal > 0) {
+                HLog("detour: contact-radial moved=%d shape='%s' slider='%s'",
+                     movedTotal, shapeName.c_str(), sliderName.c_str());
+            }
+        }
+
         if (!useShadow && params.drapeReturnRate >= 0.0f) {
             struct DVert { size_t i; float z, dist; Vec3 cp, awayDir; };
             const int AB = 48;
@@ -9026,6 +9734,80 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
     logProxSeamState("after-final-prox-cap");
 
+    auto applyLooseAuthoredLineLocks = [&]() -> int {
+        if (NormalizePreset(preset) != DRAPE_PRESET_LOOSE_DRAPED ||
+            !params.physicsDrape || n == 0) {
+            return 0;
+        }
+
+        bool useLineLocks = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        useLineLocks = useLineLocks || fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
+#endif
+        if (!useLineLocks) return 0;
+
+        const float hemBand = EnvFloat("DRAPE_HEM_LOCK_BAND", 6.0f);
+        const float hemStrength = Clamp01(EnvFloat("DRAPE_HEM_LOCK_STRENGTH", 1.0f));
+        const float centerBand = EnvFloat("DRAPE_CENTER_LINE_BAND", 0.75f);
+        const float centerHeight = EnvFloat("DRAPE_CENTER_LINE_HEIGHT", 65.0f);
+        const float centerBackMargin = EnvFloat("DRAPE_CENTER_LINE_BACK_MARGIN", 2.0f);
+        const float centerStrength = Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.35f));
+        if ((hemBand <= 0.0f || hemStrength <= 0.0f) &&
+            (centerBand <= 0.0f || centerStrength <= 0.0f)) {
+            return 0;
+        }
+
+        float minBaseZ = 1.0e30f;
+        for (size_t i = 0; i < n; ++i)
+            minBaseZ = std::min(minBaseZ, baseVerts[i].z);
+
+        int hemMoved = 0;
+        int centerMoved = 0;
+        int bodyPushed = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+
+            bool touched = false;
+            if (hemBand > 0.0f && hemStrength > 0.0f &&
+                baseVerts[i].z <= minBaseZ + hemBand) {
+                float oldZ = finalVerts[i].z;
+                finalVerts[i].z += (supportVerts[i].z - finalVerts[i].z) * hemStrength;
+                if (std::fabs(finalVerts[i].z - oldZ) > 1.0e-4f) {
+                    ++hemMoved;
+                    touched = true;
+                }
+            }
+
+            if (centerBand > 0.0f && centerStrength > 0.0f &&
+                std::fabs(baseVerts[i].x - g_refCenterX) <= centerBand &&
+                (centerHeight <= 0.0f || baseVerts[i].z <= minBaseZ + centerHeight) &&
+                baseVerts[i].y < g_refCenterY - centerBackMargin) {
+                float oldX = finalVerts[i].x;
+                finalVerts[i].x += (supportVerts[i].x - finalVerts[i].x) * centerStrength;
+                if (std::fabs(finalVerts[i].x - oldX) > 1.0e-4f) {
+                    ++centerMoved;
+                    touched = true;
+                }
+            }
+
+            if (touched && bodyBVH && bodyBVH->valid) {
+                Vec3 fixed = finalVerts[i];
+                if (BVHCollideVertex(*bodyBVH, fixed, 0.01f)) {
+                    finalVerts[i] = fixed;
+                    ++bodyPushed;
+                }
+            }
+        }
+
+        int moved = hemMoved + centerMoved;
+        if (moved > 0) {
+            HLog("detour: authored-line-locks shape='%s' slider='%s' hem=%d center=%d body=%d hemBand=%.2f centerBand=%.2f",
+                 shapeName.c_str(), sliderName.c_str(), hemMoved, centerMoved,
+                 bodyPushed, hemBand, centerBand);
+        }
+        return moved;
+    };
+
     // NOTE: applyFinalDeSpike (defined above) is DISABLED. It chased nif-scale
     // protrusion bumps (a scale-relative red herring) and, running after the seam
     // welds, reopened the waist/arm seams. Kept defined for reference only.
@@ -9035,6 +9817,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // the outer shell. It excludes boundary/seam verts, so it does not disturb the
     // seam welds above (unlike the de-spike).
     applyFinalSelfCollisionTuck("final");
+    if (applyLooseAuthoredLineLocks() > 0)
+        applyFinalExactSeamWeld("post-line-lock-exact-seam");
 
     worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
@@ -9273,8 +10057,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
         const float gapMin  = EnvFloat("DRAPE_PANELS_GAP", 1.5f);
         const float smoothK = EnvFloat("DRAPE_PANELS_SMOOTH", 0.5f);
+        const float radialBothK = EnvFloat("DRAPE_PANELS_RADIAL", -1.0f);
+        const float radialOutK = EnvFloat("DRAPE_PANELS_RADIAL_OUT",
+                                          radialBothK >= 0.0f ? radialBothK : 0.35f);
+        float radialInK = EnvFloat("DRAPE_PANELS_RADIAL_IN",
+                                   radialBothK >= 0.0f ? radialBothK : 0.0f);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (radialInK <= 0.0f && fs::exists("E:/SkyrimDev/Drape/panel_radial_in.flag"))
+            radialInK = 0.06f;
+#endif
+        const float radialMaxStep = EnvFloat("DRAPE_PANELS_RADIAL_STEP", 0.35f);
         const int   iters   = (int)EnvFloat("DRAPE_PANELS_ITERS", 8.0f);
-        const float kPostCap = 1.12f, kBodyFloor = 0.06f;
+        const float kPostCap = 1.12f;
+        const float kBodyFloor = EnvFloat("DRAPE_PANELS_BODY_FLOOR", 0.20f);
         auto vertRigid = [&](size_t i) -> bool {
             if (islandIdOut.size() != n) return false;
             int id = islandIdOut[i];
@@ -9364,18 +10159,24 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // is untouched; only curvature the MORPH created (the lump: authored smooth,
             // morphed bumpy) is removed. Same D3 principle as the belt's authored offset.
             std::vector<float> c0(n, 0.0f);
+            std::vector<float> r0(n, 0.0f);   // authored radial curvature (neighbour avg R - own R)
             std::vector<float> d0(n, 0.0f);   // base mean neighbour distance (local scale ref)
             {
                 std::fill(sum.begin(), sum.end(), Vec3{});
                 std::fill(cnt.begin(), cnt.end(), 0);
                 std::fill(vnorm.begin(), vnorm.end(), Vec3{});
                 std::vector<float> sumd(n, 0.0f);
+                std::vector<float> sumr(n, 0.0f);
+                std::vector<float> baseR(n, 0.0f);
+                for (size_t i = 0; i < n; ++i)
+                    baseR[i] = RadialRadius(baseVerts[i]);
                 for (const auto& e : useEdges) {
                     if (e.a >= n || e.b >= n) continue;
                     float dl = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
                     sum[rep[e.a]] = Add(sum[rep[e.a]], baseVerts[e.b]); ++cnt[rep[e.a]];
                     sum[rep[e.b]] = Add(sum[rep[e.b]], baseVerts[e.a]); ++cnt[rep[e.b]];
                     sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
+                    sumr[rep[e.a]] += baseR[e.b]; sumr[rep[e.b]] += baseR[e.a];
                 }
                 if (tris) {
                     for (const auto& t : *tris) {
@@ -9394,6 +10195,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (nl < 1.0e-6f) continue;
                     Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)cnt[r]), baseVerts[i]);
                     c0[i] = Dot(lap, Scale(vnorm[r], 1.0f / nl));
+                    r0[i] = (sumr[r] / (float)cnt[r]) - baseR[i];
                     d0[i] = sumd[r] / (float)cnt[r];
                 }
             }
@@ -9406,12 +10208,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 std::fill(cnt.begin(), cnt.end(), 0);
                 std::fill(vnorm.begin(), vnorm.end(), Vec3{});
                 std::vector<float> sumd(n, 0.0f);
+                std::vector<float> sumr(n, 0.0f);
+                std::vector<float> curR(n, 0.0f);
+                for (size_t i = 0; i < n; ++i)
+                    curR[i] = RadialRadius(finalVerts[i]);
                 for (const auto& e : useEdges) {
                     if (e.a >= n || e.b >= n) continue;
                     float dl = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
                     sum[rep[e.a]] = Add(sum[rep[e.a]], finalVerts[e.b]); ++cnt[rep[e.a]];
                     sum[rep[e.b]] = Add(sum[rep[e.b]], finalVerts[e.a]); ++cnt[rep[e.b]];
                     sumd[rep[e.a]] += dl; sumd[rep[e.b]] += dl;
+                    sumr[rep[e.a]] += curR[e.b]; sumr[rep[e.b]] += curR[e.a];
                 }
                 if (tris) {
                     for (const auto& t : *tris) {
@@ -9445,6 +10252,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // contact zones; inward is blocked near contact (see weights above).
                     delta *= (delta > 0.0f) ? wOut[i] : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
+                }
+                if (radialOutK > 0.0f || radialInK > 0.0f) {
+                    for (size_t i = 0; i < n; ++i) {
+                        uint32_t r = rep[i];
+                        if (!eligible[i] || cnt[r] < 2) continue;
+                        float curRad = RadialRadius(finalVerts[i]);
+                        if (curRad <= 1.0e-5f) continue;
+                        float s = 1.0f;
+                        if (d0[i] > 1.0e-6f && cnt[r] > 0)
+                            s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
+                        float radialCurv = (sumr[r] / (float)cnt[r]) - curRad;
+                        float dR = radialCurv - r0[i] * s;
+                        dR *= (dR > 0.0f) ? (radialOutK * wOut[i]) : (radialInK * wIn[i]);
+                        dR = ClampRange(dR, -radialMaxStep, radialMaxStep);
+                        if (std::fabs(dR) <= 1.0e-5f) continue;
+                        float dirX = (finalVerts[i].x - g_refCenterX) / curRad;
+                        float dirY = (finalVerts[i].y - g_refCenterY) / curRad;
+                        float newR = std::max(0.0f, curRad + dR);
+                        finalVerts[i].x = g_refCenterX + dirX * newR;
+                        finalVerts[i].y = g_refCenterY + dirY * newR;
+                    }
                 }
                 // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -11384,6 +12212,7 @@ extern "C" __declspec(dllexport)
 int DrapeClearShapePresets() {
     std::lock_guard<std::mutex> lk(g_cacheMx);
     g_shapePresets.clear();
+    g_presetResolutionLogged.clear();
     g_appliedShapesLogged.clear();
     g_shapePresetMaskCache.clear();
     // Clear the per-slider solved-mesh cache too: it holds the PREVIOUS Conform run's
@@ -11402,6 +12231,7 @@ int DrapeSetShapePreset(const char* shapeNameUtf8, int preset) {
     std::lock_guard<std::mutex> lk(g_cacheMx);
     g_shapePresets[shapeNameUtf8] = normalized;
     g_shapePresetMaskCache.erase(shapeNameUtf8);
+    g_presetResolutionLogged.erase(shapeNameUtf8);
     g_appliedShapesLogged.clear();
     HLog("preset-ui: shape '%s' preset='%s'", shapeNameUtf8, PresetName(normalized));
     return 0;
