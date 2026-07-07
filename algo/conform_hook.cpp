@@ -5965,6 +5965,76 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         };
 
+        // ENGINE shape stiffness (2026-07-07, Part 18 P2): azimuthal shear resistance
+        // INSIDE the solve. Edge lengths alone leave an isometric null-space (cloth can
+        // shear/slide laterally at constant edge length); the solver was blind there and
+        // noise filled it (seam meander, sheared faces, front creases) - which a stack of
+        // post-passes then repaired. Restoring each vert's AZIMUTHAL Laplacian toward its
+        // authored value PER SUBSTEP closes the null-space at the source. Tangent-only
+        // moves: cannot approach/leave the body radially (no magnetism by construction).
+        // Ships DARK (k=0): at 0.30 the marginal shear gain over the post-pass (0.4138 vs
+        // 0.4197) costs magnetism +125 (tangential gap-remap). P2 will TUNE this in-loop
+        // constraint properly and retire the post-pass version; machinery stays ready.
+        const float engineAzK = ClampRange(EnvFloat("DRAPE_ENGINE_AZIMUTH_K", 0.0f), 0.0f, 1.0f);
+        std::vector<uint32_t> azRep(n);
+        std::vector<float> azA0(n, 0.0f), azD0(n, 0.0f);
+        std::vector<Vec3>  azSum(n);
+        std::vector<int>   azCnt(n, 0);
+        std::vector<float> azSumd(n, 0.0f);
+        if (engineAzK > 0.0f && !useEdges.empty()) {
+            for (size_t i = 0; i < n; ++i) azRep[i] = (uint32_t)i;
+            for (const auto& grp : exactSeamGroups)
+                for (uint32_t vi : grp)
+                    if (vi < n && !grp.empty()) azRep[vi] = grp[0];
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                float dl = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+                azSum[azRep[e.a]] = Add(azSum[azRep[e.a]], baseVerts[e.b]); ++azCnt[azRep[e.a]];
+                azSum[azRep[e.b]] = Add(azSum[azRep[e.b]], baseVerts[e.a]); ++azCnt[azRep[e.b]];
+                azSumd[azRep[e.a]] += dl; azSumd[azRep[e.b]] += dl;
+            }
+            for (size_t i = 0; i < n; ++i) {
+                uint32_t r = azRep[i];
+                if (azCnt[r] < 2) continue;
+                float dx = baseVerts[i].x - g_refCenterX, dy = baseVerts[i].y - g_refCenterY;
+                float rad = std::sqrt(dx * dx + dy * dy);
+                if (rad <= 1.0e-5f) continue;
+                Vec3 lap = Sub(Scale(azSum[r], 1.0f / (float)azCnt[r]), baseVerts[i]);
+                azA0[i] = lap.x * (-dy / rad) + lap.y * (dx / rad);
+                azD0[i] = azSumd[r] / (float)azCnt[r];
+            }
+        }
+        auto solveAzimuthShear = [&](float k) {
+            if (k <= 0.0f || useEdges.empty()) return;
+            std::fill(azSum.begin(), azSum.end(), Vec3{});
+            std::fill(azCnt.begin(), azCnt.end(), 0);
+            std::fill(azSumd.begin(), azSumd.end(), 0.0f);
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                float dl = Len(Sub(finalVerts[e.a], finalVerts[e.b]));
+                azSum[azRep[e.a]] = Add(azSum[azRep[e.a]], finalVerts[e.b]); ++azCnt[azRep[e.a]];
+                azSum[azRep[e.b]] = Add(azSum[azRep[e.b]], finalVerts[e.a]); ++azCnt[azRep[e.b]];
+                azSumd[azRep[e.a]] += dl; azSumd[azRep[e.b]] += dl;
+            }
+            for (size_t i = 0; i < n; ++i) {
+                uint32_t r = azRep[i];
+                if (m[i] <= 0.0f || azCnt[r] < 2) continue;
+                float dx = finalVerts[i].x - g_refCenterX, dy = finalVerts[i].y - g_refCenterY;
+                float rad = std::sqrt(dx * dx + dy * dy);
+                if (rad <= 1.0e-5f) continue;
+                float ax = -dy / rad, ay = dx / rad;
+                Vec3 lap = Sub(Scale(azSum[r], 1.0f / (float)azCnt[r]), finalVerts[i]);
+                float a = lap.x * ax + lap.y * ay;
+                float sc = 1.0f;
+                if (azD0[i] > 1.0e-6f)
+                    sc = ClampRange((azSumd[r] / (float)azCnt[r]) / azD0[i], 0.5f, 3.0f);
+                float dA = ClampRange((a - azA0[i] * sc) * k, -0.30f, 0.30f);
+                if (std::fabs(dA) <= 1.0e-6f) continue;
+                finalVerts[i].x += ax * dA;
+                finalVerts[i].y += ay * dA;
+            }
+        };
+
         for (int s = 0; s < substeps; ++s) {
             // 1) Gravity nudge (NO momentum). Free verts only.
             for (size_t i = 0; i < n; ++i) {
@@ -6001,6 +6071,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         ++stats.bendingAdjusted;
                     }
                 }
+
+                // Azimuthal shear stiffness (engine shape-matching, lateral axis).
+                solveAzimuthShear(engineAzK);
 
                 // Body collision (BVH primary). Runs every substep to keep verts
                 // on the real body surface throughout relaxation.
@@ -10194,8 +10267,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // OutfitStudio. Harness/golden runs ignore the file so the corpus baseline stays clean.
     panelsOn = panelsOn || fs::exists("E:/SkyrimDev/Drape/panels_on.flag");
 #endif
+    // P2 (2026-07-07): the authored-shape restore also serves the LOOSE path - measured
+    // on the Blacksmith front skirt: authored fold 4.27, vanilla amplifies to 6.22, the
+    // loose solve inherited 5.76 (5th vanilla-inherited defect). All components target
+    // AUTHORED data with contact-aware feathering, so the same gates apply.
+    const bool panelsLoose = params.verletCloth && EnvToggle("DRAPE_PANELS_LOOSE", false);  // P2 toggle, ships dark
     if (panelsOn &&
-        !params.verletCloth && params.enabled && !useEdges.empty() &&
+        (!params.verletCloth || panelsLoose) && params.enabled && !useEdges.empty() &&
         NormalizePreset(preset) != DRAPE_PRESET_BELT &&
         g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
         const float gapMin  = EnvFloat("DRAPE_PANELS_GAP", 1.5f);
