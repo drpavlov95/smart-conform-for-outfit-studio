@@ -9749,9 +9749,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float hemBand = EnvFloat("DRAPE_HEM_LOCK_BAND", 6.0f);
         const float hemStrength = Clamp01(EnvFloat("DRAPE_HEM_LOCK_STRENGTH", 1.0f));
         const float centerBand = EnvFloat("DRAPE_CENTER_LINE_BAND", 0.75f);
-        const float centerHeight = EnvFloat("DRAPE_CENTER_LINE_HEIGHT", 65.0f);
+        const float centerHeight = EnvFloat("DRAPE_CENTER_LINE_HEIGHT", 80.0f);
         const float centerBackMargin = EnvFloat("DRAPE_CENTER_LINE_BACK_MARGIN", 2.0f);
-        const float centerStrength = Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.35f));
+        const float centerStrength = Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.85f));
         if ((hemBand <= 0.0f || hemStrength <= 0.0f) &&
             (centerBand <= 0.0f || centerStrength <= 0.0f)) {
             return 0;
@@ -9778,12 +9778,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 }
             }
 
+            // Centre-line lateral restore, BOTH panels (front and back — the one-sided
+            // back-margin filter left the back seam free to wander). Target is the
+            // AUTHORED lateral position (baseVerts.x), not supportVerts (vanilla): on a
+            // laterally-symmetric body a centre seam has no legitimate reason to migrate
+            // sideways, and the verlet solve otherwise lets it meander ±1.8u (measured,
+            // Blacksmith apron back seam — the user-visible "linha entortando"). Vanilla
+            // as target would CEMENT whatever lateral error vanilla carries (+1.0 at the
+            // waist band on this outfit).
             if (centerBand > 0.0f && centerStrength > 0.0f &&
                 std::fabs(baseVerts[i].x - g_refCenterX) <= centerBand &&
                 (centerHeight <= 0.0f || baseVerts[i].z <= minBaseZ + centerHeight) &&
-                baseVerts[i].y < g_refCenterY - centerBackMargin) {
+                std::fabs(baseVerts[i].y - g_refCenterY) > centerBackMargin) {
                 float oldX = finalVerts[i].x;
-                finalVerts[i].x += (supportVerts[i].x - finalVerts[i].x) * centerStrength;
+                finalVerts[i].x += (baseVerts[i].x - finalVerts[i].x) * centerStrength;
                 if (std::fabs(finalVerts[i].x - oldX) > 1.0e-4f) {
                     ++centerMoved;
                     touched = true;
