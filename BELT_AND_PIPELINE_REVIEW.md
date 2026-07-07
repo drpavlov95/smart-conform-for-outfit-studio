@@ -964,3 +964,56 @@ Current live A/B state: `panels_on.flag` active, `hbridge_on.flag` active,
 `panel_radial_in.flag` absent. Harness default remains green; with `DRAPE_PANELS=1`,
 radial-out improves BlackSmithTorso versus the prior live panel path (magnetism 511 -> 471,
 roughness 0.9759 -> 0.9746) but still needs eyes.
+
+## Part 18 - RE-ARCHITECTURE PLAN: "a engrenagem" (2026-07-07, user-mandated)
+
+**User's mandate (verbatim spirit):** surface smoothness up close (small bumps/pointy
+edges on the "straight" dress) + general realism; fear that accumulated gambiarras won't
+compose globally; "the radial rule seemed satisfied, but what came BEFORE it was wrong -
+the body pushing the dress without touching it."
+
+### 18.1 The diagnosis, quantified (all previously measured)
+- **~35 distinct passes/stages** log per solve (was ~20 at Part 2E). Each repair pass
+  fixes its own metric by nudging SOME verts and leaving 0.1-0.5u steps against
+  untouched neighbours - the up-close bumps ARE this stacking (M4 jag lesson:
+  collision-correctness != visual smoothness; roughnessSolved is the proxy).
+- **The user's example is real:** `loose-outer-body-volume` pushes to a body-gap WINDOW
+  with no contact test (forbidden uniform-gap family). Measured collateral: vampire
+  junction tears (10.4u), 36951 adjustments/solve, needed an in-round weld patch (patch
+  on patch). Same family: clearance/bodyGapPreserve in correction mode.
+- **Vanilla-as-anchor (D1 violation) keeps resurfacing:** influence blend (Part 2A),
+  centre-line lock targeting supportVerts (56e8160), seam-close restoring vanilla
+  offsets. Every lock/anchor MUST target AUTHORED data.
+- **M3.1 Pareto finding:** the tower sits near the pen<->stretch frontier - more patches
+  only trade defects. Only architecture moves the frontier.
+
+### 18.2 Target architecture (= RADIAL_DRAPE_RULE.md section 8, executed)
+ONE preset-aware TARGET ENVELOPE built BEFORE the solve + ONE projection loop:
+1. **Envelope builder** (per shape, deterministic): body radial/column profile ->
+   per-preset support envelope (draped = gravity-shadow sweep; fitted = convex bridge
+   over hollows; skin-tight = body+authored offset). Replaces as the single source:
+   loose-outer-body-volume, drape envelopes, hanging-chain, hbridge, contact-radial,
+   gravity-shadow post-push.
+2. **Unified projection** (extend the M3.1 seed): edges (near-hard) + bending
+   (compliant) + one-way envelope contact + seam/junction welds + layer order,
+   projected TOGETHER, fixed iterations. Smoothness emerges from constraints coexisting
+   instead of being sanded on afterwards.
+3. **Authored-data locks only**: c0/r0/a0 basis + line locks target base mesh, never
+   supportVerts.
+4. **Repair tail retired pass-by-pass**: each retirement = corpus + goldens + live A/B
+   gate. Kill-list candidates (in order): loose-outer-body-volume, final-body-reclear,
+   post-prox caps, second seam-close, de-wrinkle remnants, dead PoC flags.
+
+### 18.3 Migration order (each step corpus-gated, flag-gated live)
+- **P0 (short):** flag consolidation - decide panels_on/hbridge_on/contact_radial_on
+  fates, fold winners into defaults, update goldens, delete flags. "Live == git."
+- **P1:** pass inventory classification (core/rule/repair/experimental) + retire the
+  provably-dead ones. Add roughnessSolved + supportFloat to every golden gate.
+- **P2:** envelope builder + feed it to the EXISTING solve as the collision target
+  (replacing the post-solve pushes for LOOSE first, then correction mode).
+- **P3:** fold finishing tower into the unified loop; retire repair tail.
+- **P4:** M5 packaging on top of the consolidated engine.
+
+Safety net that did NOT exist when M3 was first deferred: 5-outfit corpus (Yarl, Fur,
+Blacksmith, Vampire, Falmer), determinism harness, honest metrics, preset-resolve
+logging, capture pipeline. The refactor is now measurable end-to-end.
