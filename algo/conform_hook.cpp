@@ -6025,7 +6025,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float nl = Len(vn[i]);
                     if (nl < 1.0e-6f) continue;
                     Vec3 ni = Scale(vn[i], 1.0f / nl);
-                    Vec3 probe = Sub(baseVerts[i], Scale(ni, 0.05f));
+                    // Probe deep enough that the vert's own COINCIDENT twins (at dist 0)
+                    // and 1-ring are past the nearest-hit, so the BVH returns the layer
+                    // BENEATH (gap g needs probe > g/2; measured flap gap ~2.4u).
+                    Vec3 probe = Sub(baseVerts[i], Scale(ni, kLayerBindMax * 0.5f));
                     if (!BVHClosestPointEx(selfBVH, probe, cp, nrm, d2, &tri, &bu, &bv, &bw)) continue;
                     if (tri < 0 || tri >= (int)tris->size()) continue;
                     const auto& t = (*tris)[(size_t)tri];
@@ -6033,7 +6036,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (ring[i].count(t[0]) || ring[i].count(t[1]) || ring[i].count(t[2])) continue;
                     float dist = Len(Sub(baseVerts[i], cp));
                     if (dist < 0.05f || dist > kLayerBindMax) continue;
-                    if (Dot(ni, selfBVH.faceNormal[(size_t)tri]) > -0.20f) continue;  // must OPPOSE
+                    // The OTHER layer must sit INWARD of this vert (behind it along its
+                    // own normal), not the opposition-of-face-normals test (a stacked flap
+                    // and its outer panel BOTH face outward, so that never fired). This is
+                    // the "this vert rests on a layer beneath it" relation.
+                    if (Dot(Sub(cp, baseVerts[i]), ni) > -0.3f * dist) continue;
                     float off = dist;
                     if (Dot(Sub(baseVerts[i], cp), selfBVH.faceNormal[(size_t)tri]) < 0.0f) off = -off;
                     layerBinds.push_back({(uint32_t)i, tri, bu, bv, bw, off});
