@@ -1057,3 +1057,48 @@ overlap, opposing normals) + authored-offset binds in the solve; (b) tune in-loo
 (retire post-pass); (c) region shape-matching (ARAP) for wave-scale folds if (a) doesn't
 subsume it. Acceptance: the Blacksmith fan/arch keeps authored shape; front crease
 5.76 -> ~4.3; wire.png clean; corpus green; then USER eyes.
+
+## Part 19 - PASS INVENTORY + KILL-LIST (2026-07-07, P1 analysis, autonomous)
+
+Every logged pass classified so retirement is deliberate, not archaeological. CORE = the
+solve itself; RULE = implements the radial rule (keep, will move in-loop at P2); REPAIR =
+fixes a defect an earlier pass caused (retire as the engine subsumes it); DEAD = unreachable
+in the shipped config (env default false + its live flag file deleted) - safe to delete now,
+corpus stays byte-identical.
+
+### CORE (the engine)
+- islands, exact-seam-groups, prox-constraints, boundary-seam-constraints, junction-stitch
+  - topology/structure setup.
+- (verlet solve: gravity + solveStretch + bending + collision + weldSeams per substep).
+- order-constraints - layer solve ordering.
+
+### RULE (keep; P2 target = fold into the solve)
+- gravity-shadow-gap (vertical hollow bridge, M4), hbridge (horizontal hollow bridge).
+- panel-flatten (authored c0/r0/a0 shape restore - the workhorse; ON for fitted, dark for loose).
+- loose-azimuth-restore (lateral null-space; post-pass ON, in-loop machinery dark).
+- layer-binds (U9 intra-garment; detection works, constraint dark pending eyes).
+
+### REPAIR (retire as the engine covers them - Part 18.2 order)
+- loose-outer-body-volume (anti-collapse; the "body pushes without touching" the user flagged
+  - PRIME retirement target once the envelope is a solve input).
+- final-body-reclear, final-body-clearance, final-feasible-layer-tuck, final-selfcollision-tuck,
+  anti-clip{,-cleanup,-collapse,-suppress,-collider}, outer-layer-inner-clearance,
+  inner-clearance-collider, rigid-border, seam-close, prox-seam caps.
+- cover-{diag,diff-mask,collapse} - covered-vertex suppression.
+
+### DEAD (delete now; corpus byte-identical - contact-radial stack + Codex PoCs)
+- contact-radial, loose-contact-rest, no-contact-radial, authored-hem-pins (part of
+  authored-line-locks): the whole Jul-6 contact-radial experiment. Gates: env toggles
+  default false AND their flag files (contact_radial_on / no_contact_radial_on) were deleted
+  in P0. Rejected in P0 (magnetism signature; superseded by azimuth-restore for the lateral
+  goal). Kept in git history.
+- final-despike (already `(void)`-disabled), applyBeltFinishing nudge tower (dead since M1
+  kBeltArap; ~370 lines).
+
+### DEAD ENGINE KNOBS (dark, kept for P2 tuning, NOT deletion)
+- DRAPE_ENGINE_AZIMUTH_K, DRAPE_COMPRESS_K/_FLOOR, DRAPE_PROX_DIST, DRAPE_LAYER_BIND_K/_MAX,
+  DRAPE_PANELS_LOOSE, DRAPE_SHADOW_MAX_GAP, hem z-lock.
+
+**Retirement is a no-op on the shipped result (corpus proves it) but removes ~15 of the ~35
+passes.** Do it in the next session (build-risk: large deletions want a human watching the
+compile), starting with the DEAD block, then REPAIR pass-by-pass as each engine hole closes.
