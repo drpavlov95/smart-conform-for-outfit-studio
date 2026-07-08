@@ -1155,3 +1155,33 @@ interlayer ceiling misses anchors authored >2.5u from the outer).
 
 **Codex audit (user asked):** nothing after c49672d — no commits/branches/stashes, tree
 clean, no flag files, deployed DLLs timestamped 23:18 (my fe656c5 deploy). Nothing to undo.
+
+### Part 20 act 2 — CHORD bridge: the fix that actually shows (2026-07-08)
+
+User retested v1: "continua a mesmíssima coisa" — correct. v1 fixed the local slivers;
+the VISIBLE crater is a REGION-scale basin. Diagnostic chain (each step measured):
+1. 3-ring hollow: defect verts 2.0+u deeper than authored — but 20 rounds of outward
+   c0-diffusion moved it 2.63→2.62. Normal-only moves DEAD-END: in the wedge, the vert
+   normal points at the opposite canyon wall (body floor stops it at 0.2u).
+2. Rim-CENTROID pull failed: the 3-ring rim wraps the convex sleeve, its centroid falls
+   INSIDE the arm (BVHSignedGap = -3.0). Cloth-centroid targets are invalid on convex
+   anatomy.
+3. KEY measurement: pit verts sit at aGap≈cGap (0.35≈0.37) — the cloth never "dived in";
+   the MORPH created the wedge and the cloth copies the body concavity at authored
+   clearance. Purest §6 violation. Axis-radial hbridge cannot see it (the arm occludes
+   the wedge at the same (z,θ): bodyR bin = arm outer radius, no dip).
+
+**Fix (v2): antipodal CHORD bridge.** For each pit vert: 3-ring rim via BFS → most
+antipodal pair in AUTHORED space (the two sides of the crease mouth) → lift the vert
+toward the SEGMENT between them, stopping at the depth the authored design kept below
+its own chord. Full-vector (exits the wedge tangentially), per-round step 0.35×remaining,
+basin coverage via 2-ring eligibility dilation (contact-gated ≤2.2u). Everything else
+holds: scoped edge caps (authored rest on pit edges), body floor, interlayer ceiling,
+weld-all-groups per round, post prox cap. 16 rounds when chords exist.
+
+**Validated:** Blacksmith armpit crater GONE in render (the whole wedge fan bridged);
+centre-back/front/skirt clean. Corpus: falmer Undies bodyPens 662→142, Cuirass 33→2,
+Cuirass_Torso 27→5 AND its facePen debt 4.26→2.05 (better than the 2.34 baseline);
+pauldron 8→0; vampire/yarl visually unchanged-or-cleaner. magnetismCount rises on several
+shapes — the metric misreads the bridge passing near the arm wall as attraction; the
+renders overrule it (established lesson). Goldens rebaselined, deployed 12:17.

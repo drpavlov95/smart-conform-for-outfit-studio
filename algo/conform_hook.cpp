@@ -10496,6 +10496,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 }
             }
         }
+        std::vector<float> cGapV(n, 1.0e9f);
         for (size_t i = 0; i < n; ++i) {
             if (vertRigid(i)) continue;
             float aGap = 0.0f;
@@ -10503,6 +10504,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             float cGap = 0.0f;
             bool haveCGap = bodyBVH && bodyBVH->valid &&
                             BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr);
+            if (haveCGap) cGapV[i] = cGap;
             float wAuth = panelsHang ? ClampRange((aGap - gapMin) / 1.0f, 0.0f, 1.0f) : 0.0f;
             if (wAuth > 0.0f) {
                 float wContact = haveCGap
@@ -10537,6 +10539,108 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (wPit[i] > 0.0f) ++nPit;
             }
             if (wOut[i] > 0.0f || wPit[i] > 0.0f) { eligible[i] = 1; ++nElig; }
+        }
+        // §6 CHORD BRIDGE (2026-07-08, v2 — the user-visible crater): the defect verts
+        // sit at their AUTHORED clearance on a body whose morph created a deep arm↔torso
+        // wedge — the cloth copies a body concavity that authored never had (the radial
+        // rule violation in its purest form). No local operator fixes that: normal moves
+        // dead-end into the opposite canyon wall, rim CENTROIDS fall inside the arm
+        // (measured, gRimCur=-3.0), and the axis-radial hbridge cannot even see the
+        // wedge (the arm occludes it at the same angle). The bridge must span the wedge
+        // MOUTH: for each pit vert take its 3-ring rim, pick the most ANTIPODAL pair
+        // (the two sides of the crease), and lift the vert toward the SEGMENT between
+        // them — stopping at the depth the AUTHORED design kept below its own chord, so
+        // designed hollows survive. Basin coverage: dilate eligibility 2 rings first
+        // (contact-gated), because the basin interior is locally smooth and unsignalled.
+        size_t nChord = 0;
+        std::vector<uint32_t> chordIdx;
+        std::vector<std::array<uint32_t, 2>> chordEnds;
+        std::vector<float> chordDepthAuth;
+        if (nPit > 0) {
+            for (int d = 0; d < 2; ++d) {
+                std::vector<float> w2 = wPit;
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    if (cGapV[e.a] < 2.2f && !vertRigid(e.a))
+                        w2[e.a] = std::max(w2[e.a], 0.7f * wPit[e.b]);
+                    if (cGapV[e.b] < 2.2f && !vertRigid(e.b))
+                        w2[e.b] = std::max(w2[e.b], 0.7f * wPit[e.a]);
+                }
+                wPit.swap(w2);
+            }
+            nPit = 0;
+            for (size_t i = 0; i < n; ++i)
+                if (wPit[i] > 0.0f) {
+                    ++nPit;
+                    if (!eligible[i]) { eligible[i] = 1; ++nElig; }
+                }
+            // Adjacency + 3-ring rim BFS for the chord endpoints.
+            std::vector<std::vector<uint32_t>> adj(n);
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                adj[e.a].push_back(e.b);
+                adj[e.b].push_back(e.a);
+            }
+            for (auto& v : adj) {
+                std::sort(v.begin(), v.end());
+                v.erase(std::unique(v.begin(), v.end()), v.end());
+            }
+            std::vector<uint32_t> stampV(n, 0), frontier, next, rim;
+            uint32_t stampCur = 0;
+            auto distPointSeg = [](const Vec3& p, const Vec3& a, const Vec3& b, Vec3* out) -> float {
+                Vec3 ab = Sub(b, a);
+                float len2 = Dot(ab, ab);
+                float t = len2 > 1.0e-9f ? ClampRange(Dot(Sub(p, a), ab) / len2, 0.0f, 1.0f) : 0.0f;
+                Vec3 cp = Add(a, Scale(ab, t));
+                if (out) *out = cp;
+                return Len(Sub(p, cp));
+            };
+            for (size_t i = 0; i < n; ++i) {
+                if (wPit[i] <= 0.0f) continue;
+                ++stampCur;
+                rim.clear();
+                frontier.assign(1, (uint32_t)i);
+                stampV[i] = stampCur;
+                for (int depth = 0; depth < 3; ++depth) {
+                    next.clear();
+                    for (uint32_t u : frontier)
+                        for (uint32_t w : adj[u])
+                            if (stampV[w] != stampCur) {
+                                stampV[w] = stampCur;
+                                next.push_back(w);
+                            }
+                    frontier.swap(next);
+                }
+                rim = frontier;
+                if (rim.size() < 4) continue;
+                // Most antipodal rim pair, in AUTHORED space (the mouth of the crease is
+                // an authored-stable feature; solved-space directions are the defect).
+                float bestDot = 1.0f;
+                uint32_t bj = 0, bk = 0;
+                for (size_t a2 = 0; a2 < rim.size(); ++a2) {
+                    Vec3 da = Sub(baseVerts[rim[a2]], baseVerts[i]);
+                    float la = Len(da);
+                    if (la <= 1.0e-4f) continue;
+                    da = Scale(da, 1.0f / la);
+                    for (size_t b2 = a2 + 1; b2 < rim.size(); ++b2) {
+                        Vec3 db = Sub(baseVerts[rim[b2]], baseVerts[i]);
+                        float lb = Len(db);
+                        if (lb <= 1.0e-4f) continue;
+                        float dt = Dot(da, Scale(db, 1.0f / lb));
+                        if (dt < bestDot) {
+                            bestDot = dt;
+                            bj = rim[a2];
+                            bk = rim[b2];
+                        }
+                    }
+                }
+                if (bestDot > -0.3f) continue;   // no genuinely opposite pair — not a crease
+                chordIdx.push_back((uint32_t)i);
+                chordEnds.push_back({bj, bk});
+                chordDepthAuth.push_back(
+                    distPointSeg(baseVerts[i], baseVerts[bj], baseVerts[bk], nullptr));
+            }
+            nChord = chordIdx.size();
         }
         // Interlayer ceiling for pit lifts: a vert authored UNDER an outer layer may not
         // lift past that layer's current surface (caught on falmer Cuirass_Torso: pit
@@ -10676,7 +10780,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     }
                 }
             }
-            for (int it = 0; it < iters; ++it) {
+            // Chord convergence: each round closes pullK of the remaining depth; a
+            // 2.5u-deep basin needs ~16 rounds to land within 0.1u. The hanging /
+            // radial / azimuth clauses are converged equilibria by round 8, so the
+            // extra rounds are ~no-ops for them.
+            const int effIters = (nChord > 0)
+                ? std::max(iters, (int)EnvFloat("DRAPE_PIT_ITERS", 16.0f)) : iters;
+            for (int it = 0; it < effIters; ++it) {
                 // (a) NORMAL-component Laplacian toward the AUTHORED curvature (c -> c0),
                 //     hanging verts only. Normal-only: the tangential part would slide
                 //     verts along the surface, curling hems / shrinking open boundaries
@@ -10731,6 +10841,31 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // lifting the vert to the bridge); inward is blocked near contact.
                     delta *= (delta > 0.0f) ? std::max(wOut[i], wPit[i]) : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
+                }
+                // (a2) §6 chord bridge: lift each pit vert toward the segment between its
+                // antipodal rim pair (the mouth of the crease), stopping at the depth
+                // the AUTHORED design kept below its own chord. Full-vector — this is
+                // the move that exits the body wedge tangentially; the caps, floor,
+                // interlayer ceiling and welds below keep every step safe.
+                if (nChord > 0) {
+                    const float pullK = EnvFloat("DRAPE_PIT_PULL", 0.35f);
+                    for (size_t k = 0; k < chordIdx.size(); ++k) {
+                        uint32_t i = chordIdx[k];
+                        const Vec3& pa = finalVerts[chordEnds[k][0]];
+                        const Vec3& pb = finalVerts[chordEnds[k][1]];
+                        Vec3 ab = Sub(pb, pa);
+                        float len2 = Dot(ab, ab);
+                        float t = len2 > 1.0e-9f
+                            ? ClampRange(Dot(Sub(finalVerts[i], pa), ab) / len2, 0.0f, 1.0f)
+                            : 0.0f;
+                        Vec3 cp = Add(pa, Scale(ab, t));
+                        Vec3 toChord = Sub(cp, finalVerts[i]);
+                        float depthNow = Len(toChord);
+                        float remaining = depthNow - chordDepthAuth[k] - 0.05f;
+                        if (remaining <= 0.0f || depthNow <= 1.0e-4f) continue;
+                        float step = std::min(pullK * remaining, 0.5f) * wPit[i];
+                        finalVerts[i] = Add(finalVerts[i], Scale(toChord, step / depthNow));
+                    }
                 }
                 if (radialOutK > 0.0f || radialInK > 0.0f) {
                     for (size_t i = 0; i < n; ++i) {
@@ -10836,8 +10971,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // the end of the wreck (vampire-tear lesson, 3rd application).
             if (nPit > 0)
                 applyFinalProxSeamCap(6, "post-pit-prox-cap");
-            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu seamGroups=%zu gapMin=%.2f iters=%d",
-                 shapeName.c_str(), nElig, n, nPit, seamGroups.size(), gapMin, iters);
+            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu chords=%zu seamGroups=%zu gapMin=%.2f iters=%d",
+                 shapeName.c_str(), nElig, n, nPit, nChord, seamGroups.size(), gapMin, effIters);
         }
     }
 
