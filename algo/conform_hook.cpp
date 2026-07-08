@@ -10377,8 +10377,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // loose solve inherited 5.76 (5th vanilla-inherited defect). All components target
     // AUTHORED data with contact-aware feathering, so the same gates apply.
     const bool panelsLoose = params.verletCloth && EnvToggle("DRAPE_PANELS_LOOSE", false);  // P2 toggle, ships dark
-    if (panelsOn &&
-        (!params.verletCloth || panelsLoose) && params.enabled && !useEdges.empty() &&
+    // RADIAL §6 concave-contact bridge ("pit bridge", 2026-07-08): cloth that FOLLOWED
+    // the body into a valley between two masses (the arm<->torso canyon at RM_Heavy —
+    // user's armpit crater; same family as the cofrinho) is IN CONTACT, but that contact
+    // came from nearest-point magnetism, not from the body pushing — the radial rule
+    // forbids treating it as support. Those verts get the same authored-curvature
+    // restore below, OUTWARD-only, which lifts them to the span of their ring (the
+    // bridge). Vanilla-inherited defect #6 (measured: vanilla and our output have the
+    // identical crater; authored is clean), so it runs on BOTH solve paths.
+    // Skin-tight is excluded BY THE RULE (§5): it is the one behaviour where following
+    // the body into a concavity is correct, so "contact in a valley" is not a defect
+    // there (caught on falmer Undies: pit lifts blew its stretch/bend energy up ~50%).
+    const bool pitOn = EnvToggle("DRAPE_PIT_BRIDGE", true) &&
+                       NormalizePreset(preset) != DRAPE_PRESET_SKIN_TIGHT;
+    const bool panelsHang = !params.verletCloth || panelsLoose;
+    if (panelsOn && (panelsHang || pitOn) && params.enabled && !useEdges.empty() &&
         NormalizePreset(preset) != DRAPE_PRESET_BELT &&
         g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
         const float gapMin  = EnvFloat("DRAPE_PANELS_GAP", 1.5f);
@@ -10416,23 +10429,142 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         //    drape "draws" through the panel) may lift out of the hollow ("hollows get
         //    BRIDGED", the rule's third clause) without ever being pulled into the body.
         std::vector<uint8_t> eligible(n, 0);
-        std::vector<float>   wIn(n, 0.0f), wOut(n, 0.0f);
-        size_t nElig = 0;
+        std::vector<float>   wIn(n, 0.0f), wOut(n, 0.0f), wPit(n, 0.0f);
+        size_t nElig = 0, nPit = 0;
+        // Ring-average positions (plain 1-ring) for the pit-bridge concavity test: a
+        // vert sitting closer to the body than the point its ring spans is INSIDE a
+        // hollow that fitted/draped cloth should bridge (RADIAL_DRAPE_RULE §6).
+        std::vector<Vec3> ringBase(n), ringCur(n);
+        std::vector<int>  ringN(n, 0);
+        if (pitOn) {
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                ringBase[e.a] = Add(ringBase[e.a], baseVerts[e.b]);
+                ringCur[e.a]  = Add(ringCur[e.a],  finalVerts[e.b]);
+                ++ringN[e.a];
+                ringBase[e.b] = Add(ringBase[e.b], baseVerts[e.a]);
+                ringCur[e.b]  = Add(ringCur[e.b],  finalVerts[e.a]);
+                ++ringN[e.b];
+            }
+        }
+        const float pitDepthMin = EnvFloat("DRAPE_PIT_DEPTH", 0.35f);
+        // 1.8 = the same "in contact" boundary the hanging clause's contact feather uses.
+        // Wider (3.0 tried first) leaks onto the underbutt band (gap 1-3): those verts
+        // lift, and the edge caps drag the skirt below into a pucker star (measured,
+        // v395 centre-back moved 1.46 with bodyGap 4.97). Pit-bridge fixes CONTACT
+        // magnetism only; airborne hollows belong to gravity-shadow/hbridge.
+        const float pitNearGap  = EnvFloat("DRAPE_PIT_NEAR", 1.8f);
+        // Second pit signal: triangle-quality COLLAPSE vs authored. The crater's visible
+        // wedges are knife-fold WALLS — verts slid TANGENTIALLY into the crease line, so
+        // the ring-depth test misses them (their ring dips INTO the fold, depth<0) and a
+        // quality drop (authored 0.44 -> solved 0.15, measured) is the direct, basis-free
+        // measurement of that tangential distortion (same null-space the azimuth restore
+        // covers where the body axis gives a usable basis; the armpit has none).
+        std::vector<float> qBase(n, 1.0f), qCur(n, 1.0f);
+        std::vector<uint8_t> isTwin(n, 0);
+        if (pitOn) {
+            // Seam twins are excluded from the QUALITY clause: a sewn seam's quality dip
+            // is design, and lifting a welded column vert whose ring cannot follow makes
+            // a pucker star (caught on the centre-back cleft bridge). The fold fan's
+            // non-twin verts keep the basin eligible.
+            std::unordered_map<uint64_t, int> coinCnt;
+            coinCnt.reserve(n);
+            auto qk = [](const Vec3& p) -> uint64_t {
+                auto q = [](float v) -> uint64_t {
+                    return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+                };
+                return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+            };
+            for (size_t i = 0; i < n; ++i) ++coinCnt[qk(baseVerts[i])];
+            for (size_t i = 0; i < n; ++i)
+                if (coinCnt[qk(baseVerts[i])] >= 2) isTwin[i] = 1;
+        }
+        if (pitOn && tris) {
+            auto triQ = [](const Vec3& A, const Vec3& B, const Vec3& C) -> float {
+                Vec3 e0 = Sub(B, A), e1 = Sub(C, A), e2 = Sub(C, B);
+                float l2 = Dot(e0, e0) + Dot(e1, e1) + Dot(e2, e2);
+                if (l2 <= 1.0e-9f) return 1.0f;
+                return 3.4641016f * Len(Cross(e0, e1)) / l2;   // 4*sqrt(3)*A / sum(l^2)
+            };
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                float qb = triQ(baseVerts[t[0]], baseVerts[t[1]], baseVerts[t[2]]);
+                float qc = triQ(finalVerts[t[0]], finalVerts[t[1]], finalVerts[t[2]]);
+                for (int k = 0; k < 3; ++k) {
+                    qBase[t[k]] = std::min(qBase[t[k]], qb);
+                    qCur[t[k]]  = std::min(qCur[t[k]],  qc);
+                }
+            }
+        }
         for (size_t i = 0; i < n; ++i) {
             if (vertRigid(i)) continue;
             float aGap = 0.0f;
             if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], aGap, nullptr)) continue;
-            float wAuth = ClampRange((aGap - gapMin) / 1.0f, 0.0f, 1.0f);
-            if (wAuth <= 0.0f) continue;
-            float wContact = 1.0f;
-            if (bodyBVH && bodyBVH->valid) {
-                float cGap = 0.0f;
-                if (BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr))
-                    wContact = ClampRange((cGap - 1.8f) / 1.2f, 0.0f, 1.0f);
+            float cGap = 0.0f;
+            bool haveCGap = bodyBVH && bodyBVH->valid &&
+                            BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr);
+            float wAuth = panelsHang ? ClampRange((aGap - gapMin) / 1.0f, 0.0f, 1.0f) : 0.0f;
+            if (wAuth > 0.0f) {
+                float wContact = haveCGap
+                    ? ClampRange((cGap - 1.8f) / 1.2f, 0.0f, 1.0f) : 1.0f;
+                wIn[i]  = wAuth * wContact;
+                wOut[i] = wAuth;
             }
-            wIn[i]  = wAuth * wContact;
-            wOut[i] = wAuth;
-            if (wOut[i] > 0.0f) { eligible[i] = 1; ++nElig; }
+            // Pit-bridge eligibility: hollow depth = gap at the ring-span point minus the
+            // vert's own gap, measured NOW vs AUTHORED. Only the morph-created part counts
+            // (a designed crease has the same hollow authored and stays); only near-contact
+            // verts qualify (a floating panel's hollow is the hanging clause's business).
+            if (pitOn && haveCGap && ringN[i] >= 3) {
+                float wNear = ClampRange((pitNearGap - cGap) / 1.5f, 0.0f, 1.0f);
+                float gRingCur = 0.0f, gRingBase = 0.0f;
+                Vec3 rc = Scale(ringCur[i],  1.0f / (float)ringN[i]);
+                Vec3 rb = Scale(ringBase[i], 1.0f / (float)ringN[i]);
+                if (BVHSignedGap(*bodyBVH, rc, gRingCur, nullptr) &&
+                    BVHSignedGap(g_refBodyBVH, rb, gRingBase, nullptr)) {
+                    float hollowCur  = gRingCur - cGap;
+                    float hollowAuth = gRingBase - aGap;
+                    float depth = hollowCur - std::max(hollowAuth, 0.0f);
+                    wPit[i] = ClampRange((depth - pitDepthMin) / 0.9f, 0.0f, 1.0f) * wNear;
+                }
+                // Knife-fold walls: quality collapse vs authored (tangential slide).
+                // 0.12 floor: 0.08 also caught the centre-back seam column (its quality
+                // dip is the sewn seam itself) and puckered it; the armpit collapse is
+                // 0.2-0.3 deep, far above the floor (measured, Blacksmith RM_Heavy).
+                const float qualFloor = EnvFloat("DRAPE_PIT_QUAL", 0.12f);
+                float wQual = isTwin[i] ? 0.0f
+                    : ClampRange(((qBase[i] - qCur[i]) - qualFloor) / 0.15f, 0.0f, 1.0f);
+                wPit[i] = std::max(wPit[i], wQual * wNear);
+                if (wPit[i] > 0.0f) ++nPit;
+            }
+            if (wOut[i] > 0.0f || wPit[i] > 0.0f) { eligible[i] = 1; ++nElig; }
+        }
+        // Interlayer ceiling for pit lifts: a vert authored UNDER an outer layer may not
+        // lift past that layer's current surface (caught on falmer Cuirass_Torso: pit
+        // lifts doubled worstGarmentFacePen). Same body-gap-space semantics as the
+        // feasible-layer tuck: my body gap stays below the outer anchor's body gap minus
+        // a margin. Computed once (anchors are authored and don't move with the lift).
+        std::vector<float> pitCeil;
+        if (nPit > 0 && outerColliders && bodyBVH && bodyBVH->valid) {
+            pitCeil.assign(n, 1.0e30f);
+            const float kPitLayerMargin = 0.30f;
+            for (size_t i = 0; i < n; ++i) {
+                if (wPit[i] <= 0.0f) continue;
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Base().valid || !oc.Current().valid) continue;
+                    Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                    float bd2 = 0.0f;
+                    int baseTri = -1;
+                    float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                    if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
+                                           &baseTri, &bu, &bv, &bw)) continue;
+                    if (bd2 > 6.25f) continue;   // only when authored within 2.5u of the outer
+                    if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                    Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                    float outerGap = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                    pitCeil[i] = std::min(pitCeil[i], outerGap - kPitLayerMargin);
+                }
+            }
         }
         if (nElig >= 8) {
             std::vector<Vec3> sum(n);
@@ -10463,10 +10595,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 for (uint64_t k : keys) seamGroups.push_back(std::move(coin[k]));
             }
             auto weldSeams = [&]() {
+                // ALL groups, not just eligible ones: the edge cap below moves ANY vert
+                // whose edge touches an eligible one, so twins with no eligible member
+                // can still be split by this pass (caught 2026-07-08: pit-bridge edge
+                // caps opened the apron's centre-back seam). A pass welds everything it
+                // can move — vampire-tear lesson, 4th application.
                 for (const auto& g : seamGroups) {
-                    bool any = false;
-                    for (uint32_t vi : g) if (eligible[vi]) { any = true; break; }
-                    if (!any) continue;
                     Vec3 m{0.0f, 0.0f, 0.0f};
                     for (uint32_t vi : g) m = Add(m, finalVerts[vi]);
                     m = Scale(m, 1.0f / (float)g.size());
@@ -10592,8 +10726,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
                     float delta = (c - c0[i] * s) * smoothK;
                     // Directional gating: outward (+normal) may bridge hollows even in
-                    // contact zones; inward is blocked near contact (see weights above).
-                    delta *= (delta > 0.0f) ? wOut[i] : wIn[i];
+                    // contact zones (hanging wOut, and pit-bridge wPit — in the crater
+                    // the ring average sits outward, so c >> c0 and delta is outward,
+                    // lifting the vert to the bridge); inward is blocked near contact.
+                    delta *= (delta > 0.0f) ? std::max(wOut[i], wPit[i]) : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
                 }
                 if (radialOutK > 0.0f || radialInK > 0.0f) {
@@ -10646,10 +10782,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     }
                 }
                 // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
+                // Scoped to edges the PASS can move (an eligible endpoint): a global cap
+                // re-polices edges other passes left over 1.12 (the loose path's line
+                // locks do), yanking verts far from any panel/pit into pucker stars
+                // (measured: centre-back v395 moved 1.46u with zero eligibility).
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                     const auto& e = useEdges[ei];
                     if (e.a >= n || e.b >= n) continue;
+                    if (!eligible[e.a] && !eligible[e.b]) continue;
                     float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    // Pit edges: the vanilla rest length IS the defect there (the fold
+                    // squeezed them short), so capping against it yanks the unfold back.
+                    // Cap against AUTHORED spacing instead (D1: authored, not vanilla).
+                    if (wPit[e.a] > 0.0f || wPit[e.b] > 0.0f)
+                        rest = std::max(rest, e.restLength);
                     if (rest <= 1.0e-6f) continue;
                     Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                     float len = Len(dir);
@@ -10669,13 +10815,29 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         Vec3 target = finalVerts[i];
                         if (BVHCollideVertex(*bodyBVH, target, kBodyFloor))
                             finalVerts[i] = target;
+                        // Interlayer ceiling (pit lifts only): pull back under the outer
+                        // layer's surface. Resolves a violation this pass created, so the
+                        // inward move is legitimate (same semantics as the layer tuck).
+                        if (!pitCeil.empty() && wPit[i] > 0.0f &&
+                            pitCeil[i] < 1.0e29f && pitCeil[i] >= kBodyFloor) {
+                            float g = 0.0f; Vec3 gn{0.0f, 0.0f, 1.0f};
+                            if (BVHSignedGap(*bodyBVH, finalVerts[i], g, &gn) &&
+                                g > pitCeil[i])
+                                finalVerts[i] = Sub(finalVerts[i],
+                                                    Scale(gn, g - pitCeil[i]));
+                        }
                     }
                 }
                 // (d) weld seam twins every round so the smoother can't split seams.
                 weldSeams();
             }
-            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu seamGroups=%zu gapMin=%.2f iters=%d",
-                 shapeName.c_str(), nElig, n, seamGroups.size(), gapMin, iters);
+            // Pit verts sit ON island junctions (the armpit is the arm<->torso stitch);
+            // per-vert lifts can open prox pairs — restore the invariant here, not at
+            // the end of the wreck (vampire-tear lesson, 3rd application).
+            if (nPit > 0)
+                applyFinalProxSeamCap(6, "post-pit-prox-cap");
+            HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu seamGroups=%zu gapMin=%.2f iters=%d",
+                 shapeName.c_str(), nElig, n, nPit, seamGroups.size(), gapMin, iters);
         }
     }
 

@@ -1102,3 +1102,56 @@ corpus stays byte-identical.
 **Retirement is a no-op on the shipped result (corpus proves it) but removes ~15 of the ~35
 passes.** Do it in the next session (build-risk: large deletions want a human watching the
 compile), starting with the DEAD block, then REPAIR pass-by-pass as each engine hole closes.
+
+---
+
+## Part 20 — Pit-bridge: RADIAL §6 concave-contact bridge (2026-07-08)
+
+**User report (live, Blacksmith RM_Heavy):** "protuberância na frente continua" + "buraco/
+concavidade enorme na axila". Replayed his fresh capture (maxExpectedVertError=0) and
+rendered (tools/render_obj.py, shaded 3-panel — the render ritual, now a reusable tool):
+
+- **Front protuberance = THE BODY.** RM_Heavy's own belly maxY jumps 7.5→14.7u at z 65-70;
+  the cloth rides 0.1-0.5u off it (legit convex contact). Vanilla identical. Not fixable,
+  not a defect. Our under-belly drape is already better than vanilla's crease.
+- **Armpit crater = vanilla-inherited defect #6.** Gap stats byte-identical vanilla vs ours
+  (mean 0.76/max 1.92); sliver fan at x±13-15 z≈95 in both (q 0.44→0.15 vs authored).
+  Root cause: nearest-point conform dives the sleeve junction into the arm↔torso canyon —
+  exactly RADIAL_DRAPE_RULE §6's horizontal concavity between separate body masses.
+
+**Fix (engine, not patch): pit-bridge inside panel-flatten.** Second eligibility source for
+the existing authored-curvature restore — no new pass:
+- Clause A (valley bottoms): ring-span gap minus own gap, NOW vs AUTHORED (morph-created
+  hollow only), near-contact feather.
+- Clause B (knife-fold WALLS): triangle-quality collapse vs authored (q drop > 0.12) —
+  the walls slid TANGENTIALLY into the crease, so the ring-depth test misses them (their
+  depth is negative); quality drop measures the tangential distortion basis-free. Seam
+  twins excluded (a sewn seam's q-dip is design; lifting a welded column makes a pucker).
+- Correction: the same c→c0·s normal restore, outward gated by max(wOut, wPit) — in the
+  crater the ring average sits outward, so the restore lifts to the bridge. Inward stays
+  blocked. Runs on BOTH solve paths (defect is inherited from vanilla input).
+- **wNear = 1.8u contact boundary** (same as the hanging clause's contact feather). 3.0
+  leaked onto the underbutt band (gap 1-3): lifts + edge caps dragged the skirt below into
+  a pucker star (v395 moved 1.46u with gap 4.97).
+- **Skin-tight excluded by the rule itself** (§5: following concavities is correct there).
+- **Interlayer ceiling** for pit lifts (layer-tuck semantics: my body-gap ≤ outer anchor's
+  body-gap − 0.30), anchors authored, computed once.
+- Edge cap now **scoped to eligible-touching edges** (global cap re-policed edges other
+  passes left >1.12 on the loose path → pucker stars far from any panel) and pit edges cap
+  against AUTHORED rest (vanilla rest IS the defect there — the fold squeezed them).
+- weldSeams welds **ALL twin groups every round** (edge caps move non-eligible verts too;
+  the old any-eligible filter let the apron's centre-back seam open — vampire lesson #4).
+- applyFinalProxSeamCap(6) after the loop when pits fired (armpit IS the arm↔torso
+  junction stitch).
+
+**Validated (renders + corpus, goldens rebaselined):** Blacksmith armpit fan shortened,
+worstSupportEdgeStretch 7.63→1.60, centre-back byte-clean vs antes; falmer Undies straps
+un-fragment (visibly better; its stretch/bendEnergy metrics rise because vanilla's squeezed
+rest IS the baseline — visual beats metric); falmer assembled cuirass: no visible change,
+bodyPenetrations -26/-36/-56/-8 across shapes; vampire: no new tearing, pens -13; yarl
+dress: unchanged (armpits slightly cleaner). Known cosmetic debt: falmer Cuirass_Torso
+worstGarmentFacePen 2.34→4.26 hidden under the outer plate (not visible assembled; the
+interlayer ceiling misses anchors authored >2.5u from the outer).
+
+**Codex audit (user asked):** nothing after c49672d — no commits/branches/stashes, tree
+clean, no flag files, deployed DLLs timestamped 23:18 (my fe656c5 deploy). Nothing to undo.
