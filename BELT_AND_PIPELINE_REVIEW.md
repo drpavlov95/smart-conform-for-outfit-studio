@@ -1185,3 +1185,36 @@ Cuirass_Torso 27→5 AND its facePen debt 4.26→2.05 (better than the 2.34 base
 pauldron 8→0; vampire/yarl visually unchanged-or-cleaner. magnetismCount rises on several
 shapes — the metric misreads the bridge passing near the arm wall as attraction; the
 renders overrule it (established lesson). Goldens rebaselined, deployed 12:17.
+
+### Part 20 act 3 — GROUND TRUTH: the author's hand sculpt changes everything (2026-07-08)
+
+User: "continua ruim... cratera nas axilas e na canela" + THE gift: "todos esses outfits eu
+tinha esculpido a mão o RM_Heavy — o estado atual pré-smartconform é a referência."
+
+**New capability:** tools/osd_extract.py parses BodySlide OSD slider data and rebuilds the
+hand-sculpted RM_Heavy mesh (base + diff); tools/error_map.py scores any result against it
+(per-vert distance, z-band stats, heatmap). --refbody-obj and DRAPE_FORCE_PRESET added to
+the harness. This is the project's first real loss function.
+
+**What the reference proved (Blacksmith):**
+- The sculpt's armpit is a SHALLOW FILLED transition — no cavity. Neither vanilla nor any
+  of our variants produce it. The v2 chord left a visible pinwheel from the front (my
+  "crater gone" render was one angle; the front view showed the truth — ALWAYS render
+  multiple angles).
+- Scores vs sculpt: FITTED path 1.49 mean (shin band 0.58-0.71) · LOOSE path 2.19 (shin
+  3.7-4.9, skirt narrowed, authored front vent Λ ERASED) · vanilla 1.42.
+- The "cratera na canela" = the LOOSE ROUTING REGRESSION: Codex's longGarmentBySpan
+  (2026-07-05, added expressly to flip BlackSmithTorso to Loose) reversed. Authored-gap
+  profiling does NOT separate the two dress classes (6.25 vs 6.80 skirt means) — no honest
+  geometric discriminator exists, so the conservative original rule stands (yarl stays
+  Loose at lowerFrac 0.25, blacksmith returns Fitted via shape-name "torso").
+- Pit-bridge (v1+v2) ships OFF: it LOSES against the sculpt on both paths (1.54 vs 1.49
+  fitted) and the pinwheel is user-visible. Code + knob kept for v3, which must be
+  designed against the sculpt reference (target: fill the pit to the sculpt's shallow
+  arm↔chest bridge).
+
+**Deployed 2026-07-08 17:44.** Expected user-visible: Blacksmith returns to the Jul-3
+approved fitted look (skirt full, vent preserved, thigh-bump fix active), armpit cavity
+still present (open item, now with a measurable target). NEXT: extract sculpt references
+for all 4 outfits, add reference-score to the harness metrics, design armpit v3 and tune
+engine knobs against the references.

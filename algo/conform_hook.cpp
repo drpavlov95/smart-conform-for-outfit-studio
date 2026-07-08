@@ -589,17 +589,15 @@ static int GuessPresetFromGeometry(const std::vector<Vec3>& verts,
     bool longGarment = shapeH > bodyH * 0.38f &&
         lowerFrac > 0.20f &&
         upperFrac > 0.12f;
-    // Some long dresses/robes have most of their vertices in the bodice/upper panels,
-    // so a pure lower-vertex fraction misses them even though their vertical span is
-    // unmistakably a hanging garment. BlackSmithTorso is the regression case: only
-    // ~18% of verts are below the lower cut, but the mesh spans ankle-to-torso and has
-    // strong torso/pelvis weights. Use span as a secondary signal when bone profiles
-    // are available; the torso-weight gate below keeps pants/sleeves out.
-    bool longGarmentBySpan = shapeH > bodyH * 0.38f &&
-        lowerFrac > 0.12f &&
-        upperFrac > 0.12f &&
-        minZ < lowerCut - bodyH * 0.03f &&
-        maxZ > upperCut;
+    // REVERTED (2026-07-08): the "longGarmentBySpan" secondary signal (span-based, added
+    // 2026-07-05 to flip BlackSmithTorso to Loose) was a REGRESSION, proven against the
+    // author's hand-sculpted RM_Heavy reference: the fitted path scores mean 1.49 vs the
+    // sculpt (shin band 0.6) while the loose path scores 2.19 (shin band 3.7-4.9, skirt
+    // narrowed, authored front vent erased — the user-visible "cratera na canela").
+    // Authored-gap profiling does NOT separate the two dress classes (blacksmith 6.25 vs
+    // yarl 6.80 mean in the skirt band), so there is no honest geometric discriminator:
+    // keep the original conservative rule (lowerFrac > 0.20 keeps yarl Loose at 0.25 and
+    // blacksmith Fitted at 0.18) and let the UI manual preset override handle exceptions.
     bool notSkinTightOverall = avgW < 0.86f;
 
     // Bone-weight based classification (more reliable than geometry/distance alone).
@@ -619,7 +617,7 @@ static int GuessPresetFromGeometry(const std::vector<Vec3>& verts,
             return DRAPE_PRESET_TUBULAR;
 
         // Long torso-dominant garment spanning upper+lower body = draped shell.
-        if ((longGarment || longGarmentBySpan) && avgTorso > 0.42f && notSkinTightOverall)
+        if (longGarment && avgTorso > 0.42f && notSkinTightOverall)
             return DRAPE_PRESET_LOOSE_DRAPED;
     }
 
@@ -10388,7 +10386,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Skin-tight is excluded BY THE RULE (§5): it is the one behaviour where following
     // the body into a concavity is correct, so "contact in a valley" is not a defect
     // there (caught on falmer Undies: pit lifts blew its stretch/bend energy up ~50%).
-    const bool pitOn = EnvToggle("DRAPE_PIT_BRIDGE", true) &&
+    // SHIPS OFF (2026-07-08): scored against the author's hand-sculpted RM_Heavy
+    // reference, both pit variants LOSE (fitted path: 1.49 off / 1.54 on; and the v2
+    // chord leaves a visible pinwheel at the pit from the front). The sculpt shows the
+    // real target — the pit FILLED to a shallow arm↔chest transition — which none of
+    // the local operators built so far produce. v3 must be designed against the sculpt
+    // reference (tools/osd_extract.py + tools/error_map.py). Knob kept for that work.
+    const bool pitOn = EnvToggle("DRAPE_PIT_BRIDGE", false) &&
                        NormalizePreset(preset) != DRAPE_PRESET_SKIN_TIGHT;
     const bool panelsHang = !params.verletCloth || panelsLoose;
     if (panelsOn && (panelsHang || pitOn) && params.enabled && !useEdges.empty() &&
@@ -11575,6 +11579,7 @@ struct ReplayOptions {
     fs::path bodyObj;
     fs::path floatCsv;   // per-vertex authored/vanilla/solved body-gap dump (bump diagnosis)
     fs::path baseObj;    // authored base mesh (tear diagnosis: base-near vs vanilla-near pairs)
+    fs::path refBodyObj; // AUTHORED body (preset-routing diagnosis: authored gap profiles)
     fs::path expectedObj; // capture's stored live output (config-regression diagnosis)
     bool quiet = false;
 };
@@ -11722,8 +11727,16 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     else
         g_shapeBending.erase(cap.shapeName);
 
+    // Harness-only diagnostic: force the solve preset regardless of the captured one
+    // (e.g. DRAPE_FORCE_PRESET=3 replays a Loose-resolved capture down the fitted path,
+    // for scoring both paths against a hand-sculpted reference).
+    int replayPreset = cap.preset;
+    {
+        float fp = EnvFloat("DRAPE_FORCE_PRESET", -1.0f);
+        if (fp >= 0.0f) replayPreset = (int)fp;
+    }
     StaticSolveStats stats;
-    out.passOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, cap.preset,
+    out.passOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, replayPreset,
                                       cap.baseVerts,
                                       cap.profiles.empty() ? nullptr : &cap.profiles,
                                       cap.edges.empty() ? nullptr : &cap.edges,
@@ -11760,6 +11773,12 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     if (!opts.bodyObj.empty() && cap.hasBodyBVH &&
         !WriteResultObj(opts.bodyObj, cap.bodyBVHVerts, cap.bodyBVHTris)) {
         std::cerr << "Error: failed to write body OBJ: " << opts.bodyObj.string() << "\n";
+        out.code = 6;
+        return out;
+    }
+    if (!opts.refBodyObj.empty() && cap.hasRefBodyBVH &&
+        !WriteResultObj(opts.refBodyObj, cap.refBodyBVHVerts, cap.refBodyBVHTris)) {
+        std::cerr << "Error: failed to write ref body OBJ: " << opts.refBodyObj.string() << "\n";
         out.code = 6;
         return out;
     }
@@ -12278,6 +12297,8 @@ int main(int argc, char** argv) {
         if (!fcsv.empty()) opts.floatCsv = fs::path(fcsv);
         std::string basbj = ArgValue(argc, argv, "--base-obj");
         if (!basbj.empty()) opts.baseObj = fs::path(basbj);
+        std::string rbobj = ArgValue(argc, argv, "--refbody-obj");
+        if (!rbobj.empty()) opts.refBodyObj = fs::path(rbobj);
         std::string eobj = ArgValue(argc, argv, "--expected-obj");
         if (!eobj.empty()) opts.expectedObj = fs::path(eobj);
         return ReplaySolverCapture(fs::path(replay), opts);
