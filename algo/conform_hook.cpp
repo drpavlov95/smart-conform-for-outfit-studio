@@ -10239,21 +10239,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // ARAP HANDLES by authored offset — the wrap (small offset, real contact) drives
             // the rigid transform and CARRIES the far flap, instead of the flap being pinned
             // to a swinging far target. Default large = current behaviour; kept env-tunable.
-            float kBeltHandleMaxOff = EnvFloat("DRAPE_BELT_HANDLE_MAXOFF", 1.0e9f);
-#if !defined(DRAPE_HARNESS_BUILD)
-            // Live A/B for the Yarl belt-flap twist (drop belt_flap_fix.flag + restart OS):
-            // caps handles at 2.4u so the far-floating flap is CARRIED by the wrap instead
-            // of pinned to its swinging far-normal target. Validated on the isolated belt
-            // capture (body support); this flag lets the real live case (belt on the dress)
-            // be eyeballed before it becomes a default. Env var still overrides if set.
-            {
-                char b[16] = {}; size_t l = 0;
-                if (getenv_s(&l, b, sizeof(b), "DRAPE_BELT_HANDLE_MAXOFF") != 0 || l == 0) {
-                    if (fs::exists("E:/SkyrimDev/Drape/belt_flap_fix.flag"))
-                        kBeltHandleMaxOff = 2.4f;
-                }
-            }
-#endif
+            // Cap which verts become ARAP HANDLES by authored offset (2.4u default,
+            // 2026-07-09). A vert floating far off its support has an ILL-DEFINED bind:
+            // its target is (morphed support point + off * morphed NORMAL), and the normal
+            // SWINGS as the body morphs, so a far target moves several units sideways and
+            // twists the piece — the Yarl belt's hanging pendant zig-zagged (user-caught).
+            // Capping handles lets the wrap (small offset, real contact) drive the rigid
+            // transform and CARRY the far flap/pendant, instead of it being pinned to a
+            // swinging far target. Validated on the user's fresh Yarl belt capture (which
+            // rests on the BODY at offsetMean 2.393 — the same support the live conform
+            // logged): pendant strain 0.57->0.50 (below vanilla 0.54), the wrap band drops
+            // only from ARAP-smooth to ~vanilla-smooth. SAFE for other belts: a tight belt
+            // (all offsets < 2.4) loses no handles = no-op; a very loose belt (all > 2.4)
+            // has every vert re-promoted per component by kMinHandles = no-op. Env override
+            // DRAPE_BELT_HANDLE_MAXOFF=1e9 disables for A/B.
+            float kBeltHandleMaxOff = EnvFloat("DRAPE_BELT_HANDLE_MAXOFF", 2.4f);
             // 1) per-vert bind + morphed target; flag well-conditioned (interior) binds.
             std::vector<ArapVec3> arap(n);
             std::vector<ArapVec3> target(n);
