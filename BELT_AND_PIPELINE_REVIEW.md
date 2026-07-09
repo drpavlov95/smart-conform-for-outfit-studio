@@ -1351,3 +1351,51 @@ user directs loose-path work: first establish OUR-defect vs vanilla-inherited vi
 against these five sculpt references. Left untouched this session — loose-path changes are
 high-risk and need the user in the loop. Sculpt refs for all five are built in tmp/smval;
 tools/score_sculpt.py + build_sculpts triage are reusable.
+
+---
+
+## Part 23 — Loose-collapse root cause: it is MISROUTING, and Fitted wins the sculpt (2026-07-09, AFK)
+
+Followed Part 22's dominant defect (loose skirts/flaps/robes collapse inward) to root
+cause using the sculpt as the loss function AND the harness --input-obj (vanilla).
+
+**It is NOT vanilla-inherited — our loose path REGRESSES these garments.** For yarl Clothes:
+vanilla-vs-sculpt mean 0.81 (skirt 1.29), OURS(loose)-vs-sculpt 1.71 (skirt 4.32). Vanilla
+conform already matches the sculpt; our verlet drape pushes it away. Rendered (vanilla | ours
+| sculpt): our loose solve splays the FRONT SKIRT OPEN and exposes the legs, while vanilla
+and the sculpt both drape it closed over the thighs. Same signature as the BlackSmith routing
+regression — the loose physics drape diverges from how the user hand-sculpts.
+
+**Root cause = routing.** These garments resolve LOOSE_DRAPED via GuessPresetFromGeometry
+(longGarment && avgTorso>0.42). Forcing the fitted path (DRAPE_FORCE_PRESET=2) and scoring
+vs the sculpt, across every loose-resolved garment:
+
+| garment | Loose (current) | Fitted | render verdict |
+|---|---|---|---|
+| yarl Clothes | 1.71 (skirt 4.32) | **0.83** (skirt 1.37) | fitted closes the skirt; loose splays it open |
+| falmer Cloth | 4.45 | **2.40** | fitted hangs flaps full & long; loose curls them up short |
+| vampire robes | 2.19 | **1.13** | fitted flares the robe; loose collapses it |
+| yarl Cloak | 2.11 | 2.05 | true cape — a wash, neither wins |
+
+Fitted wins decisively on all three STRUCTURED garments (score + render); only the true cape
+is a tie. The user hand-sculpts by conforming to the body, not physics-draping — so the
+fitted/correction path (near vanilla + panel-flatten) matches the sculpt and the loose path
+does not. This is consistent with the whole Part 20 routing story (blacksmith fitted 1.49 vs
+loose 2.19) — but now proven for the WHOLE structured-garment class, not just blacksmith. The
+Part 20 comment's "no honest geometric discriminator, keep yarl Loose" conclusion predates
+having the yarl/falmer/vampire sculpts; those sculpts now say Fitted for all of them.
+
+**Fix shipped GATED, default OFF (547b51b, DLL 09:38):** DRAPE_ROUTE_FITTED env / live
+route_fitted.flag rewrites a geometry-resolved LOOSE_DRAPED to FITTED_CLOTH, at both the live
+resolution site and the replay preset selection (so harness and OutfitStudio agree — the
+capture bakes cap.preset, which the live-only ResolvePreset reroute would miss). Corpus is
+byte-identical with the flag off; with it on the four garments above take their Fitted scores.
+
+**Why OFF and not flipped as default: this is a PRODUCT decision for the user.** The sculpt is
+a STATIC reference; the loose/verlet path (and the user-approved M4 gravity-shadow work) may
+still be wanted for in-game physics MOTION that a static sculpt doesn't capture. Trading
+static-sculpt-match against physics-drape is the user's call, not one to make unilaterally
+while AFK — especially in routing, the most-regressed area of the project. The evidence is
+airtight for the static case; the toggle lets the user A/B instantly (drop route_fitted.flag,
+restart OS) or set Fitted manually per-garment in the UI. Recommendation on the table: enable
+the reroute (or flip the default) if the static sculpt look is what they want in-game too.
