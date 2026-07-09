@@ -25,6 +25,10 @@ static std::atomic<PfnDrapeSetProcessingIntensity> g_setProcessingIntensity{null
 static std::atomic<PfnDrapeSetSliderFilter> g_setSliderFilter{nullptr};
 static std::atomic_bool g_hookReady{false};
 
+static HMODULE          g_selfMod         = nullptr;  // this proxy DLL's module (for the kbd hook)
+static HHOOK            g_kbHook          = nullptr;  // WH_KEYBOARD on the OS GUI thread
+static std::atomic_bool g_conformRunning{false};      // guard: don't re-enter while a conform runs
+
 // ── Debug logging (pure Win32, safe in DllMain context) ───────────────
 // Writes to %TEMP%\drape_debug.log so it works regardless of MO2 VFS.
 
@@ -228,10 +232,42 @@ static LRESULT CALLBACK ConformCbtProc(int nCode, WPARAM wParam, LPARAM lParam) 
     return CallNextHookEx(g_tracker ? g_tracker->hook : nullptr, nCode, wParam, lParam);
 }
 
+// ── Keyboard hook: Ctrl+Alt+C triggers Smart Conform All ──────────────
+// wxWidgets owns its own accelerator table, which an injected DLL can't cleanly
+// join, so the native "Conform All\tCtrl+Shift+C" path is off-limits to us. Instead
+// we install a thread-scoped WH_KEYBOARD hook on OutfitStudio's GUI thread and post
+// our own menu command when the combo is pressed — contained to the OS process, not
+// a system-global hotkey. NOTE: on ABNT2 (pt-BR) keyboards AltGr == Ctrl+Alt, so
+// AltGr+C also fires this; accepted tradeoff for the mnemonic (user-chosen combo).
+static LRESULT CALLBACK DrapeKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION) {
+        const bool keyDown = !(lParam & 0x80000000);   // bit31 clear  => key pressed
+        const bool repeat  =  (lParam & 0x40000000);   // bit30 set    => auto-repeat
+        if (keyDown && !repeat && wParam == 'C') {
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt  = (GetKeyState(VK_MENU)    & 0x8000) != 0;   // VK_MENU = Alt
+            if (ctrl && alt &&
+                g_hookReady.load(std::memory_order_acquire) &&
+                g_conformAllId && g_osHwnd &&
+                !g_conformRunning.load(std::memory_order_acquire)) {
+                DbgLog("Keyboard: Ctrl+Alt+C -> Smart Conform All");
+                PostMessageA(g_osHwnd, WM_COMMAND, MAKEWPARAM(DRAPE_CMD_ID, 0), 0);
+                return 1;  // swallow so a stray 'c' isn't typed into the focused control
+            }
+        }
+    }
+    return CallNextHookEx(g_kbHook, code, wParam, lParam);
+}
+
 // ── WndProc subclass: intercept our menu command ──────────────────────
 
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
+        // Block re-entry (a second Ctrl+Alt+C during the modal dialog / processing).
+        struct RunFlag {
+            RunFlag()  { g_conformRunning.store(true,  std::memory_order_release); }
+            ~RunFlag() { g_conformRunning.store(false, std::memory_order_release); }
+        } runFlag;
         DbgLog("Smart Conform All clicked");
         PfnDrapeSetHookEnabled setHookEnabled = g_setHookEnabled.load(std::memory_order_acquire);
         DrapeHookApi api;
@@ -350,8 +386,10 @@ static bool TryInjectMenu(HWND hw) {
     }
 
     BOOL r1 = InsertMenuA(sliderMenu, insertPos, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    // The "\t" right-aligns the accelerator hint, exactly like the native
+    // "Conform All\tCtrl+Shift+C". The key itself is wired via DrapeKeyboardProc.
     BOOL r2 = InsertMenuA(sliderMenu, insertPos + 1, MF_BYPOSITION | MF_STRING,
-                          DRAPE_CMD_ID, "Smart Conform All");
+                          DRAPE_CMD_ID, "Smart Conform All\tCtrl+Alt+C");
     DbgLog("  TryInject: InsertMenu sep=%d item=%d", (int)r1, (int)r2);
     if (!r2) return false;
 
@@ -379,6 +417,14 @@ static DWORD WINAPI InjectThread(LPVOID) {
     g_oldProc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrA(hw, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DrapeWndProc)));
     DbgLog("InjectThread: subclassed WndProc, oldProc=0x%p", (void*)g_oldProc);
+
+    // Install the Ctrl+Alt+C keyboard hook on OutfitStudio's GUI thread so the
+    // shortcut fires our "Smart Conform All" command (see DrapeKeyboardProc).
+    {
+        DWORD guiTid = GetWindowThreadProcessId(hw, nullptr);
+        g_kbHook = SetWindowsHookExA(WH_KEYBOARD, DrapeKeyboardProc, g_selfMod, guiTid);
+        DbgLog("InjectThread: keyboard hook installed=%p guiTid=%lu", (void*)g_kbHook, guiTid);
+    }
 
     // Install the in-memory "Smart Conform" hook: load the heavy DLL (its nifly
     // static initializers run now, after OutfitStudio is up, so no startup crash)
@@ -456,6 +502,7 @@ static DWORD WINAPI InjectThread(LPVOID) {
 
 BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_selfMod = hMod;   // needed as hInstance for the thread-scoped keyboard hook
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         DbgLog("DllMain PROCESS_ATTACH: exe='%s'", exePath);
