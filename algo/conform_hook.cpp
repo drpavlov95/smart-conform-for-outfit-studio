@@ -10980,6 +10980,567 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    // ── Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) ──
+    // The sculpt-driven fix for the armpit crater (vanilla-inherited defect #6), designed
+    // against the author's hand-sculpted RM_Heavy reference (tools/osd_extract.py +
+    // tools/error_map.py). Measured: the defect is not just depth — the side-of-chest
+    // panel is CRUMPLED (spiky normal fans; compression is free in every pass of this
+    // pipeline, engine null-space #2) and dives into the arm↔torso wedge, while the
+    // sculpt keeps ONE smooth slightly-curved sheet spanning chest→arm (its gap to the
+    // morphed body is 1.4u vs our 0.5u, displaced ~3.8u mostly TANGENTIALLY). Per-vert
+    // operators cannot restore region-scale smoothness (all measured against the sculpt:
+    // c0-restore no-ops, chord bridge loses 1.54 vs 1.49, authored-bind morph transfer
+    // 3.79≈3.78, continuous body sweep 3.80 — the canyon never closes below ~1u so
+    // squeeze physics never engages; even the best nearby body-delta oracle only reaches
+    // 2.56). This pass refits each vert's authored 2-ring patch as a similarity
+    // transform (Müller shape matching: warm-started rotation extraction + scale clamped
+    // to [1, smSMax] so regions may GROW with the morph but never shrink below authored)
+    // and pulls the vert toward its authored local shape. Gate (frozen from the INPUT
+    // state — a per-iter gate closes as the region smooths and freezes halfway; dilated
+    // 2 rings):
+    //   • AFFINE-fit residual: an affine map absorbs any smooth deformation including
+    //     legitimate anisotropic morph growth, so the leftover is high-freq crumple.
+    //     (A similarity-fit residual also flags smooth anisotropy — skirt regressed.)
+    //   • §6 WEDGE detector: mean body-vertex-normal dispersion within smWedgeR. Only
+    //     between two masses do body normals oppose (arm↔torso, thigh↔thigh); convex
+    //     contact (butt apex — never deflate a contact shape, panel-flatten lesson) and
+    //     the legs under the skirt vent stay coherent → gate closed there. Inside a
+    //     wedge even a smooth basin gets a floor strength (0.35): the basin interior is
+    //     locally smooth but regionally wrong.
+    // Prototype-validated (Blacksmith RM_Heavy vs sculpt): global 1.487→1.428, armpit
+    // hot 3.78→2.77 (max 6.92→4.83), skirt/vent/back untouched, renders clean from
+    // multiple angles. Skin-tight excluded by rule §5 (following concavities is correct
+    // there); belts keep their authored float.
+    // DEFAULT SCOPE = the validated envelope (sculpt-scored against the author's
+    // hand-made RM_Heavy references for all 4 corpus outfits, 2026-07-08):
+    //  • FITTED_CLOTH only. It is the one preset where the pass WINS vs the sculpt
+    //    (BlackSmithTorso 1.482→1.405). Every Tubular/Auto/Rigid garment measured
+    //    LOSES (falmer Leg_Armor 1.37→1.86, Cuirass 1.84→2.08, fur BaseArmor
+    //    1.60→1.75, yarl Pants 1.47→1.59…): their sculpts KEEP the concave-following
+    //    look. DRAPE_SM_ALL_PRESETS=1 widens for future reference-driven tuning.
+    //  • Correction path only: the verlet loose solve re-drapes far from authored on
+    //    purpose, so an authored-local-shape restore fights the drape (measured,
+    //    yarl Clothes: worstEdgeStretch 3.4→6.2, maxDisplacement +3.4u, cloak
+    //    conflicts +180). DRAPE_SM_LOOSE ships dark, mirroring DRAPE_PANELS_LOOSE.
+    bool smOn = EnvToggle("DRAPE_SHAPEMATCH", true) &&
+                (!params.verletCloth || EnvToggle("DRAPE_SM_LOOSE", false)) &&
+                (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH ||
+                 EnvToggle("DRAPE_SM_ALL_PRESETS", false)) &&
+                NormalizePreset(preset) != DRAPE_PRESET_SKIN_TIGHT &&
+                NormalizePreset(preset) != DRAPE_PRESET_BELT;
+#if !defined(DRAPE_HARNESS_BUILD)
+    // Live kill-switch for A/B in OutfitStudio (MO2 can't set env vars).
+    smOn = smOn && !fs::exists("E:/SkyrimDev/Drape/sm_off.flag");
+#endif
+    if (smOn && params.enabled && !useEdges.empty() && tris && bodyBVH && bodyBVH->valid &&
+        n > 0 && n <= 0xFFFF) {
+        const float smAlpha  = EnvFloat("DRAPE_SM_ALPHA", 0.5f);
+        const int   smIters  = (int)EnvFloat("DRAPE_SM_ITERS", 20.0f);
+        const float smSMax   = EnvFloat("DRAPE_SM_SMAX", 1.25f);
+        const float smR0     = EnvFloat("DRAPE_SM_R0", 0.12f);
+        const float smWedgeR = EnvFloat("DRAPE_SM_WEDGE_R", 4.0f);
+        const float smFloor  = EnvFloat("DRAPE_SM_FLOOR", 0.30f);
+        // Minimum pull strength inside a wedge even where the patch is smooth (the
+        // basin interior is locally smooth but regionally wrong on the Blacksmith).
+        const float smBasin  = EnvFloat("DRAPE_SM_BASIN", 0.35f);
+        auto vertRigidSM = [&](size_t i) -> bool {
+            if (islandIdOut.size() != n) return false;
+            int id = islandIdOut[i];
+            return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
+        };
+        // Skin-tight-LIKE garments (authored gap tiny everywhere = painted on) follow
+        // body concavities BY DESIGN (§5) even when their preset resolves Fitted via
+        // 'Auto' (falmer Undies trap, 2nd time — pit-bridge hit it too). The preset
+        // gate can't see this; the authored gap profile can.
+        float aGapP75 = 0.0f;
+        {
+            std::vector<float> gaps;
+            gaps.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                if (vertRigidSM(i)) continue;
+                float ag = 0.0f;
+                if (BVHSignedGap(g_refBodyBVH, baseVerts[i], ag, nullptr))
+                    gaps.push_back(ag);
+            }
+            if (!gaps.empty()) {
+                size_t k75 = gaps.size() * 3 / 4;
+                std::nth_element(gaps.begin(), gaps.begin() + k75, gaps.end());
+                aGapP75 = gaps[k75];
+            }
+        }
+        const float smTight = EnvFloat("DRAPE_SM_TIGHT", 0.45f);
+        // A garment mostly COVERED by outer layers (falmer underdress beneath the
+        // plate cuirass) was sculpted AS an underlayer — its shape is the layer
+        // system's business, and its sculpt score got WORSE under this pass
+        // (1.68→1.91 measured). The blacksmith dress under its small belt is ~10%
+        // covered and passes.
+        float coveredFrac = 0.0f;
+        if (outerColliders && !outerColliders->empty()) {
+            const float exR0 = EnvFloat("DRAPE_SM_OUTER_R", 4.0f);
+            size_t nCov = 0, nTot = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (vertRigidSM(i)) continue;
+                ++nTot;
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Current().valid) continue;
+                    Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                    float bd2 = 0.0f;
+                    if (BVHClosestPointEx(oc.Current(), finalVerts[i], bcp, bnrm, bd2,
+                                          nullptr, nullptr, nullptr, nullptr) &&
+                        bd2 <= exR0 * exR0) {
+                        ++nCov;
+                        break;
+                    }
+                }
+            }
+            if (nTot > 0) coveredFrac = (float)nCov / (float)nTot;
+        }
+        const float smCoverMax = EnvFloat("DRAPE_SM_COVER_MAX", 0.30f);
+        // Upper bound: a garment authored FLOATING (p75 gap > ~2u — the falmer
+        // underdress at 2.65 vs the blacksmith dress at 1.20) is drape-dominated,
+        // hanging-cloth territory (panel-flatten's gapMin=1.5 marks hanging); its
+        // sculpt score got WORSE under authored-shape restore (1.68→1.91 measured).
+        const float smLooseMax = EnvFloat("DRAPE_SM_LOOSE_MAX", 2.0f);
+        if (aGapP75 < smTight || aGapP75 > smLooseMax) {
+            HLog("detour: shape-match shape='%s' SKIPPED gap-profile (aGapP75=%.3f outside [%.2f,%.2f])",
+                 shapeName.c_str(), aGapP75, smTight, smLooseMax);
+        } else if (coveredFrac > smCoverMax) {
+            HLog("detour: shape-match shape='%s' SKIPPED layered-under (covered=%.2f > %.2f)",
+                 shapeName.c_str(), coveredFrac, smCoverMax);
+        } else {
+        // Seam twins: coincident in base AND still coincident in the input (a base-
+        // coincident pair the pipeline separated is a layer boundary, not a sewn seam).
+        std::vector<std::vector<uint32_t>> smGroups;
+        {
+            std::unordered_map<uint64_t, std::vector<uint32_t>> coin;
+            coin.reserve(n);
+            auto qk = [](const Vec3& p) -> uint64_t {
+                auto q = [](float v) -> uint64_t {
+                    return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+                };
+                return (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+            };
+            for (size_t i = 0; i < n; ++i) coin[qk(baseVerts[i])].push_back((uint32_t)i);
+            std::vector<uint64_t> keys;
+            keys.reserve(coin.size());
+            for (const auto& kv : coin)
+                if (kv.second.size() >= 2) keys.push_back(kv.first);
+            std::sort(keys.begin(), keys.end());   // deterministic order
+            for (uint64_t k : keys) {
+                auto& grp = coin[k];
+                Vec3 m{0.0f, 0.0f, 0.0f};
+                for (uint32_t vi : grp) m = Add(m, finalVerts[vi]);
+                m = Scale(m, 1.0f / (float)grp.size());
+                float spread = 0.0f;
+                for (uint32_t vi : grp) spread = std::max(spread, Len(Sub(finalVerts[vi], m)));
+                if (spread < 0.25f) smGroups.push_back(std::move(grp));
+            }
+        }
+        std::vector<uint32_t> rep(n);
+        for (size_t i = 0; i < n; ++i) rep[i] = (uint32_t)i;
+        for (const auto& grp : smGroups)
+            for (uint32_t vi : grp) rep[vi] = grp[0];
+        std::vector<std::vector<uint32_t>> members(n);
+        for (size_t i = 0; i < n; ++i) members[rep[i]].push_back((uint32_t)i);
+        // rep-graph adjacency: twins share one node so patches see the union of both
+        // sides' neighbourhoods (full disc — same reasoning as panel-flatten's rep[]).
+        std::vector<std::vector<uint32_t>> adjR(n);
+        for (const auto& e : useEdges) {
+            if (e.a >= n || e.b >= n) continue;
+            uint32_t a = rep[e.a], b = rep[e.b];
+            if (a == b) continue;
+            adjR[a].push_back(b);
+            adjR[b].push_back(a);
+        }
+        for (auto& v : adjR) {
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
+        }
+        // 2-ring patch per rep (self + ring1 + ring2)
+        std::vector<std::vector<uint32_t>> patch(n);
+        {
+            std::vector<uint32_t> stamp(n, 0), fr, nx;
+            uint32_t sc = 0;
+            for (size_t r = 0; r < n; ++r) {
+                if (rep[r] != r || adjR[r].empty()) continue;
+                ++sc;
+                auto& P = patch[r];
+                P.push_back((uint32_t)r);
+                stamp[r] = sc;
+                fr.assign(1, (uint32_t)r);
+                for (int d = 0; d < 2; ++d) {
+                    nx.clear();
+                    for (uint32_t u : fr)
+                        for (uint32_t w : adjR[u])
+                            if (stamp[w] != sc) {
+                                stamp[w] = sc;
+                                nx.push_back(w);
+                                P.push_back(w);
+                            }
+                    fr.swap(nx);
+                }
+            }
+        }
+        // Authored patch stats (centroid + scatter norm; twins are base-coincident so
+        // rep positions are exact for the whole group).
+        std::vector<Vec3>  paC(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<float> paNorm2(n, 0.0f);
+        for (size_t r = 0; r < n; ++r) {
+            if (patch[r].size() < 4) continue;
+            Vec3 c{0.0f, 0.0f, 0.0f};
+            for (uint32_t j : patch[r]) c = Add(c, baseVerts[j]);
+            c = Scale(c, 1.0f / (float)patch[r].size());
+            paC[r] = c;
+            float s2 = 0.0f;
+            for (uint32_t j : patch[r]) s2 += Len2(Sub(baseVerts[j], c));
+            paNorm2[r] = s2;
+        }
+        // §6 wedge detector: body vertex normals once, then per-rep normal dispersion
+        // within smWedgeR (z-window pre-filter keeps the scan linear-ish).
+        const float wr2 = smWedgeR * smWedgeR;
+        auto buildVN = [](const BodyBVH& bvh) {
+            std::vector<Vec3> vn(bvh.verts.size(), Vec3{0.0f, 0.0f, 0.0f});
+            for (const auto& t : bvh.tris) {
+                const Vec3& A = bvh.verts[t[0]];
+                const Vec3& B = bvh.verts[t[1]];
+                const Vec3& C = bvh.verts[t[2]];
+                Vec3 fn = Cross(Sub(B, A), Sub(C, A));   // area-weighted
+                vn[t[0]] = Add(vn[t[0]], fn);
+                vn[t[1]] = Add(vn[t[1]], fn);
+                vn[t[2]] = Add(vn[t[2]], fn);
+            }
+            for (auto& v : vn) {
+                float l = Len(v);
+                if (l > 1.0e-9f) v = Scale(v, 1.0f / l);
+            }
+            return vn;
+        };
+        auto buildZOrder = [](const BodyBVH& bvh) {
+            std::vector<uint32_t> byZ(bvh.verts.size());
+            for (size_t b = 0; b < byZ.size(); ++b) byZ[b] = (uint32_t)b;
+            std::sort(byZ.begin(), byZ.end(), [&](uint32_t a, uint32_t b) {
+                float za = bvh.verts[a].z, zb = bvh.verts[b].z;
+                if (za != zb) return za < zb;
+                return a < b;   // deterministic tie-break
+            });
+            return byZ;
+        };
+        std::vector<Vec3> bodyVN = buildVN(*bodyBVH);
+        std::vector<uint32_t> bodyByZ = buildZOrder(*bodyBVH);
+        std::vector<float> zSorted(bodyByZ.size());
+        for (size_t b = 0; b < bodyByZ.size(); ++b) zSorted[b] = bodyBVH->verts[bodyByZ[b]].z;
+        std::vector<Vec3> refVN = buildVN(g_refBodyBVH);
+        std::vector<uint32_t> refByZ = buildZOrder(g_refBodyBVH);
+        std::vector<float> refZSorted(refByZ.size());
+        for (size_t b = 0; b < refByZ.size(); ++b) refZSorted[b] = g_refBodyBVH.verts[refByZ[b]].z;
+        // Concavity-signed wedge strength at pos vs a body: dispersion of nearby
+        // body normals, gated by the SIGN of normal-vs-position rotation (in a true
+        // §6 wedge normals rotate AGAINST positions; on a thin convex mass — shin,
+        // forearm — the same dispersion appears but K>0, not a wedge).
+        auto wedgeAt = [&](const BodyBVH& bvh, const std::vector<Vec3>& vn,
+                           const std::vector<uint32_t>& byZ, const std::vector<float>& zs,
+                           const Vec3& p) -> float {
+            auto lo = std::lower_bound(zs.begin(), zs.end(), p.z - smWedgeR);
+            auto hi = std::upper_bound(zs.begin(), zs.end(), p.z + smWedgeR);
+            Vec3 acc{0.0f, 0.0f, 0.0f};
+            float cntN = 0.0f;
+            uint32_t bNear = 0;
+            float dNear = 1.0e30f;
+            for (auto itz = lo; itz != hi; ++itz) {
+                uint32_t b = byZ[(size_t)(itz - zs.begin())];
+                float d2b = Len2(Sub(bvh.verts[b], p));
+                if (d2b > wr2) continue;
+                acc = Add(acc, vn[b]);
+                cntN += 1.0f;
+                if (d2b < dNear) { dNear = d2b; bNear = b; }
+            }
+            if (cntN < 3.0f) return 0.0f;
+            float disp = 1.0f - Len(acc) / cntN;
+            float wg = ClampRange((disp - 0.10f) / 0.25f, 0.0f, 1.0f);
+            if (wg <= 0.0f) return 0.0f;
+            float kNum = 0.0f, kDen = 0.0f;
+            const Vec3& pc2 = bvh.verts[bNear];
+            const Vec3& nc2 = vn[bNear];
+            for (auto itz = lo; itz != hi; ++itz) {
+                uint32_t b = byZ[(size_t)(itz - zs.begin())];
+                if (Len2(Sub(bvh.verts[b], p)) > wr2) continue;
+                Vec3 dp = Sub(bvh.verts[b], pc2);
+                kNum += Dot(Sub(vn[b], nc2), dp);
+                kDen += Len2(dp);
+            }
+            float K = kDen > 1.0e-9f ? kNum / kDen : 0.0f;
+            return wg * ClampRange((-K - 0.02f) / 0.15f, 0.0f, 1.0f);
+        };
+        std::vector<float> aw(n, 0.0f);
+        size_t nWedge = 0;
+        for (size_t r = 0; r < n; ++r) {
+            if (patch[r].size() < 4 || vertRigidSM(r)) continue;
+            float gp = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, finalVerts[r], gp, nullptr) || gp > smWedgeR)
+                continue;
+            // Only the MORPH-CREATED part of the wedge is a defect: if the AUTHORED
+            // garment already sat in an authored-body wedge, following it is DESIGN
+            // (§5 — caught on falmer Undies/yarl Pants: the groin/crotch concavity
+            // exists authored, SM yanked it, worstSupportEdgeStretch 1.13→9.33).
+            // Same doctrine as panel-flatten's authored-curvature target: authored
+            // data carries the design intent.
+            float wg = wedgeAt(*bodyBVH, bodyVN, bodyByZ, zSorted, finalVerts[r])
+                     - wedgeAt(g_refBodyBVH, refVN, refByZ, refZSorted, baseVerts[r]);
+            if (wg <= 0.0f) continue;
+            ++nWedge;
+            // AFFINE-fit residual of the INPUT patch vs authored (regularized normal
+            // equations; near-planar authored patches get the epsilon ridge).
+            const auto& P = patch[r];
+            Vec3 qc{0.0f, 0.0f, 0.0f};
+            for (uint32_t j : P) qc = Add(qc, finalVerts[j]);
+            qc = Scale(qc, 1.0f / (float)P.size());
+            float M[9] = {0}, Acov[9] = {0};
+            for (uint32_t j : P) {
+                Vec3 pr = Sub(baseVerts[j], paC[r]);
+                Vec3 qr = Sub(finalVerts[j], qc);
+                M[0] += pr.x * pr.x; M[1] += pr.x * pr.y; M[2] += pr.x * pr.z;
+                M[4] += pr.y * pr.y; M[5] += pr.y * pr.z; M[8] += pr.z * pr.z;
+                Acov[0] += qr.x * pr.x; Acov[1] += qr.x * pr.y; Acov[2] += qr.x * pr.z;
+                Acov[3] += qr.y * pr.x; Acov[4] += qr.y * pr.y; Acov[5] += qr.y * pr.z;
+                Acov[6] += qr.z * pr.x; Acov[7] += qr.z * pr.y; Acov[8] += qr.z * pr.z;
+            }
+            M[3] = M[1]; M[6] = M[2]; M[7] = M[5];
+            float ridge = 1.0e-3f * (M[0] + M[4] + M[8]) + 1.0e-9f;
+            M[0] += ridge; M[4] += ridge; M[8] += ridge;
+            float det = M[0] * (M[4] * M[8] - M[5] * M[7])
+                      - M[1] * (M[3] * M[8] - M[5] * M[6])
+                      + M[2] * (M[3] * M[7] - M[4] * M[6]);
+            if (std::fabs(det) < 1.0e-12f) continue;
+            float id2 = 1.0f / det;
+            float Mi[9] = {
+                (M[4] * M[8] - M[5] * M[7]) * id2, (M[2] * M[7] - M[1] * M[8]) * id2, (M[1] * M[5] - M[2] * M[4]) * id2,
+                (M[5] * M[6] - M[3] * M[8]) * id2, (M[0] * M[8] - M[2] * M[6]) * id2, (M[2] * M[3] - M[0] * M[5]) * id2,
+                (M[3] * M[7] - M[4] * M[6]) * id2, (M[1] * M[6] - M[0] * M[7]) * id2, (M[0] * M[4] - M[1] * M[3]) * id2};
+            float Aff[9];
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 3; ++col)
+                    Aff[row * 3 + col] = Acov[row * 3 + 0] * Mi[0 * 3 + col]
+                                       + Acov[row * 3 + 1] * Mi[1 * 3 + col]
+                                       + Acov[row * 3 + 2] * Mi[2 * 3 + col];
+            float resid2 = 0.0f;
+            for (uint32_t j : P) {
+                Vec3 pr = Sub(baseVerts[j], paC[r]);
+                Vec3 qr = Sub(finalVerts[j], qc);
+                Vec3 fp{Aff[0] * pr.x + Aff[1] * pr.y + Aff[2] * pr.z,
+                        Aff[3] * pr.x + Aff[4] * pr.y + Aff[5] * pr.z,
+                        Aff[6] * pr.x + Aff[7] * pr.y + Aff[8] * pr.z};
+                resid2 += Len2(Sub(qr, fp));
+            }
+            float patchRad = std::sqrt(paNorm2[r] / (float)P.size());
+            if (patchRad < 1.0e-6f) continue;
+            float rn = std::sqrt(resid2 / (float)P.size()) / patchRad;
+            float awShape = ClampRange((rn - smR0 * 0.35f) / (smR0 * 0.65f), 0.0f, 1.0f);
+            aw[r] = wg * (smBasin + (1.0f - smBasin) * awShape);
+        }
+        // Dilate the gate 2 rings (the basin interior is locally smooth = unsignalled).
+        for (int d = 0; d < 2; ++d) {
+            std::vector<float> a2 = aw;
+            for (size_t r = 0; r < n; ++r) {
+                if (patch[r].empty() || vertRigidSM(r)) continue;
+                for (uint32_t w : adjR[r])
+                    a2[r] = std::max(a2[r], aw[w]);
+            }
+            aw.swap(a2);
+        }
+        // Cloth authored under an outer layer is the LAYER system's business, not
+        // shape restoration's (caught: waist verts under the BlackSmithBelt lifted
+        // laterally into the belt, worstGarmentFacePen 0.34→1.40 — the gap-space
+        // ceiling cannot stop tangential entries; falmer Cuirass_Torso needed 4u,
+        // its plate floats further off the underdress). Applied AFTER dilation so
+        // leaked eligibility is cleared too.
+        if (outerColliders && !outerColliders->empty()) {
+            const float exR = EnvFloat("DRAPE_SM_OUTER_R", 4.0f);
+            for (size_t r = 0; r < n; ++r) {
+                if (aw[r] <= 0.0f) continue;
+                for (const OuterCollider& oc : *outerColliders) {
+                    Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                    float bd2 = 0.0f;
+                    // Authored-space proximity (design says "under the layer")…
+                    bool under = oc.Base().valid &&
+                                 BVHClosestPointEx(oc.Base(), baseVerts[r], bcp, bnrm, bd2,
+                                                   nullptr, nullptr, nullptr, nullptr) &&
+                                 bd2 <= exR * exR;
+                    // …or CURRENT-space proximity (collision cares about now, and the
+                    // falmer plate sits >4u from the underdress in authored space yet
+                    // the lift still crossed it — authored distance is a bad predictor
+                    // for floating outer layers).
+                    if (!under && oc.Current().valid &&
+                        BVHClosestPointEx(oc.Current(), finalVerts[r], bcp, bnrm, bd2,
+                                          nullptr, nullptr, nullptr, nullptr) &&
+                        bd2 <= exR * exR)
+                        under = true;
+                    if (under) {
+                        for (uint32_t m : members[r]) aw[m] = 0.0f;
+                        aw[r] = 0.0f;
+                        break;
+                    }
+                }
+            }
+        }
+        size_t nActive = 0;
+        for (size_t r = 0; r < n; ++r)
+            if (aw[r] > 0.0f && patch[r].size() >= 4) ++nActive;
+        if (nActive >= 4) {
+            // Interlayer ceiling (same semantics as the pit lift's): a vert authored
+            // under an outer layer may not rise past that layer's current surface.
+            std::vector<float> smCeil;
+            if (outerColliders) {
+                smCeil.assign(n, 1.0e30f);
+                const float kSmLayerMargin = 0.30f;
+                for (size_t r = 0; r < n; ++r) {
+                    if (aw[r] <= 0.0f) continue;
+                    for (const OuterCollider& oc : *outerColliders) {
+                        if (!oc.Base().valid || !oc.Current().valid) continue;
+                        Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                        float bd2 = 0.0f;
+                        int baseTri = -1;
+                        float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                        if (!BVHClosestPointEx(oc.Base(), baseVerts[r], bcp, bnrm, bd2,
+                                               &baseTri, &bu, &bv, &bw)) continue;
+                        if (bd2 > 6.25f) continue;
+                        if (baseTri < 0 || baseTri >= (int)oc.Current().tris.size()) continue;
+                        Vec3 outerCur = TriPointBary(oc.Current(), baseTri, bu, bv, bw);
+                        float outerGap = 0.0f;
+                        if (!BVHSignedGap(*bodyBVH, outerCur, outerGap, nullptr)) continue;
+                        smCeil[r] = std::min(smCeil[r], outerGap - kSmLayerMargin);
+                    }
+                }
+            }
+            // Tiny 3x3 helpers for the rotation extraction (row-major float[9]).
+            auto mulMV = [](const float* m, const Vec3& v) -> Vec3 {
+                return Vec3{m[0] * v.x + m[1] * v.y + m[2] * v.z,
+                            m[3] * v.x + m[4] * v.y + m[5] * v.z,
+                            m[6] * v.x + m[7] * v.y + m[8] * v.z};
+            };
+            auto rotApply = [&](float* R, const Vec3& axis, float ang) {
+                // Rodrigues: R = K(axis,ang) * R, applied column-wise.
+                float c = std::cos(ang), s = std::sin(ang), t = 1.0f - c;
+                float K[9] = {
+                    t * axis.x * axis.x + c,          t * axis.x * axis.y - s * axis.z, t * axis.x * axis.z + s * axis.y,
+                    t * axis.x * axis.y + s * axis.z, t * axis.y * axis.y + c,          t * axis.y * axis.z - s * axis.x,
+                    t * axis.x * axis.z - s * axis.y, t * axis.y * axis.z + s * axis.x, t * axis.z * axis.z + c};
+                float out[9];
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 3; ++col)
+                        out[row * 3 + col] = K[row * 3 + 0] * R[0 * 3 + col]
+                                           + K[row * 3 + 1] * R[1 * 3 + col]
+                                           + K[row * 3 + 2] * R[2 * 3 + col];
+                std::copy(out, out + 9, R);
+            };
+            // Warm-started per-rep rotations (identity at start; Müller's extraction
+            // converges in a couple of steps per round once warm).
+            std::vector<std::array<float, 9>> Rrot(n, {1.0f, 0.0f, 0.0f,
+                                                       0.0f, 1.0f, 0.0f,
+                                                       0.0f, 0.0f, 1.0f});
+            // Catastrophe bound: the validated armpit fix moves verts up to ~3.9u;
+            // anything beyond that on an unvalidated garment is the pass running
+            // away (caught: falmer Pauldron drifted +1.7u past its baseline).
+            const float smMaxMove = EnvFloat("DRAPE_SM_MAX_MOVE", 4.0f);
+            std::vector<Vec3> entryPos(finalVerts.begin(), finalVerts.end());
+            for (int it2 = 0; it2 < smIters; ++it2) {
+                for (size_t r = 0; r < n; ++r) {
+                    if (aw[r] <= 0.0f || patch[r].size() < 4) continue;
+                    const auto& P = patch[r];
+                    Vec3 qc{0.0f, 0.0f, 0.0f};
+                    for (uint32_t j : P) qc = Add(qc, finalVerts[j]);
+                    qc = Scale(qc, 1.0f / (float)P.size());
+                    float* R = Rrot[r].data();
+                    for (int k = 0; k < 4; ++k) {
+                        Vec3 num{0.0f, 0.0f, 0.0f};
+                        float den = 0.0f;
+                        for (uint32_t j : P) {
+                            Vec3 rp = mulMV(R, Sub(baseVerts[j], paC[r]));
+                            Vec3 qr = Sub(finalVerts[j], qc);
+                            num = Add(num, Cross(rp, qr));
+                            den += Dot(rp, qr);
+                        }
+                        Vec3 omega = Scale(num, 1.0f / (std::fabs(den) + 1.0e-9f));
+                        float ang = Len(omega);
+                        if (ang < 1.0e-6f) break;
+                        rotApply(R, Scale(omega, 1.0f / ang), ang);
+                    }
+                    float sNum = 0.0f;
+                    for (uint32_t j : P)
+                        sNum += Dot(mulMV(R, Sub(baseVerts[j], paC[r])), Sub(finalVerts[j], qc));
+                    float s = ClampRange(sNum / std::max(paNorm2[r], 1.0e-9f), 1.0f, smSMax);
+                    Vec3 target = Add(qc, Scale(mulMV(R, Sub(baseVerts[r], paC[r])), s));
+                    Vec3 step = Scale(Sub(target, finalVerts[r]), smAlpha * aw[r]);
+                    // NOTE: invMass is NOT consulted — restore passes move any vert
+                    // (panel-flatten precedent); the fitted path pins the very contact
+                    // verts this pass exists to fix (caught: armpit worst verts were
+                    // invMass=0, the pass no-opped on exactly the defect).
+                    for (uint32_t m : members[r])
+                        finalVerts[m] = Add(finalVerts[m], step);
+                }
+                // Body floor + interlayer ceiling on moved verts; then weld twins.
+                for (size_t r = 0; r < n; ++r) {
+                    if (aw[r] <= 0.0f) continue;
+                    for (uint32_t m : members[r]) {
+                        Vec3 t2 = finalVerts[m];
+                        if (BVHCollideVertex(*bodyBVH, t2, smFloor))
+                            finalVerts[m] = t2;
+                        if (!smCeil.empty() && smCeil[r] < 1.0e29f && smCeil[r] >= smFloor) {
+                            float g2 = 0.0f;
+                            Vec3 gn{0.0f, 0.0f, 1.0f};
+                            if (BVHSignedGap(*bodyBVH, finalVerts[m], g2, &gn) && g2 > smCeil[r])
+                                finalVerts[m] = Sub(finalVerts[m], Scale(gn, g2 - smCeil[r]));
+                        }
+                    }
+                }
+                for (size_t r = 0; r < n; ++r) {
+                    if (aw[r] <= 0.0f) continue;
+                    for (uint32_t m : members[r]) {
+                        Vec3 dm = Sub(finalVerts[m], entryPos[m]);
+                        float lm = Len(dm);
+                        if (lm > smMaxMove)
+                            finalVerts[m] = Add(entryPos[m], Scale(dm, smMaxMove / lm));
+                    }
+                }
+                for (const auto& grp : smGroups) {
+                    Vec3 m{0.0f, 0.0f, 0.0f};
+                    for (uint32_t vi : grp) m = Add(m, finalVerts[vi]);
+                    m = Scale(m, 1.0f / (float)grp.size());
+                    for (uint32_t vi : grp) finalVerts[vi] = m;
+                }
+            }
+            // Wedge verts sit on island junctions (armpit = arm↔torso stitch): restore
+            // the prox-pair invariant in-pass (vampire-tear lesson, 5th application).
+            applyFinalProxSeamCap(6, "post-shapematch-prox-cap");
+        }
+        HLog("detour: shape-match shape='%s' active=%zu/%zu wedge=%zu groups=%zu iters=%d alpha=%.2f aGapP75=%.3f covered=%.2f",
+             shapeName.c_str(), nActive, n, nWedge, smGroups.size(), smIters, smAlpha, aGapP75, coveredFrac);
+        // Temp gate debug: DRAPE_SM_DBG="34,104" logs the gate anatomy per vert.
+        {
+            const char* dbg = std::getenv("DRAPE_SM_DBG");
+            if (dbg && *dbg) {
+                std::string s(dbg);
+                size_t pos = 0;
+                while (pos < s.size()) {
+                    size_t com = s.find(',', pos);
+                    if (com == std::string::npos) com = s.size();
+                    int vi = std::atoi(s.substr(pos, com - pos).c_str());
+                    pos = com + 1;
+                    if (vi < 0 || (size_t)vi >= n) continue;
+                    uint32_t r = rep[(size_t)vi];
+                    float gp = -999.0f;
+                    bool gapOk = BVHSignedGap(*bodyBVH, finalVerts[r], gp, nullptr);
+                    float wgM = wedgeAt(*bodyBVH, bodyVN, bodyByZ, zSorted, finalVerts[r]);
+                    float wgA = wedgeAt(g_refBodyBVH, refVN, refByZ, refZSorted, baseVerts[r]);
+                    HLog("smdbg v%d: rep=%u patch=%zu rigid=%d pinned=%d gapOk=%d gp=%.2f wgM=%.3f wgA=%.3f aw=%.3f",
+                         vi, r, patch[r].size(), (int)vertRigidSM(r),
+                         (int)((size_t)vi < invMass.size() && invMass[(size_t)vi] <= 0.0f),
+                         (int)gapOk, gp, wgM, wgA, aw[r]);
+                }
+            }
+        }
+        }   // aGapP75 >= smTight (not skin-tight-like)
+    }
+
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
         Vec3 finalDiff = Sub(finalVerts[i], baseVerts[i]);

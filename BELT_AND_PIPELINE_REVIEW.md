@@ -1218,3 +1218,81 @@ approved fitted look (skirt full, vent preserved, thigh-bump fix active), armpit
 still present (open item, now with a measurable target). NEXT: extract sculpt references
 for all 4 outfits, add reference-score to the harness metrics, design armpit v3 and tune
 engine knobs against the references.
+
+---
+
+## Part 21 — Armpit v3: region shape-matching (DRAPE_SHAPEMATCH, sculpt-validated) (2026-07-08)
+
+User confirmed the Part 20 routing revert live ("a barra do vestido melhorou absurdamente")
+and pointed the session at the one remaining item: the armpit.
+
+**What the sculpt actually does there (measured):** the hand sculpt holds the cloth at
+~1.4u off the morphed body (ours: 0.5u = authored clearance) but the displacement from
+our result to the sculpt is ~3.8u and mostly TANGENTIAL (out+down, only 0.39 normal
+component). Renders showed the real defect: the side-of-chest panel is CRUMPLED (spiky
+normal fans — compression is free, engine null-space #2) and dives into the arm↔torso
+wedge; the sculpt keeps one smooth slightly-curved sheet chest→arm.
+
+**Dead ends measured before the fix (all scored vs the sculpt):**
+- Authored-bind morph transfer (k=1/k=8): 3.79 ≈ 3.78 off. Bind ambiguity in the canyon;
+  regresses the skirt (bind dist 5-8u applies wrong deltas).
+- Continuous body sweep (interpolate authored→morphed body, push cloth out per step):
+  3.80. The canyon never closes below ~1u, so watermelon-seed squeeze physics never
+  engages. (Also: point-cloud collision must use signed plane distance, not vertex
+  distance — cloth sinks between body verts otherwise.)
+- Oracle (BEST of 64 nearby body deltas per vert): 2.56 — even perfect correspondence
+  choice cannot reproduce the sculpt. The user created new shape.
+
+**The fix — Müller region shape-matching, run after panel-flatten on the corrected
+result:** each vert's authored 2-ring patch is refit as a similarity transform
+(warm-started rotation extraction + scale clamped [1, 1.25] — regions may grow with the
+morph, never shrink below authored) and the vert is pulled toward its authored local
+shape. Iterated ×20 at α=0.5 with per-iter body floor (0.30), interlayer gap ceiling,
+per-pass move cap (4u), seam-twin welds (base-coincident AND still coincident), and a
+post-loop prox-seam cap.
+
+**The gate (frozen from the input state, dilated 2 rings) — every clause is a measured
+verdict:**
+1. AFFINE-fit residual (crumple detector): an affine absorbs any smooth deformation incl.
+   anisotropic morph growth; leftover = high-freq chaos. (Similarity residual flags the
+   skirt's legit anisotropy; normal-dispersion alone misses the smooth basin.)
+2. §6 wedge = body-normal dispersion in r=4 × CONCAVITY SIGN (normals rotating against
+   positions). Without the sign the detector fires on any thin convex mass (shin!).
+3. MORPH-DELTA only: subtract the same wedge measure on the AUTHORED body at the authored
+   position. The armpit is 100% morph-created (wgM=1.000, wgA=0.000 measured); the groin
+   concavity exists authored and is design (§5).
+4. Basin floor 0.35 inside wedges (the basin interior is locally smooth but regionally
+   wrong).
+
+**Scope = the validated envelope (sculpt-scored on ALL 18 corpus garments — the loss
+function catching what proxies cannot):** the pass HELPS exactly one class and HURTS the
+rest, so the default gates encode that: FITTED_CLOTH preset only (Tubular/Auto/Rigid all
+lose: falmer Leg_Armor 1.37→1.86, fur BaseArmor 1.60→1.75, yarl Pants 1.47→1.59);
+correction path only (verlet re-drapes on purpose; yarl Clothes stretch 3.4→6.2 when
+included); authored-gap band p75 ∈ [0.45, 2.0] (below = skin-tight-like, falmer Undies
+follows the groin BY DESIGN and spiked stretch 1.13→9.33; above = hanging/drape-dominated,
+falmer underdress 2.65 scores worse 1.68→1.91); under-outer-layer excluded per-vert
+(current-space r=4; belt pen was 0.34→1.40 before) and per-garment (covered>30%).
+Knobs: DRAPE_SHAPEMATCH / SM_ALL_PRESETS / SM_LOOSE / SM_TIGHT / SM_LOOSE_MAX / SM_ALPHA /
+SM_ITERS / SM_SMAX / SM_R0 / SM_WEDGE_R / SM_FLOOR / SM_BASIN / SM_OUTER_R / SM_COVER_MAX /
+SM_MAX_MOVE / SM_DBG; live kill-switch file sm_off.flag.
+
+**Result (BlackSmithTorso vs sculpt):** global mean 1.482→1.403, p95 3.88→3.29; armpit
+hot region 3.78→2.82, max 6.92→4.91. Renders front+left: shoulder spike fans gone, chest
+smooth, armpit reads as the sculpt's shallow filled transition. Shin band untouched
+(1.13/4.48 identical to off — the concavity sign closed the front-knee leak the prototype
+still had). Corpus: falmer/vampire/yarl all green; drift confined to BlackSmithTorso
+(energies/roughness improve; magnetismCount +157 is the known bridge-reads-as-attraction
+misread; worstGarmentPen 0.65 sits under the belt) + a 2-metric fur Pants cascade.
+Goldens rebaselined; corpus green.
+
+**Port traps worth remembering:** (1) the fitted path pins exactly the contact verts the
+pass exists to fix — restore passes must ignore invMass (panel-flatten precedent); (2)
+the pass ran on 'Auto'-labelled garments via resolved presets — scope by the RESOLVED
+preset, and verify which garments actually ran via the HLog line, not assumptions.
+
+**Deployed 2026-07-08 23:29.** Expected user-visible: armpit crater filled to a smooth
+chest→arm transition on the Blacksmith (and any exposed fitted-cloth garment in the gap
+band). NEXT: keep score_all.py handy (tmp/smval has base/refbody/off/on per corpus
+garment); consider folding sculpt-score into the harness; widen the SM envelope only
+with reference-validated evidence per class.
