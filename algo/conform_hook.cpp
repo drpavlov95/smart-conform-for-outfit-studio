@@ -4470,8 +4470,16 @@ static void MaybeWriteSolverCapture(SolverCapture capture,
         return;
     }
 
+    // Timestamp suffix (2026-07-09): capture names were deterministic, so consecutive
+    // conforms of the same shape (an A/B of two preset configs) silently OVERWROTE each
+    // other — an entire user A/B run was lost that way. HHMMSS makes every conform's
+    // captures distinct; corpus dirs are unaffected (they keep their committed names).
+    SYSTEMTIME st; GetLocalTime(&st);
+    char ts[16];
+    _snprintf_s(ts, sizeof(ts), _TRUNCATE, "%02d%02d%02d", st.wHour, st.wMinute, st.wSecond);
     std::string name = "drape_capture__" + SafeFilePart(g_projectKey) + "__" +
-        SafeFilePart(capture.shapeName) + "__" + SafeFilePart(capture.sliderName) + ".drcap";
+        SafeFilePart(capture.shapeName) + "__" + SafeFilePart(capture.sliderName) +
+        "__" + ts + ".drcap";
     fs::path path = dir / name;
     if (WriteSolverCapture(path, capture)) {
         HLog("capture: wrote '%s' verts=%zu raw=%zu solved=%zu outers=%zu inners=%zu",
