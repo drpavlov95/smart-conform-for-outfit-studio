@@ -10225,14 +10225,49 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const BodyBVH* supBase = nullptr;
         const BodyBVH* supCur  = nullptr;
         std::string supName = "body";
-        if (kBeltArapRestOn && innerColliders) {
+        // Support = the surface the belt physically wraps over, chosen by GEOMETRY, not by the
+        // neighbour's preset label (2026-07-09, live-capture validated). The old gate accepted
+        // only a LOOSE_DRAPED inner; the moment the user set the underlying clothes to Fitted the
+        // belt fell to the far body (authoredOffsetMean 0.77 -> 2.39 in the live Yarl A/B) and
+        // its 2.4u offset x the morph-swinging body normal twisted the straps -- the "magnetism"
+        // the user saw. It also mis-rested the Blacksmith belt ON its torso whenever the torso was
+        // set Loose, though body-rest scores better vs the hand-sculpt (1.68 vs 1.90).
+        // Gate: a garment qualifies as support only if it forms a real standoff LAYER between the
+        // belt and the body (mean dist_to_body - dist_to_garment >= 1.0u): live-measured Yarl
+        // Clothes 1.645 (real layer, belt hugs it at 0.81) vs Blacksmith torso 0.610 (hugs the
+        // body -- resting there only injects armor noise) vs Yarl Pants 0.103. Among qualifiers
+        // rest on the nearest; else fall back to the body (authored clearance). Preset only
+        // gates BELT (never rest on another belt) -- so the choice no longer changes when the
+        // user flips the clothes' preset.
+        if (kBeltArapRestOn && innerColliders && g_refBodyBVH.valid) {
+            const size_t sstride = std::max<size_t>(1, n / 64);
+            const float kSupportStandoff = EnvFloat("DRAPE_BELT_SUPPORT_STANDOFF", 1.0f);
+            float bestGap = 1e30f;
             for (const OuterCollider& ic : *innerColliders) {
-                if (NormalizePreset(ic.preset) != DRAPE_PRESET_LOOSE_DRAPED) continue;  // the dress
+                if (NormalizePreset(ic.preset) == DRAPE_PRESET_BELT) continue;
                 if (!ic.Base().valid || !ic.Current().valid) continue;
                 if (ic.Base().tris.size() != ic.Current().tris.size()) continue;
-                if (ic.Current().faceNormal.empty()) continue;
-                supBase = &ic.Base(); supCur = &ic.Current(); supName = ic.name;
-                break;
+                if (ic.Base().faceNormal.empty() || ic.Current().faceNormal.empty()) continue;
+                double sumG = 0.0, sumB = 0.0; int cnt = 0;
+                for (size_t i = 0; i < n; i += sstride) {
+                    Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                    if (!BVHClosestPointEx(ic.Base(), baseVerts[i], cp, nrm, d2, nullptr, nullptr, nullptr, nullptr)) continue;
+                    float og = std::sqrt(d2);
+                    Vec3 bcp{0,0,0}, bnrm{0,0,1}; float bd2 = 0.0f;
+                    if (!BVHClosestPointEx(g_refBodyBVH, baseVerts[i], bcp, bnrm, bd2, nullptr, nullptr, nullptr, nullptr)) continue;
+                    sumG += og; sumB += std::sqrt(bd2); ++cnt;
+                }
+                if (cnt == 0) continue;
+                float meanGap   = (float)(sumG / cnt);
+                float meanStand = (float)((sumB - sumG) / cnt);
+                bool qualifies = meanStand >= kSupportStandoff;
+                HLog("belt M1 support-cand: name='%s' preset=%d meanGap=%.3f standoff=%.3f qualifies=%d",
+                     ic.name.c_str(), (int)NormalizePreset(ic.preset), meanGap, meanStand,
+                     qualifies ? 1 : 0);
+                if (qualifies && meanGap < bestGap) {
+                    bestGap = meanGap;
+                    supBase = &ic.Base(); supCur = &ic.Current(); supName = ic.name;
+                }
             }
         }
         if (!supBase && bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
@@ -12747,7 +12782,10 @@ static int ReplayCaptureDir(const fs::path& dir) {
             for (const auto& kv : solvedByName) {
                 if (kv.first == cap.shapeName || existingInnerNames.count(kv.first)) continue;
                 const ReplayedShape& inner = kv.second;
-                if (NormalizePreset(inner.preset) != DRAPE_PRESET_LOOSE_DRAPED) continue;
+                // Any solved garment is a support CANDIDATE (the standoff gate in the belt
+                // solve decides); only other belts and body meshes (AUTO) are excluded.
+                if (NormalizePreset(inner.preset) == DRAPE_PRESET_BELT ||
+                    NormalizePreset(inner.preset) == DRAPE_PRESET_AUTO) continue;
                 if (inner.baseVerts.empty() || inner.solvedVerts.empty() || inner.tris.empty()) continue;
                 if (inner.baseVerts.size() != inner.solvedVerts.size()) continue;
                 OuterCollider ic;
@@ -13276,7 +13314,8 @@ static void Detour_GenResult(
                     // inside the helper (no recursion). See kLayerSolveOrder.
                     if (!cur && kLayerSolveOrder && otherIsInner &&
                         NormalizePreset(preset) == DRAPE_PRESET_BELT &&
-                        NormalizePreset(otherPreset) == DRAPE_PRESET_LOOSE_DRAPED) {
+                        NormalizePreset(otherPreset) != DRAPE_PRESET_BELT &&
+                        NormalizePreset(otherPreset) != DRAPE_PRESET_AUTO) {
                         const SolvedMesh* sm =
                             EnsureSupportSolvedLocked(self, other, *sliderName, bodyShell, bodyBVH);
                         if (sm && !sm->verts.empty()) {
