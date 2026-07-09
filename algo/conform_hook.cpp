@@ -1,5 +1,5 @@
-/*
- * conform_hook.cpp â€” in-memory "Smart Conform" via function hooking.
+﻿/*
+ * conform_hook.cpp Ã¢â‚¬â€ in-memory "Smart Conform" via function hooking.
  *
  * Hooks Automorph::GenerateResultDiff in OutfitStudio x64.exe. After the vanilla
  * conform computes a slider's result diff for a shape, we scale each vertex's
@@ -7,7 +7,7 @@
  * engine's own Automorph::ZeroVertDiff(shape, slider, nullptr, &mask).
  *
  * Result: the normal "Conform All" produces a cloth-aware result in memory and
- * the view refreshes itself â€” feels like a native, smarter conform. No disk
+ * the view refreshes itself Ã¢â‚¬â€ feels like a native, smarter conform. No disk
  * round-trip, no save/reload.
  *
  * Geometry for the weights is loaded from the open project's NIF on disk (same
@@ -15,7 +15,7 @@
  *
  * ABI note: we read const std::string* args and pass a std::unordered_map by
  * pointer to the host. This relies on host + DLL sharing the MSVC STL ABI
- * (true for all VS2015â€“2022 builds). Both are MSVC, so layouts match.
+ * (true for all VS2015Ã¢â‚¬â€œ2022 builds). Both are MSVC, so layouts match.
  */
 
 #include "conform_offsets.h"
@@ -55,7 +55,7 @@
 namespace fs = std::filesystem;
 using namespace nifly;
 
-// â”€â”€ Debug log (shared file) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Debug log (shared file) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static void HLog(const char* fmt, ...) {
     char msg[1024];
     va_list ap; va_start(ap, fmt);
@@ -75,7 +75,7 @@ static void HLog(const char* fmt, ...) {
     DWORD w; WriteFile(h, line, (DWORD)n, &w, nullptr); CloseHandle(h);
 }
 
-// â”€â”€ Hooked function signatures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Hooked function signatures Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static std::string SafeFilePart(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -107,7 +107,7 @@ typedef void (*PfnGenResult)(
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
     bool axisX, bool axisY, bool axisZ);
 
-// DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) â€” scales each diff
+// DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) Ã¢â‚¬â€ scales each diff
 // vertex by mask[vert]; erases verts with weight 0 or absent from mask.
 typedef void (*PfnDiffZeroVert)(
     void* diffDataSets,
@@ -140,7 +140,7 @@ static PfnDiffGetDiffSet   g_diffGetDiffSet    = nullptr;
 static PfnGetRawResultDiff g_getRawResultDiff  = nullptr;
 static PfnSetResultDiff    g_setResultDiff     = nullptr;
 
-// â”€â”€ Config from version.dll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Config from version.dll Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static HWND        g_osHwnd = nullptr;
 static std::string g_bsDir;
 static DrapeOptions g_opts;        // tight/loose distances
@@ -187,17 +187,17 @@ struct BodyShell {
     bool valid = false;
 };
 
-// â”€â”€ 3D body collider: BVH over the morphed body triangles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ 3D body collider: BVH over the morphed body triangles Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Real geometric collision (closest point on the actual body surface), the
 // foundation that replaces the radial shell approximation. Built once per body
 // morph (keyed by refDataName) and cached. Answers "where does the body actually
 // push the cloth out?" using point-to-triangle closest-point queries + the real
-// surface normal â€” works for belly, hips, sides, bust, and limbs alike.
+// surface normal Ã¢â‚¬â€ works for belly, hips, sides, bust, and limbs alike.
 struct BodyBVH {
     struct Node {
         Vec3 bmin{0.0f, 0.0f, 0.0f};
         Vec3 bmax{0.0f, 0.0f, 0.0f};
-        int  left  = -1;   // child node index; -1 â‡’ leaf
+        int  left  = -1;   // child node index; -1 Ã¢â€¡â€™ leaf
         int  start = 0;    // [start,start+count) into triIndex for a leaf
         int  count = 0;
     };
@@ -210,7 +210,7 @@ struct BodyBVH {
     bool valid = false;
 };
 
-// â”€â”€ Per-shape weight cache (rebuilt when the open project changes) â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Per-shape weight cache (rebuilt when the open project changes) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static std::mutex g_cacheMx;
 static std::string g_projectKey;   // current resolved project name
 static std::unordered_map<std::string, std::vector<float>> g_shapeWeights;
@@ -224,7 +224,7 @@ static std::unordered_map<std::string, int> g_shapeGeometryPresets;
 // is pushed out to clear any inner (lower-layer) mesh during the solve.
 static std::unordered_map<std::string, int> g_shapeLayer;
 static std::unordered_map<std::string, std::unordered_set<std::string>> g_shapeOutersByInner;
-// Per-shape triangles (base topology) â€” used to build a per-mesh collider BVH so an
+// Per-shape triangles (base topology) Ã¢â‚¬â€ used to build a per-mesh collider BVH so an
 // outer garment can be pushed off an inner one DURING the solve (like the body).
 static std::unordered_map<std::string, std::vector<std::array<uint16_t, 3>>> g_shapeTris;
 static std::unordered_map<std::string, BodyBVH> g_shapeBaseBVH;
@@ -232,7 +232,7 @@ static std::unordered_map<std::string, BodyBVH> g_shapeBaseBVH;
 // so a later-solved mesh can collide against an earlier-solved one's actual draped
 // shape (not just its conformed position). OutfitStudio iterates mesh-outer /
 // slider-inner (all sliders for Cloak, then all for Clothes), so we must keep results
-// for EVERY slider â€” a single-slider cache would be wiped before the inner mesh runs.
+// for EVERY slider Ã¢â‚¬â€ a single-slider cache would be wiped before the inner mesh runs.
 struct SolvedMesh { std::vector<Vec3> verts; BodyBVH bvh; int layer = 0; };
 static std::unordered_map<std::string,
                           std::unordered_map<std::string, SolvedMesh>> g_solvedShapes; // [slider][shape]
@@ -270,7 +270,7 @@ static float g_refMaxZ = 0.0f;
 // host Automorph methods with confirmed RVAs.
 static constexpr bool kEnableDirectDiffRewrite = false;
 
-// â”€â”€ WRITE-PATH DIAGNOSTIC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ WRITE-PATH DIAGNOSTIC Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // When true, ApplyStaticClothPass ignores the physics result and instead writes
 // an UNMISTAKABLE deformation (drape-eligible verts shoved 15 units down). If the
 // outfit visibly drops/stretches in OutfitStudio after Smart Conform, the
@@ -280,7 +280,7 @@ static constexpr bool kEnableDirectDiffRewrite = false;
 static constexpr bool kDiagWritePathTest = false;
 static constexpr float kDiagDropZ = 15.0f;
 
-// â”€â”€ Compact project resolver (title -> .osp -> NIF) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Compact project resolver (title -> .osp -> NIF) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 static std::string ProjFromTitle() {
     if (!g_osHwnd) return {};
@@ -346,7 +346,7 @@ static std::vector<EdgeConstraint> BuildEdgeConstraints(NiShape* shape,
 
 // Bending constraint: for each pair of triangles sharing edge (a,b),
 // store the two opposite vertices (c, d) and their rest distance.
-// Resists folding along the shared edge â€” gives cloth a smooth, fabric-like
+// Resists folding along the shared edge Ã¢â‚¬â€ gives cloth a smooth, fabric-like
 // appearance instead of the "chain mail" look from stretch-only solvers.
 static std::vector<BendingConstraint> BuildBendingConstraints(
     NiShape* shape, const std::vector<Vec3>& verts)
@@ -358,8 +358,8 @@ static std::vector<BendingConstraint> BuildBendingConstraints(
     shape->GetTriangles(tris);
     if (tris.empty()) return bending;
 
-    // Map each edge key â†’ list of triangles that contain it (identified by
-    // the opposite vertex â€” the vertex NOT on the shared edge).
+    // Map each edge key Ã¢â€ â€™ list of triangles that contain it (identified by
+    // the opposite vertex Ã¢â‚¬â€ the vertex NOT on the shared edge).
     std::unordered_map<uint32_t, std::pair<int16_t, int16_t>> edgeToOpposite;
     edgeToOpposite.reserve(tris.size() * 3);
 
@@ -526,7 +526,7 @@ static float BoneProfileFollowWeight(int preset,
     case DRAPE_PRESET_LOOSE_DRAPED:
         // Draped cloth: reduce follow weight by limb influence so lower body
         // verts become loose (small follow weight). Physics will then position
-        // them. NO forced minimum here â€” let limbs reduce w to near-zero.
+        // them. NO forced minimum here Ã¢â‚¬â€ let limbs reduce w to near-zero.
         // (The anchorStiffness parameter later applies waist-anchoring to tight verts.)
         w = w * (1.0f - 0.55f * limb);
         break;
@@ -593,7 +593,7 @@ static int GuessPresetFromGeometry(const std::vector<Vec3>& verts,
     // 2026-07-05 to flip BlackSmithTorso to Loose) was a REGRESSION, proven against the
     // author's hand-sculpted RM_Heavy reference: the fitted path scores mean 1.49 vs the
     // sculpt (shin band 0.6) while the loose path scores 2.19 (shin band 3.7-4.9, skirt
-    // narrowed, authored front vent erased — the user-visible "cratera na canela").
+    // narrowed, authored front vent erased â€” the user-visible "cratera na canela").
     // Authored-gap profiling does NOT separate the two dress classes (blacksmith 6.25 vs
     // yarl 6.80 mean in the skirt band), so there is no honest geometric discriminator:
     // keep the original conservative rule (lowerFrac > 0.20 keeps yarl Loose at 0.25 and
@@ -1053,7 +1053,7 @@ static float Comp(const Vec3& v, int axis) {
     return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }
 
-// â”€â”€ BVH build (iterative median split over triangle centroids) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ BVH build (iterative median split over triangle centroids) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static void BuildBodyBVH(const std::vector<Vec3>& verts,
                          const std::vector<std::array<uint16_t, 3>>& tris,
                          BodyBVH& bvh) {
@@ -1800,7 +1800,7 @@ static void RebuildCacheLocked() {
         float avgLimbBone = boneProfiles.empty() ? 0.0f : limbSum / (float)boneProfiles.size();
 
         g_shapeWeights[name] = std::move(w);
-        // Pass boneProfiles before moving it â€” needed for TUBULAR/DRAPED detection.
+        // Pass boneProfiles before moving it Ã¢â‚¬â€ needed for TUBULAR/DRAPED detection.
         int geometryPreset = GuessPresetFromGeometry(outVerts, g_shapeWeights[name], &boneProfiles);
         if (geometryPreset != DRAPE_PRESET_AUTO)
             g_shapeGeometryPresets[name] = geometryPreset;
@@ -1825,7 +1825,7 @@ static void RebuildCacheLocked() {
              PresetName(geometryPreset));
     }
 
-    // â”€â”€ Inter-mesh layer order pre-pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Inter-mesh layer order pre-pass Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     for (const auto& kv : g_shapeVerts) {
         auto triIt = g_shapeTris.find(kv.first);
         if (triIt == g_shapeTris.end() || triIt->second.empty() ||
@@ -1884,7 +1884,7 @@ static void RebuildCacheLocked() {
         // a strict winner per pair. We accumulate a per-shape score (higher = outer).
         // A simple majority (>60% of decisive cells) wins the pair, so two garments in
         // the same vertical band (pants under a long dress) get separated even with
-        // modest overlap â€” the previous 2x ratio + shared<3 gate left them tied.
+        // modest overlap Ã¢â‚¬â€ the previous 2x ratio + shared<3 gate left them tied.
         std::unordered_map<std::string, int> score;  // higher = more outer
         for (auto& kv : g_shapeVerts) score[kv.first] = 0;
         auto recordOuter = [&](const std::string& outer,
@@ -2170,7 +2170,7 @@ static bool ApplyVerticalEnvelopeDrape(void* resultDiffData,
     return true;
 }
 
-// â”€â”€ Detour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Detour Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 static bool HostGetRawResultDiff(void* self,
                                  const std::string* shapeName,
@@ -2333,7 +2333,7 @@ struct StaticSolveParams {
     float physicsDrapeInitPushStiffness = 0.80f;
     int   physicsDrapeInitPushPasses    = 8;
     // Bending constraints: resist folding along shared edges (fabric stiffness).
-    // 0 = disabled (stretch only â†’ chain-mail look). ~0.001 = soft cloth.
+    // 0 = disabled (stretch only Ã¢â€ â€™ chain-mail look). ~0.001 = soft cloth.
     float bendingStiffness = 0.0f;
     int   bendingIterations = 1;    // extra bending passes per PBD iteration
     // Real Verlet cloth solve (physicsDrape only). pbdIterations is reused as the
@@ -2437,10 +2437,10 @@ static constexpr bool kLayerSolveOrder = true;
 static constexpr bool  kGravityShadow = true;   // M4 DONE (2026-07-02); ruled OUT as the thigh-bump cause (2026-07-03 A/B)
 static constexpr float kShadowCell    = 1.0f;   // column-grid resolution (world units)
 static constexpr int   kShadowMaxRing = 24;     // max outward push search (cells)
-// M4.1 (2026-07-03): catenary return rate — how fast loose cloth falls back toward the
+// M4.1 (2026-07-03): catenary return rate â€” how fast loose cloth falls back toward the
 // body per unit-Z below a protrusion. MEASURED at 0.10 on the Yarl corpus: HARMFUL
 // (dress magnetism +207, worstGarmentPen 1.4->6.7, cascades to Pants bodyPen +56) and it
-// was NOT the thigh-bump fix (that's the panel-flatten pass — the bump garments are
+// was NOT the thigh-bump fix (that's the panel-flatten pass â€” the bump garments are
 // correction-mode presets the shadow never touches). Default 0 = the user-approved plumb
 // hang; the knob (DRAPE_SHADOW_RETURN) stays for future per-preset tuning with eyes on.
 static constexpr float kShadowReturnRate = 0.0f;
@@ -2547,26 +2547,26 @@ static StaticSolveParams StaticParamsForPreset(int preset) {
         // pbdIterations = relaxation steps; constraintIterations = passes/step;
         // gravity = per-step downward nudge; clothMaxDrop bounds the sag.
         // The monotonic radial envelope (run last) is the dominant shaper for
-        // loose. The Verlet here is only a gentle settle â€” kept weak so it doesn't
+        // loose. The Verlet here is only a gentle settle Ã¢â‚¬â€ kept weak so it doesn't
         // melt the hem with uneven vertical sag.
         p.verletCloth = true;
         p.collisionStiffness = 0.85f;
-        // Tuned drape (2026-06-05): moderate values â€” visibly looser than the body
+        // Tuned drape (2026-06-05): moderate values Ã¢â‚¬â€ visibly looser than the body
         // (clearance 0.9) with a real but bounded sag. gravity is PER-SUBSTEP and
-        // there are ~50 substeps, so keep it small (0.06 Ã— 50 â‰ˆ 3 units of pull);
+        // there are ~50 substeps, so keep it small (0.06 Ãƒâ€” 50 Ã¢â€°Ë† 3 units of pull);
         // clothMaxDrop bounds the total sag so the hem can't melt/tear.
         p.bodyClearance = 0.90f;       // looser than 0.65, not the 2.0 overdrive
-        p.bendingStiffness = 0.10f;    // a touch stiffer â†’ fewer jagged folds
+        p.bendingStiffness = 0.10f;    // a touch stiffer Ã¢â€ â€™ fewer jagged folds
         p.bendingIterations = 2;
-        p.surfaceSmoothIterations = 4; // extra smoothing â†’ less jagged hem
+        p.surfaceSmoothIterations = 4; // extra smoothing Ã¢â€ â€™ less jagged hem
         p.surfaceSmoothStrength = 0.18f;
         p.anchorStiffness = 0.50f;
         p.drapeReturnRate = 0.028f;
         p.drapeEnvelopeStrength = 1.0f;
         p.drapeEnvelopeBins = 96;
-        p.gravity = 0.07f;             // per-substep; Ã—50 â‰ˆ 3.5 units total sag
-        p.clothMaxDrop = 8.0f;         // bounded sag â€” prevents melt/tear at hem
-        p.stretchStiffness = 0.75f;    // stiffer cloth â†’ resists tearing
+        p.gravity = 0.07f;             // per-substep; Ãƒâ€”50 Ã¢â€°Ë† 3.5 units total sag
+        p.clothMaxDrop = 8.0f;         // bounded sag Ã¢â‚¬â€ prevents melt/tear at hem
+        p.stretchStiffness = 0.75f;    // stiffer cloth Ã¢â€ â€™ resists tearing
         // Processing intensity: Low=faster/fewer passes, Medium=default,
         // High=extra iterations for difficult extreme morphs.
         switch (g_processingIntensity.load(std::memory_order_relaxed)) {
@@ -2997,7 +2997,7 @@ static void ApplyClothDrapeEnvelopePass(
 {
     size_t n = finalVerts.size();
     // returnRate == 0 is valid: pure monotonic envelope (radius never decreases
-    // going down) â€” the hardcoded "loose" rule. Only negative is invalid.
+    // going down) Ã¢â‚¬â€ the hardcoded "loose" rule. Only negative is invalid.
     if (n == 0 || radialBins <= 0 || returnRatePerUnitZ < 0.0f || strength <= 0.0f)
         return;
 
@@ -3054,14 +3054,14 @@ static void ApplyClothDrapeEnvelopePass(
     }
 }
 
-// â”€â”€ Body-shell monotonic drape envelope (the hardcoded LOOSE rule) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Body-shell monotonic drape envelope (the hardcoded LOOSE rule) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Implements the user's rule using the dense, smooth BODY SHELL instead of the
 // sparse cloth verts: going DOWN, the cloth radius per angular sector can never
 // fall below the maximum body radius seen from the top of the drape region down
 // to that height (+ clearance). So the cloth bulges out at protrusions (breast,
 // belly, butt) and hangs straight down (vertical) across the recessed parts
-// (under-belly, waist, groin) â€” it never tucks back toward the center. Because
-// the body shell is dense (48Ã—96) and smooth, this is smooth and acts on EVERY
+// (under-belly, waist, groin) Ã¢â‚¬â€ it never tucks back toward the center. Because
+// the body shell is dense (48Ãƒâ€”96) and smooth, this is smooth and acts on EVERY
 // drape vert regardless of how few cloth verts fall in a bin (the flaw that made
 // the cloth-vert envelope weak and jagged).
 static void ApplyBodyEnvelopeDrapePass(
@@ -3076,7 +3076,7 @@ static void ApplyBodyEnvelopeDrapePass(
     bool twoSided,             // false: only push verts that are INSIDE out to the
                                //   floor (one-sided minimum).
                                // true: also pull OUTWARD bumps in to the envelope
-                               //   surface â†’ flattens the cloth onto the smooth
+                               //   surface Ã¢â€ â€™ flattens the cloth onto the smooth
                                //   monotonic envelope. This is the radial collision
                                //   AND the de-jagger in one; the result is the
                                //   monotonic surface, so it still obeys the loose
@@ -3109,15 +3109,15 @@ static void ApplyBodyEnvelopeDrapePass(
 
     // Seed the running max at the top of the drape region (belt/waist). Seeding
     // higher (to capture the belly overhang) was tried but on a heavy body it
-    // forced the whole skirt to the belly/hip width down to the hem â†’ a stiff
+    // forced the whole skirt to the belly/hip width down to the hem Ã¢â€ â€™ a stiff
     // wide bell. The belly-overhang problem needs a different fix (per-contact
     // vertical drop, not a global radius floor), so keep the seed at the belt.
     int seedTopZb = drapeTopZb;
 
     // Per angular bin: envelope scans DOWN from seedTopZb (above the belly).
     // envelopeR = max(bodyR, prev_envelopeR - returnRate * dzPerBin).
-    // returnRate=0  â†’ strict column (never narrows below the widest point).
-    // returnRate>0  â†’ slow taper (hangs gradually inward after a protrusion).
+    // returnRate=0  Ã¢â€ â€™ strict column (never narrows below the widest point).
+    // returnRate>0  Ã¢â€ â€™ slow taper (hangs gradually inward after a protrusion).
     std::vector<float> envR((size_t)RB * ZB, -1.0f);
     for (int rb = 0; rb < RB; ++rb) {
         float runEnv = -1.0f;
@@ -3173,20 +3173,20 @@ static void ApplyBodyEnvelopeDrapePass(
     }
 }
 
-// ── Gravity-shadow: the axis-free realism core (plan Part 9) ───────────────────
+// â”€â”€ Gravity-shadow: the axis-free realism core (plan Part 9) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Replaces every radial-axis envelope above for LOOSE regions. A dense (x,y) column
 // grid over the body's horizontal bounds; topZ[col] = the highest body-surface Z
 // anywhere in that column. A cloth vertex (x,y,z) is "in shadow" iff the (ceiling-
 // capped) topZ of its column is >= z: there is body at or above it in its OWN
-// vertical column. Colliding loose cloth against the shadow — pushing an in-shadow
-// vertex HORIZONTALLY out to the nearest column whose top is < z, plus clearance —
+// vertical column. Colliding loose cloth against the shadow â€” pushing an in-shadow
+// vertex HORIZONTALLY out to the nearest column whose top is < z, plus clearance â€”
 // yields the user's rule by construction:
-//   • body protrudes above  → its column stays tall → cloth pushed out         ✔
-//   • body recedes below it  → the column's top is unchanged (still the taller
-//     protrusion above) → the shadow wall is VERTICAL → cloth hangs plumb       ✔
-//   • the collision is ONE-SIDED (only pushes OUT, never pulls a free vertex in),
-//     so the only inward force is the cloth's own tension = "unless it's tight"  ✔
-//   • no code path references the body position as a target ⇒ magnetism is
+//   â€¢ body protrudes above  â†’ its column stays tall â†’ cloth pushed out         âœ”
+//   â€¢ body recedes below it  â†’ the column's top is unchanged (still the taller
+//     protrusion above) â†’ the shadow wall is VERTICAL â†’ cloth hangs plumb       âœ”
+//   â€¢ the collision is ONE-SIDED (only pushes OUT, never pulls a free vertex in),
+//     so the only inward force is the cloth's own tension = "unless it's tight"  âœ”
+//   â€¢ no code path references the body position as a target â‡’ magnetism is
 //     structurally impossible, not merely discouraged.
 // The ceiling (top of the garment's drape region) is applied at QUERY time so one
 // build serves any garment: body ABOVE the garment casts no shadow onto it. An
@@ -3211,11 +3211,11 @@ struct GravityShadow {
 };
 
 // Build the shadow from a morphed body (bodyBVH carries verts+tris). Rasterizes each
-// body triangle's horizontal footprint into the grid, keeping the per-column MAX Z —
+// body triangle's horizontal footprint into the grid, keeping the per-column MAX Z â€”
 // but ONLY of body at or below `ceiling` (the top of the garment's drape region).
 // Body ABOVE the ceiling (e.g. shoulders above a waist skirt) is ignored, so a column
 // whose only body is above the ceiling casts NO shadow: topZ stays kNeg. This is what
-// makes the shadow garment-relative — cheap to rebuild per solve. Pass a large ceiling
+// makes the shadow garment-relative â€” cheap to rebuild per solve. Pass a large ceiling
 // (e.g. +inf) to shadow against the whole body. Deterministic (fixed grid + triangle
 // order, no RNG). ~ms for a body at 1u cells.
 static bool BuildGravityShadow(const std::vector<Vec3>& verts,
@@ -3332,7 +3332,7 @@ static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
             float len = std::sqrt(dx * dx + dy * dy);
             if (len < 1.0e-5f) { outX = p.x; outY = p.y; return false; }
             float invLen = 1.0f / len;
-            // Push to the clear cell edge nearest the body (boundary ≈ half a cell
+            // Push to the clear cell edge nearest the body (boundary â‰ˆ half a cell
             // inside the clear cell) plus the requested clearance, along the outward
             // horizontal direction. The exact contact is refined by the body BVH pass.
             float boundaryDist = len - 0.5f * s.cell;
@@ -3352,19 +3352,19 @@ static bool GravityShadowPushOut(const GravityShadow& s, const Vec3& p,
             return true;
         }
     }
-    return false;  // no clear column within reach — leave to the body BVH pass
+    return false;  // no clear column within reach â€” leave to the body BVH pass
 }
 
-// â”€â”€ Hanging-chain pass (user spec item 5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Hanging-chain pass (user spec item 5) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Instead of reading the body shell only at each vertex's own Z (which is blind
 // to a protrusion ABOVE the drape region, e.g. a belly that overhangs the belt),
 // propagate the contact radius DOWN through the cloth's own edge graph:
-//   process verts topâ†’bottom; each drape vert's radius is at least the radius of
+//   process verts topÃ¢â€ â€™bottom; each drape vert's radius is at least the radius of
 //   the connected vert ABOVE it (minus a tiny per-Z taper) and at least the body
-//   radius at its position. Anchored verts (drapeEl<0.2) are NOT moved â€” they are
+//   radius at its position. Anchored verts (drapeEl<0.2) are NOT moved Ã¢â‚¬â€ they are
 //   the seeds/contacts (the bodice carries the belly/bust radius into the chain).
 // Effect: once a vert is pushed out by a contact, everything hanging below it in
-// the same cloth column stays out and falls vertical â€” it never returns inward
+// the same cloth column stays out and falls vertical Ã¢â‚¬â€ it never returns inward
 // unless a new (wider) contact appears. Two-sided projection also de-jags.
 // Horizontal same-Z hollow bridge: fills lateral concavities such as the butt cleft.
 struct HorizontalBridgeProfile {
@@ -4460,7 +4460,7 @@ static void MaybeWriteSolverCapture(SolverCapture capture,
 }
 
 // The real solver body. NEVER call this directly outside the ApplyStaticClothPass
-// wrapper below (U1, crash containment) â€” this function and everything it calls
+// wrapper below (U1, crash containment) Ã¢â‚¬â€ this function and everything it calls
 // is where a bug in ~8000 lines of solver code could raise a hardware exception
 // (bad index, div-by-zero, etc). The wrapper catches that so it can never take
 // OutfitStudio down with it.
@@ -4479,7 +4479,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                  // nearest-point can't silently jump between cloak/belt/pants). Each
                                  // holds the outer mesh's base + current surface and its preset (for
                                  // adaptive clearance). The anti-clip is ONE-DIRECTIONAL: it only PULLS
-                                 // THIS mesh IN under each outer one â€” never pushes the outer mesh out,
+                                 // THIS mesh IN under each outer one Ã¢â‚¬â€ never pushes the outer mesh out,
                                  // so the outermost layer (fur cloak) is never deformed (it gets an
                                  // empty list). Empty/null if this is the outermost mesh.
                                  const std::vector<OuterCollider>* outerColliders,
@@ -4533,7 +4533,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
         supportVerts[i] = Add(baseVerts[i], raw);
         // Start from the conformed fit (supportVerts) in all modes. The Verlet
-        // cloth solve then hangs the drape region down from this fitted start â€”
+        // cloth solve then hangs the drape region down from this fitted start Ã¢â‚¬â€
         // matching the diagnostic drop that looked correct. Starting from the slim
         // base mesh forced an unstable re-inflate that fought the body.
         finalVerts[i]   = supportVerts[i];
@@ -4559,7 +4559,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             break;
         }
 
-        // Physics drape: loose verts have no anchor â€” physics determines their
+        // Physics drape: loose verts have no anchor Ã¢â‚¬â€ physics determines their
         // position. Only tight verts (high follow) are anchored to vanilla conform.
         if (params.physicsDrape && f < 0.35f) {
             anchor   = 0.0f;
@@ -4653,18 +4653,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
     // UNIFIED VERTEX CLASSIFICATION
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
     // ONE pass decides each vertex's behavior. Everything downstream (invMass,
     // anchorWeight, vertClearance, gravity participation) derives from a single
     // continuous value:
     //
-    //   drapeAmount[i] âˆˆ [0,1] â€” how much this vertex behaves like free-hanging
+    //   drapeAmount[i] Ã¢Ë†Ë† [0,1] Ã¢â‚¬â€ how much this vertex behaves like free-hanging
     //                            cloth vs. anchored-to-body.
-    //     ~0.0  â†’ anchored: bodice/collar/sleeve/cuff. Follows vanilla conform,
+    //     ~0.0  Ã¢â€ â€™ anchored: bodice/collar/sleeve/cuff. Follows vanilla conform,
     //             stays fitted to the body, no gravity.
-    //     ~1.0  â†’ free drape: skirt/robe panel. Gravity + collision determine it.
+    //     ~1.0  Ã¢â€ â€™ free drape: skirt/robe panel. Gravity + collision determine it.
     //
     // This REPLACES the three previously-conflicting systems (the old drapeEl
     // bone formula, the island-clearance pass, and the anchor-boost loop) that
@@ -4683,7 +4683,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     std::vector<float> drapeAmount(n, 0.0f);
     std::vector<float> vertClearance(n, contactClearance);
     // Surfaced to the rigid-island pass below: per-vert island id + per-island
-    // "rigid plate/accessory" flag (medallion/buckle/chain â†’ translate, keep shape).
+    // "rigid plate/accessory" flag (medallion/buckle/chain Ã¢â€ â€™ translate, keep shape).
     std::vector<int>     islandIdOut;
     std::vector<uint8_t> islandRigidOut;
     if (params.verletCloth) {
@@ -4741,9 +4741,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
 
-        // â”€â”€ Geometric descriptors per island (validated in the Python prototype:
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Geometric descriptors per island (validated in the Python prototype:
         //    bbox flatness + extents discriminate plates/chains from drape far
-        //    better than SDF/raycast, which collapse on thin shell garments). â”€â”€
+        //    better than SDF/raycast, which collapse on thin shell garments). Ã¢â€â‚¬Ã¢â€â‚¬
         std::vector<Vec3> islMin((size_t)numIslands, Vec3{ 1e30f, 1e30f, 1e30f});
         std::vector<Vec3> islMax((size_t)numIslands, Vec3{-1e30f,-1e30f,-1e30f});
         std::vector<int>  islandSize(numIslands, 0);
@@ -4762,14 +4762,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             meshDiag = std::max(1e-3f, Len(Sub(gmax, gmin)));
         }
 
-        // â”€â”€ STEP A: detect RIGID islands + per-island drape amount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // islandRigid[id]: rigid plate/accessory (medallion/buckle/chain) â†’ handled
-        // by the rigid-island translate pass. islandDrape[id] âˆˆ [0,1]: how much the
+        // Ã¢â€â‚¬Ã¢â€â‚¬ STEP A: detect RIGID islands + per-island drape amount Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        // islandRigid[id]: rigid plate/accessory (medallion/buckle/chain) Ã¢â€ â€™ handled
+        // by the rigid-island translate pass. islandDrape[id] Ã¢Ë†Ë† [0,1]: how much the
         // island behaves as free-hanging cloth, from its aggregate bone profile.
         std::vector<uint8_t> islandRigid((size_t)numIslands, 0);
         std::vector<float>   islandDrape((size_t)numIslands, 1.0f);
 
-        // Largest island vert count â†’ used to gate "small" relative to the mesh.
+        // Largest island vert count Ã¢â€ â€™ used to gate "small" relative to the mesh.
         int maxIslandSize = 1;
         for (int id = 0; id < numIslands; ++id)
             maxIslandSize = std::max(maxIslandSize, islandSize[(size_t)id]);
@@ -4809,7 +4809,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             std::sort(e, e + 3);                       // e[0]<=e[1]<=e[2]
             float maxExt   = e[2];
 
-            // RIGID plate / accessory â†’ translate, keep shape. Conservative gate:
+            // RIGID plate / accessory Ã¢â€ â€™ translate, keep shape. Conservative gate:
             // SMALL (few verts, absolute + relative) AND COMPACT (small extent) AND
             // NOT-CLOTH (low pelvis/leg). Avoids rigidifying cloth panels (white slab).
             bool small   = islandSize[(size_t)id] < 250 &&
@@ -4822,11 +4822,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 continue;
             }
 
-            // WAISTBAND / sculpted belt â†’ rigid translate. These islands sit at the
+            // WAISTBAND / sculpted belt Ã¢â€ â€™ rigid translate. These islands sit at the
             // waist Z-range, have strong pelvis+torso, but very low leg weight (unlike
             // the skirt). They form the ] cross-section of a belt and collapse under
             // cloth physics. Vanilla conform preserves their shape by translating them
-            // with the body morph diff â€” we replicate that by flagging them as rigid.
+            // with the body morph diff Ã¢â‚¬â€ we replicate that by flagging them as rigid.
             // Gate: pelvis+torso strong, leg weak, narrow Z-span (not a full skirt panel).
             {
                 float zSpan = islMax[(size_t)id].z - islMin[(size_t)id].z;
@@ -4836,7 +4836,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // wide horizontal arc. A small localized island with the same bone
                 // signature is a decorative FLAP (e.g. the hip leather flap) that should
                 // DRAPE with the body, not rigid-translate. Rigid-locking a flap pins it
-                // to vanilla conform while the cloth beside it moves with physics â†’ the
+                // to vanilla conform while the cloth beside it moves with physics Ã¢â€ â€™ the
                 // two split open into a visible hole in the morph (user-reported, the
                 // circled gap). Require a real band size so flaps are excluded.
                 float xSpan = islMax[(size_t)id].x - islMin[(size_t)id].x;
@@ -4853,7 +4853,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
             // Island drape level = mean per-vertex drape signal over the island.
             // (Sleeves are handled per-vertex by the sleeve-suppress term in
-            // vertDrapeSignal â€” NOT by a whole-island sleeve gate, which would wrongly
+            // vertDrapeSignal Ã¢â‚¬â€ NOT by a whole-island sleeve gate, which would wrongly
             // fitted-ify a large dress island that has sleeves merged into it.)
             float islMeanSignal = islandSignalCnt[(size_t)id] > 0
                 ? islandSignalSum[(size_t)id] / (float)islandSignalCnt[(size_t)id] : 0.0f;
@@ -4884,11 +4884,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             (void)drapeW;
         }
 
-        // â”€â”€ STEP B: per-vertex drapeAmount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ STEP B: per-vertex drapeAmount Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // PURELY per-vertex: drape is decided by the vertex's own lower-body bone
         // signal + height (vertDrapeSignal). This distinguishes bodice from skirt
         // WITHIN a single connected island (a dress where bodice+skirt+belt are one
-        // topological piece â€” the common case; the "belt" is not its own island).
+        // topological piece Ã¢â‚¬â€ the common case; the "belt" is not its own island).
         // We deliberately do NOT blend in the island mean here: a whole-dress island
         // has a low mean (dominated by the bodice) that would wrongly drag the skirt
         // verts toward anchor. The island pass is used ONLY to flag rigid plates.
@@ -4896,11 +4896,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kHugClear   = 0.12f;                 // fitted hugs the body
         const float kRigidClear = 0.08f;                 // rigid trim near-zero
 
-        // â”€â”€ Hybrid free-hang drape (Loose-Draped meshes only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Hybrid free-hang drape (Loose-Draped meshes only) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // The bone-based vertDrapeSignal only recognises LOWER-body draping
         // (pelvis+leg+below-waist torso).  A cloak / cape / tabard hangs from the
         // UPPER body (spine/shoulder weights) with ~zero pelvis+leg, so its signal
-        // is ~0 and it gets treated as fitted â†’ it collapses to vanilla conform
+        // is ~0 and it gets treated as fitted Ã¢â€ â€™ it collapses to vanilla conform
         // (twisted clipping) instead of draping.
         //
         // Fix (scoped to meshes the USER marked Loose Draped, so no other case
@@ -4937,7 +4937,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float dist = std::sqrt(d2);
                     float sign = Dot(Sub(supportVerts[i], cp), nrm);  // >0 outside
                     if (sign > 0.0f && dist > kGapNear) {
-                        // Map gap [near..far] â†’ hang factor [0..1].
+                        // Map gap [near..far] Ã¢â€ â€™ hang factor [0..1].
                         float hang = ClampRange((dist - kGapNear) / (kGapFar - kGapNear),
                                                 0.0f, 1.0f);
                         if (hang > 0.0f) {
@@ -4960,7 +4960,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     }
 
-    // â”€â”€ Non-verlet presets: per-vertex drape from bones (Z fallback if none) â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Non-verlet presets: per-vertex drape from bones (Z fallback if none) Ã¢â€â‚¬Ã¢â€â‚¬
     if (!params.verletCloth) {
         for (size_t i = 0; i < n; ++i) {
             if (profiles && i < profiles->size()) {
@@ -4989,26 +4989,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // Reduce anchor for loose drape verts â€” let stretch + collision settle them.
+    // Reduce anchor for loose drape verts Ã¢â‚¬â€ let stretch + collision settle them.
     // BUT: enforce a minimum anchor (0.15) to prevent unrestricted drift, which
     // would propagate corrections to areas with no vanilla conform diff (ghost diffs).
     for (size_t i = 0; i < n; ++i) {
         if (drapeEl[i] > 0.25f) {
             float drapeScale = 1.0f - drapeEl[i] * (1.0f - follow[i]);
-            // physicsDrape: loose drape verts must have anchor=0 â€” pure physics.
+            // physicsDrape: loose drape verts must have anchor=0 Ã¢â‚¬â€ pure physics.
             // The 0.15 minimum was preventing physicsDrape from working at all:
-            // 0.15 Ã— anchorStiffness per iter Ã— 80 iter â‰ˆ full pull to supportVerts.
+            // 0.15 Ãƒâ€” anchorStiffness per iter Ãƒâ€” 80 iter Ã¢â€°Ë† full pull to supportVerts.
             float minAnchor = params.physicsDrape ? 0.0f : 0.15f;
             anchorWeight[i]  = std::max(Clamp01(anchorWeight[i] * drapeScale), minAnchor);
         }
     }
 
-    // â”€â”€ Slider-source locality â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Slider-source locality Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Compute per-vert influence: how much did the body actually change at this
     // outfit vert's 3D location for this specific slider?
     //
-    // Belly slider  â†’ large change at abdomen, near-zero at ankles/sleeves
-    // RM_Heavy      â†’ large change everywhere â†’ solver runs on all verts
+    // Belly slider  Ã¢â€ â€™ large change at abdomen, near-zero at ankles/sleeves
+    // RM_Heavy      Ã¢â€ â€™ large change everywhere Ã¢â€ â€™ solver runs on all verts
     //
     // directInfluence[i]: normalised |morphR - baseR| from body shell
     // effectiveInfluence[i]: direct + mesh propagation (decays with hops)
@@ -5027,7 +5027,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
 
         if (maxChange < 1.0e-4f) {
-            // Slider barely moves the body â†’ skip cloth pass entirely
+            // Slider barely moves the body Ã¢â€ â€™ skip cloth pass entirely
             outDiff.clear();
             return false;
         }
@@ -5037,7 +5037,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             directInfluence[i] = Clamp01(directInfluence[i] * invMax);
 
         // Propagate through cloth mesh (only through drape-eligible verts).
-        // Upper-body anchor verts (drapeEl â‰ˆ 0) block propagation so belly
+        // Upper-body anchor verts (drapeEl Ã¢â€°Ë† 0) block propagation so belly
         // influence cannot reach sleeves through the upper torso.
         effectiveInfluence = directInfluence;
         static constexpr float kPropDecay = 0.82f;
@@ -5063,19 +5063,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Inward suppression â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Inward suppression Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Only used in correction mode (physicsDrape=false).
     // In physicsDrape mode the initial body-push (after collideVertex) handles it.
     // For drape-eligible loose verts: cancel the inward radial component of
     // the vanilla conform delta proportional to looseness.
     //
     // Concept: vanilla conform may follow body concavities (waist pull-in, inner
-    // thigh, etc.). A loose skirt/hem should NOT follow inward â€” it should stay
+    // thigh, etc.). A loose skirt/hem should NOT follow inward Ã¢â‚¬â€ it should stay
     // at or outside its current radius. Outward conform moves (body expanding) are
     // always kept as-is. Only inward moves are selectively suppressed.
     //
     // For sliders that expand the body (RM_Heavy, BigHips, etc.), ALL diffs are
-    // outward â†’ no suppression â†’ result equals vanilla conform. For concave sliders
+    // outward Ã¢â€ â€™ no suppression Ã¢â€ â€™ result equals vanilla conform. For concave sliders
     // (belly curve-in below a bulge) the inward component is cancelled.
     const bool noContactPresetEligible =
         (normPreset == DRAPE_PRESET_FITTED_CLOTH && !params.physicsDrape);
@@ -5232,7 +5232,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         float vc = vertClearance[i];
         // Inter-garment ordering is handled entirely by the bidirectional per-vertex
         // anti-clip post-pass (local order from the base mesh). The in-solve collider
-        // only handles the BODY â€” pushing off other garments here would be one-
+        // only handles the BODY Ã¢â‚¬â€ pushing off other garments here would be one-
         // directional and could shove a vert to the wrong side of the local order.
         // Body collision (primary).
         if (bodyBVH && bodyBVH->valid) {
@@ -5489,7 +5489,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Physics drape: initial body-push â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Physics drape: initial body-push Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Starting from base mesh (slim body), push all verts outside the morphed
     // body BEFORE the PBD loop. This establishes the cloth's initial position
     // on the morphed body surface, after which gravity + stretch + envelope
@@ -5504,18 +5504,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Proximity constraints (synthetic edges for near-touching cross-island verts) â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Proximity constraints (synthetic edges for near-touching cross-island verts) Ã¢â€â‚¬Ã¢â€â‚¬
     // Problem: a belt or trim esculpted as part of a single dress mesh has no separate
     // island. Its vertices are topologically connected to the surrounding cloth and
     // move with it, but the belt straps can straddle seams where adjacent vert pairs
-    // have NO edge between them (different UV islands â†’ no shared edge in the mesh).
+    // have NO edge between them (different UV islands Ã¢â€ â€™ no shared edge in the mesh).
     // During the Verlet solve those pairs drift freely, tearing the belt apart.
     //
     // Solution: before the solve, find all base-mesh vertex pairs that are physically
     // close (< kProxDist) but have NO topological edge connecting them (different islands
     // OR simply not in useEdges). Add them as synthetic stretch constraints with the
     // VANILLA rest length. They resist ONLY over-stretching (like all stretch constraints),
-    // so the cloth can still drape â€” they just prevent the strap from tearing open.
+    // so the cloth can still drape Ã¢â‚¬â€ they just prevent the strap from tearing open.
     std::vector<EdgeConstraint> proxEdges;
     std::vector<float>          proxRestLen;
     std::vector<uint8_t>        proxIsBoundarySeam;
@@ -5657,7 +5657,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // Skip if there's already a real edge between i and j.
                     // Rest length from BASE mesh (not support/morphed): this preserves
                     // the sculpted 3D shape (e.g. belt ] cross-section thickness).
-                    // Using support rest length was wrong â€” on body morph the support
+                    // Using support rest length was wrong Ã¢â‚¬â€ on body morph the support
                     // already collapses the belt sides together, so the constraint
                     // then actively flattened the belt to match that morphed distance.
                     addProxEdge((uint32_t)i, j, false);
@@ -5764,13 +5764,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), proxEdges.size());
     }
 
-    // â”€â”€ Cloth drape solve (momentum-free relaxation) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Keeps the key idea from johnBuffer/ClothSimulation â€” distance constraints
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Cloth drape solve (momentum-free relaxation) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // Keeps the key idea from johnBuffer/ClothSimulation Ã¢â‚¬â€ distance constraints
     // that resist ONLY stretching, so the cloth folds and hangs instead of
-    // shrink-wrapping the body â€” but WITHOUT Verlet momentum. Momentum let the
+    // shrink-wrapping the body Ã¢â‚¬â€ but WITHOUT Verlet momentum. Momentum let the
     // constraint corrections feed back into velocity and accumulate energy, which
     // tore the mesh apart (hem verts reached escape velocity). Pure Gauss-Seidel
-    // relaxation toward a gravity-loaded equilibrium always converges â†’ no tears.
+    // relaxation toward a gravity-loaded equilibrium always converges Ã¢â€ â€™ no tears.
     // A hard per-vert max-drop and a hard edge-length cap make it unconditionally
     // stable. Pinned verts (low drape eligibility) hold the garment at the waist.
     if (params.verletCloth) {
@@ -5807,17 +5807,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
 
-        // â”€â”€ Seam welding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Seam welding Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // Game meshes split vertices at UV/material seams: two (or more) verts
         // share a 3D position but have different indices and NO edge between them.
         // Vanilla conform moves them identically; our physics moves each one based
-        // on its own edge fan, so they drift apart â†’ visible slits with the body
+        // on its own edge fan, so they drift apart Ã¢â€ â€™ visible slits with the body
         // poking through, and detached hem-trim flapping. Group verts that are
         // coincident in the base mesh and force them to move as one each pass.
         // Exact UV/material seam groups are built once before this branch and
         // already included in weldGroups for the cloth solve.
 
-        // â”€â”€ Inter-island junction stitching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Inter-island junction stitching Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // The dress bodice (fitted, stays put) and the skirt (drape, falls) are
         // SEPARATE islands that merely TOUCH at the waist with no shared edges
         // (verified in the log: bodice z=[0.63-0.97], skirt z=[0.05-0.64]). When
@@ -5827,7 +5827,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // coincident. Here we explicitly pair near-touching verts from DIFFERENT
         // islands and weld them so the skirt top tracks the bodice bottom.
         if (!islandIdOut.empty() && islandIdOut.size() == n) {
-            // Spatial hash for O(n) neighbour lookup (cell â‰ˆ kStitchDist).
+            // Spatial hash for O(n) neighbour lookup (cell Ã¢â€°Ë† kStitchDist).
             const float kStitchDist  = 1.50f;
             const float kStitchDist2 = kStitchDist * kStitchDist;
             const float cell = kStitchDist;
@@ -5843,10 +5843,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 grid[cellKey(baseVerts[i])].push_back((uint32_t)i);
 
             // For each vert, find the NEAREST vert in a DIFFERENT island within
-            // kStitchDist and weld that PAIR (2 verts only â€” never a blob, so the
+            // kStitchDist and weld that PAIR (2 verts only Ã¢â‚¬â€ never a blob, so the
             // skirt border can't collapse to a point). Each pair is its own group;
             // the existing weldSeams keeps them coincident every substep.
-            // Gate: the horizontal (XY) offset must be small â€” a bodiceâ†’skirt junction
+            // Gate: the horizontal (XY) offset must be small Ã¢â‚¬â€ a bodiceÃ¢â€ â€™skirt junction
             // is verts at the same circumference but different Z. This lets a large
             // VERTICAL gap stitch (the real hole) without pulling front-to-back.
             const float kStitchXY2 = 0.45f * 0.45f;
@@ -5855,7 +5855,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (size_t i = 0; i < n; ++i) {
                 int idi = islandIdOut[i];
                 if (idi < 0) continue;
-                // Never stitch FROM a rigid island â€” rigid islands use translate pass,
+                // Never stitch FROM a rigid island Ã¢â‚¬â€ rigid islands use translate pass,
                 // not the PBD solver, so welding them to cloth verts drags the cloth
                 // border to the rigid position and creates a crease at the boundary.
                 if (idi < (int)islandRigidOut.size() && islandRigidOut[(size_t)idi]) continue;
@@ -5871,7 +5871,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     for (uint32_t j : it->second) {
                         if ((size_t)j == i) continue;
                         if (islandIdOut[j] == idi) continue;     // same island: skip
-                        // Also skip if partner is rigid â€” same reason.
+                        // Also skip if partner is rigid Ã¢â‚¬â€ same reason.
                         int idj = islandIdOut[j];
                         if (idj >= 0 && idj < (int)islandRigidOut.size() && islandRigidOut[(size_t)idj]) continue;
                         float ddx = baseVerts[j].x - p.x, ddy = baseVerts[j].y - p.y;
@@ -5965,7 +5965,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // Proximity constraints: bidirectional distance-preserving for vert pairs
         // that are near-touching in the base mesh but have no topological edge.
         // Bidirectional (resist BOTH stretch and compression) so belt straps can't
-        // drift apart OR bunch together â€” they hold their vanilla relative position.
+        // drift apart OR bunch together Ã¢â‚¬â€ they hold their vanilla relative position.
         auto solveProxStretch = [&](float k) {
             for (size_t ei = 0; ei < proxEdges.size(); ++ei) {
                 const auto& e = proxEdges[ei];
@@ -6147,7 +6147,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (int it = 0; it < cIters; ++it) {
                 solveStretch(stretchK2);                 // asymmetric: resist stretch only
                 // Proxy constraints run at higher stiffness (1.0) to act as structural
-                // braces â€” they preserve sculpted shapes (belt ] cross-section) which
+                // braces Ã¢â‚¬â€ they preserve sculpted shapes (belt ] cross-section) which
                 // are NOT topological edges and would otherwise collapse under gravity.
                 if (!proxEdges.empty()) solveProxStretch(1.0f);
 
@@ -6197,7 +6197,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
 
             // 3) Hard stretch cap: no edge may exceed rest*kMaxStretch. This is the
-            //    definitive anti-tear â€” even if relaxation under-converges, edges
+            //    definitive anti-tear Ã¢â‚¬â€ even if relaxation under-converges, edges
             //    can never blow up. Two strong asymmetric passes against the cap.
             //    Also enforce proxy constraints so belt straps don't exceed cap either.
             if (!proxEdges.empty()) solveProxStretch(1.0f);
@@ -6215,7 +6215,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // could be stretched arbitrarily (measured 15x on the cloak collar,
                     // where most verts are anchored). A blown-up edge is a visible tear
                     // regardless of pinning, so cap it anyway by splitting the correction
-                    // 50/50. Pinned verts only define the conformed fit â€” if that fit is
+                    // 50/50. Pinned verts only define the conformed fit Ã¢â‚¬â€ if that fit is
                     // itself torn (slim garment on a heavy body), it must still be capped.
                     float w1 = m[e.a], w2 = m[e.b];
                     float wSum = w1 + w2;
@@ -6312,7 +6312,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 float eff = (i < effectiveInfluence.size()) ? effectiveInfluence[i] : 1.0f;
                 // In physics drape, collision is the ONLY force holding the cloth on
                 // the body against gravity. It must stay active for every slider, even
-                // ones with low slider-source influence â€” otherwise the cloth sinks in.
+                // ones with low slider-source influence Ã¢â‚¬â€ otherwise the cloth sinks in.
                 if (params.physicsDrape) eff = std::max(eff, 0.50f);
                 if (collideVertex(i, collisionStep * freeMass * eff))
                     ++stats.bodyAdjusted;
@@ -6403,7 +6403,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     // Post-PBD shape-level passes.
     // drapeFollow: override follow=1.0 for non-drape (upper body / sleeve) verts
-    // so envelope and body-column passes leave them untouched (loose=0 â†’ strengthâ‰ˆ0).
+    // so envelope and body-column passes leave them untouched (loose=0 Ã¢â€ â€™ strengthÃ¢â€°Ë†0).
     std::vector<float> drapeFollow(follow);
     for (size_t i = 0; i < n; ++i)
         if (drapeEl[i] < 0.20f) drapeFollow[i] = 1.0f;
@@ -6815,7 +6815,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };  // applyBeltFinishing (invoked after the clamp passes below)
 
     // Slider-source influence blend (CORRECTION MODE ONLY).
-    // In physicsDrape mode, physics determines cloth position â€” no blend-back.
+    // In physicsDrape mode, physics determines cloth position Ã¢â‚¬â€ no blend-back.
     // Blending back to supportVerts (vanilla conform) would kill the drape effect.
     if (!params.physicsDrape) {
         for (size_t i = 0; i < n; ++i) {
@@ -6859,7 +6859,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // presets (beltSeatIterations / beltDeWrinkleIterations default to 0).
     applyBeltFinishing();
 
-    // â”€â”€ WRITE-PATH DIAGNOSTIC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ WRITE-PATH DIAGNOSTIC Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Overrides the physics result with a brutal, obvious deformation so we can
     // visually confirm whether our SetResultDiff write actually reaches the mesh.
     if (kDiagWritePathTest) {
@@ -6879,10 +6879,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), sliderName.c_str(), moved, kDiagDropZ);
     }
 
-    // â”€â”€ Finishing (verletCloth) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Finishing (verletCloth) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Primary collider is now the 3D BVH: smooth, then push every drape vert onto
     // the REAL body surface (closest point + normal). This replaces the radial
-    // shell envelope as the shaper â€” the result follows the actual belly/hip/bust
+    // shell envelope as the shaper Ã¢â‚¬â€ the result follows the actual belly/hip/bust
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
     if (params.verletCloth && bodyBVH && bodyBVH->valid) {
@@ -6891,13 +6891,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         int intensity = g_processingIntensity.load(std::memory_order_relaxed);
         int finishRounds = kFinishRounds[intensity > 2 ? 1 : intensity];
 
-        // M4 gravity shadow (plan Part 9), built ONCE — the morphed body is fixed
+        // M4 gravity shadow (plan Part 9), built ONCE â€” the morphed body is fixed
         // during finishing. The push is applied INSIDE the loop below (not as a final
         // post-pass) so each subsequent smoothing round redistributes it into coherent
         // hinge rotations (bend-don't-stretch, Part 9.3) rather than per-vertex jags.
         // Belt excluded (rest-on garment, owned by the M1 ARAP pass). Ships dark
         // (kGravityShadow=false); DRAPE_SHADOW=1 forces it on for harness A/B.
-        // Scope: LOOSE_DRAPED hangers only (dress skirt, cloak) — the garments the
+        // Scope: LOOSE_DRAPED hangers only (dress skirt, cloak) â€” the garments the
         // gravity-shadow (a hang-in-gravity model) actually describes. Tubular/fitted
         // pieces (pants) and rest-on pieces (belt, ARAP) follow their support instead,
         // per Part 9.5, so they keep their existing paths.
@@ -7074,11 +7074,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (drapeEl[i] >= 0.20f) collideVertex(i, 1.0f);
         }
 
-        // â”€â”€ Loose anti-tuck rule (radial fallback, pre-M4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Loose anti-tuck rule (radial fallback, pre-M4) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // Going DOWN the garment, dist-to-body can only INCREASE (new contact) or hold
         // steady (vertical fall), never decrease abruptly (tuck-in). Running max of
         // dist-to-body per angular bin; verts below the floor are pushed out along
-        // (bodyâ†’vert). Single central axis (RadialBin) â€” the geometry M4's shadow
+        // (bodyÃ¢â€ â€™vert). Single central axis (RadialBin) Ã¢â‚¬â€ the geometry M4's shadow
         // replaces, so this runs ONLY when the shadow is not handling the anti-tuck.
         if (useContactRadial) {
             int movedTotal = 0;
@@ -7120,7 +7120,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 float dist = std::sqrt(d2);
                 Vec3 toVert = Sub(finalVerts[i], cp);
                 float tl = Len(toVert);
-                // Direction FROM body surface TOWARD vert â€” stable at any distance,
+                // Direction FROM body surface TOWARD vert Ã¢â‚¬â€ stable at any distance,
                 // unlike the face normal which diverges when extrapolated far away.
                 Vec3 awayDir = (tl > 1.0e-5f) ? Scale(toVert, 1.0f / tl) : nrm;
                 dv2.push_back({i, finalVerts[i].z, dist, cp, awayDir});
@@ -7167,19 +7167,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Post-finishing stretch cap (THE TEAR FIX) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Post-finishing stretch cap (THE TEAR FIX) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // The finishing passes above (BVH push-out, loose anti-tuck) move verts to
     // absolute distances from the body WITHOUT any edge-length limit. On a slim
-    // garment over a heavy body this blew edges up to 15Ã— rest (measured: cloak went
-    // from 1.7Ã— right after the verlet cap to 15Ã— by here). The verlet cap in the
-    // solve loop can't help â€” these passes run AFTER it. Re-apply the SAME hard cap
+    // garment over a heavy body this blew edges up to 15Ãƒâ€” rest (measured: cloak went
+    // from 1.7Ãƒâ€” right after the verlet cap to 15Ãƒâ€” by here). The verlet cap in the
+    // solve loop can't help Ã¢â‚¬â€ these passes run AFTER it. Re-apply the SAME hard cap
     // here so no edge can leave this function over-stretched. Symmetric 50/50 split so
     // it works even between anchored verts (which have invMass 0). Global fix: any
     // garment, any preset that uses the finishing path.
     if (params.verletCloth && !useEdges.empty()) {
         const float kPostCap = 1.12f;     // tight cap, close to the solve cap (1.10)
-        // Many iterations: a 10Ã—+ stretched cluster needs the correction to PROPAGATE
-        // across the mesh (Gauss-Seidel), and 4 passes left the cloak at 11Ã— (28 torn
+        // Many iterations: a 10Ãƒâ€”+ stretched cluster needs the correction to PROPAGATE
+        // across the mesh (Gauss-Seidel), and 4 passes left the cloak at 11Ãƒâ€” (28 torn
         // edges). 24 passes converge it down to the cap.
         for (int it = 0; it < 24; ++it) {
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
@@ -7241,9 +7241,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Final anti-clip pass (all verts, verletCloth + BVH) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Final anti-clip pass (all verts, verletCloth + BVH) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Anchored verts (drapeEl < 0.20) return to supportVerts (vanilla conform),
-    // which can be inside the morphed body â€” they're never touched by the drape
+    // which can be inside the morphed body Ã¢â‚¬â€ they're never touched by the drape
     // collision. A small-clearance BVH push on every vert catches these without
     // disturbing verts that are already correctly positioned outside the body.
     // Clearance is intentionally smaller (0.15) than bodyClearance so it only
@@ -7279,27 +7279,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
     worstStretch("after-solve");
 
-    // NOTE: the per-vertex anti-clip pass runs LATER, AFTER seam-close â€” see below.
+    // NOTE: the per-vertex anti-clip pass runs LATER, AFTER seam-close Ã¢â‚¬â€ see below.
     // Running it here let seam-close drag the tucked verts back to a clipping position
     // (seam-close restores cross-island vanilla offsets and was undoing the anti-clip).
 
-    // â”€â”€ Rigid-island pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Rigid-island pass Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // A medallion, buckle or plate should TRANSLATE with the morphing body but
-    // keep its own shape â€” vanilla conform deforms it vertex-by-vertex (the
+    // keep its own shape Ã¢â‚¬â€ vanilla conform deforms it vertex-by-vertex (the
     // medallion bulges with the breast under it). Replace each rigid island's
     // per-vertex motion with a single rigid translation: the average
     // (supportVert - baseVert) over the island. Shape is preserved exactly.
     //
     // Two triggers:
-    //   (a) Whole-mesh Rigid preset â†’ every island is rigid.
+    //   (a) Whole-mesh Rigid preset Ã¢â€ â€™ every island is rigid.
     //   (b) Loose/Fitted mesh with geometry-detected rigid islands (islandRigidOut)
-    //       â†’ only those islands (the merged medallion/buckle) are rigidified; the
+    //       Ã¢â€ â€™ only those islands (the merged medallion/buckle) are rigidified; the
     //       skirt/sleeves keep their cloth solve. This is the "merged accessory"
     //       case the prototype validated.
     bool wholeMeshRigid = (normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
                            normPreset == DRAPE_PRESET_RIGID_ARMOR);
     // haveMergedRigid: geometry-detected rigid plates inside a Loose/Fitted mesh
-    // (merged medallion case). Disabled for now â€” causes arm shrinkage regression
+    // (merged medallion case). Disabled for now Ã¢â‚¬â€ causes arm shrinkage regression
     // when the island BFS labelling doesn't perfectly match the rigid pass's view.
     // Re-enable once per-island logging confirms correct island identification.
     // bool haveMergedRigid = false;
@@ -7341,7 +7341,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (id < 0 || !islandIsRigid(id)) continue;
             // Include ALL verts in the average, not just rawDiff-touched ones.
             // Chain links and other accessories with near-zero skin weight produce
-            // rawDiff â‰ˆ 0, making islandCount stay 0 and the island get no shift.
+            // rawDiff Ã¢â€°Ë† 0, making islandCount stay 0 and the island get no shift.
             // For rigid translate, every vert contributes its supportVert displacement.
             islandShift[(size_t)id] = Add(islandShift[(size_t)id], Sub(supportVerts[i], baseVerts[i]));
             ++islandCount[(size_t)id];
@@ -7392,10 +7392,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 islandShift[(size_t)id] = islandShift[(size_t)bestSrc];
         }
 
-        // â”€â”€ Chain/cordÃ£o per-vert IDW shift â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Chain/cordÃƒÂ£o per-vert IDW shift Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // A necklace chain (isl#10 in Medallions) is a single large island that
         // spans between multiple medallion islands.  Applying one mean shift to all
-        // 153 chain verts translates the whole chain as a block â†’ chain floats away
+        // 153 chain verts translates the whole chain as a block Ã¢â€ â€™ chain floats away
         // from the medallions when the body morphs.
         //
         // Fix: identify "chain" islands (large rigid islands whose mean shift is
@@ -7408,7 +7408,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // In practice for this mesh: 153-vert chain vs 13/26-vert medallions.
         const int kChainVertThresh = 60;  // islands larger than this are chain candidates
 
-        // Collect "anchor" islands: rigid, small (â‰¤ kChainVertThresh verts), real shift.
+        // Collect "anchor" islands: rigid, small (Ã¢â€°Â¤ kChainVertThresh verts), real shift.
         struct AnchorIsl { int id; Vec3 centroid; Vec3 shift; };
         std::vector<AnchorIsl> anchors;
         for (int id = 0; id < nIsl; ++id) {
@@ -7419,15 +7419,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
 
         // For each chain island, build a per-vert shift table via IDW from anchors.
-        // Key: island id â†’ vector<Vec3> indexed by position in the full vert array.
-        // We store as a flat map vertIdxâ†’shift.
+        // Key: island id Ã¢â€ â€™ vector<Vec3> indexed by position in the full vert array.
+        // We store as a flat map vertIdxÃ¢â€ â€™shift.
         std::unordered_map<size_t, Vec3> chainVertShift;
         if (!anchors.empty()) {
             for (size_t i = 0; i < n; ++i) {
                 int id = island[i];
                 if (id < 0 || !islandIsRigid(id)) continue;
                 if (islandSizeR[(size_t)id] <= kChainVertThresh) continue;  // not a chain island
-                // IDW: weight = 1/distÂ² to each anchor centroid.
+                // IDW: weight = 1/distÃ‚Â² to each anchor centroid.
                 Vec3 sumShift{0,0,0};
                 float sumW = 0.0f;
                 for (const auto& a : anchors) {
@@ -7468,7 +7468,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
         stats.collisionAdjusted += rigidVerts;
 
-        // â”€â”€ Rigid-border seam closure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Rigid-border seam closure Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // After rigid translate, the border verts of rigid islands (belt, buckle)
         // sit at their correct translated positions. The adjacent cloth verts (bodice
         // bottom edge, skirt top edge) were placed by the PBD solver independently
@@ -7504,7 +7504,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             if ((size_t)j == i) continue;
                             int idj = islandIdOut[j];
                             if (idj == idi) continue;           // same island
-                            if (islandIsRigid(idj)) continue;   // both rigid â€” skip
+                            if (islandIsRigid(idj)) continue;   // both rigid Ã¢â‚¬â€ skip
                             if (Len2(Sub(baseVerts[j],p)) > kBorderNear2) continue;
                             // Pull cloth vert j to restore vanilla offset from rigid vert i.
                             Vec3 vanOff = Sub(supportVerts[j], supportVerts[i]);
@@ -7522,14 +7522,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // â”€â”€ Cross-island seam closure (ROOT-CAUSE FIX for the back hole) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Cross-island seam closure (ROOT-CAUSE FIX for the back hole) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Root cause (proven by gap-diag instrumentation): the garment has separate
     // islands that BUTT against each other at the waist with NO triangle spanning
     // the join and only a small (~0.4u) vanilla separation. Vanilla conform moves
     // both sides by the same body diff, so the unmodeled seam stays sub-pixel. Our
     // physics moves each side independently (no edge links them, and the welds only
     // catch EXACTLY-coincident verts at 0.01u, not these 0.4u seams), so the sides
-    // drift apart â€” measured up to 4.0u â€” opening the seam into a visible hole.
+    // drift apart Ã¢â‚¬â€ measured up to 4.0u Ã¢â‚¬â€ opening the seam into a visible hole.
     //
     // Fix: for each near-touching cross-island base pair, restore the VANILLA
     // relative offset (supportVerts[j]-supportVerts[i]). Both sides keep the drape
@@ -7540,13 +7540,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (params.verletCloth && !islandIdOut.empty() && islandIdOut.size() == n) {
         // near-touching radius: 0.65u catches the back butt-joint (vanSep~0.4) AND
         // the belt-strap mini-island gaps (slightly wider). Front-to-back false
-        // pairs are impossible â€” those are >5u apart (body width). Cell â‰¥ radius so
+        // pairs are impossible Ã¢â‚¬â€ those are >5u apart (body width). Cell Ã¢â€°Â¥ radius so
         // the 27-cell neighbour search covers the radius.
         const float kNear  = 0.65f;
         const float kNear2 = kNear * kNear;
         // RIGID-edge seams open WIDER: a rigid plate (the hip leather flap) has a step/
         // thickness, so its border verts and the adjacent cloth start farther apart than
-        // 0.65u in the base mesh â€” the seam-close never even considered them, leaving a
+        // 0.65u in the base mesh Ã¢â‚¬â€ the seam-close never even considered them, leaving a
         // visible gap when the plate rigid-translates away from the cloth in the morph
         // (the hole the user circled). Use a larger radius when ONE side is rigid so the
         // plate-to-cloth seam is caught and pinned to its vanilla offset. Cell scales up.
@@ -7574,7 +7574,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         if ((size_t)j<=i) continue;
                         if (islandIdOut[j]==islandIdOut[i]) continue;     // same island
                         // Rigid-island verts (medallion/buckle/hip-plate) must keep their
-                        // exact translated shape â€” never move them. If BOTH sides are
+                        // exact translated shape Ã¢â‚¬â€ never move them. If BOTH sides are
                         // rigid, skip; if ONE is rigid, the loose side takes the full fix.
                         bool ri = (islandIdOut[i] >= 0 && islandIdOut[i] < (int)islandRigidOut.size()
                                    && islandRigidOut[(size_t)islandIdOut[i]]);
@@ -7597,12 +7597,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         // Distribute the correction: a rigid side never moves; otherwise
                         // the looser (higher drape) vert yields more.
                         float wi, wj;
-                        if (ri)      { wi = 0.0f; wj = 1.0f; }   // i rigid â†’ only j moves
-                        else if (rj) { wi = 1.0f; wj = 0.0f; }   // j rigid â†’ only i moves
+                        if (ri)      { wi = 0.0f; wj = 1.0f; }   // i rigid Ã¢â€ â€™ only j moves
+                        else if (rj) { wi = 1.0f; wj = 0.0f; }   // j rigid Ã¢â€ â€™ only i moves
                         else {
                             float di = drapeAmount[i], dj = drapeAmount[j];
                             float sum = di + dj;
-                            wi = (sum > 1e-4f) ? dj / sum : 0.5f; // i takes share âˆ other's drape
+                            wi = (sum > 1e-4f) ? dj / sum : 0.5f; // i takes share Ã¢Ë†Â other's drape
                             wj = 1.0f - wi;
                         }
                         finalVerts[i] = Add(finalVerts[i], Scale(err, wi));
@@ -7647,26 +7647,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     }
 
 
-    // â”€â”€ Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // MUST run AFTER seam-close (which restores cross-island offsets and would undo it).
-    // This is the LAST geometry pass â€” its corrections are the final word.
+    // This is the LAST geometry pass Ã¢â‚¬â€ its corrections are the final word.
     //
     // ONE-DIRECTIONAL by layer rank (addresses the review): the collider is built ONLY
     // from garments ABOVE this one (strictly higher rank). The rule only ever PULLS THIS
-    // mesh IN under them â€” it never pushes the outer mesh out, so the outermost layer (a
-    // fur cloak) is never deformed (it gets no collider at all â†’ untouched).
+    // mesh IN under them Ã¢â‚¬â€ it never pushes the outer mesh out, so the outermost layer (a
+    // fur cloak) is never deformed (it gets no collider at all Ã¢â€ â€™ untouched).
     //
     // REAL CLEARANCE, not just order-sign inversion (addresses the review): a vert is
-    // corrected whenever it fails to sit at least kClearance UNDER the outer surface â€”
+    // corrected whenever it fails to sit at least kClearance UNDER the outer surface Ã¢â‚¬â€
     // i.e. it has popped outside, is coincident, OR is merely grazing within the margin.
     //
     // Metric = signed body-gap (distance to the body surface along the body normal),
     // which is well-defined on shoulders/back where radial-from-axis was degenerate.
     // BUT only act where the BASE mesh had THIS vert genuinely UNDER the outer mesh
-    // (myBaseGap < otherBaseGap) â€” so we never invert a region where this mesh is
+    // (myBaseGap < otherBaseGap) Ã¢â‚¬â€ so we never invert a region where this mesh is
     // legitimately the outer one locally (dress-over-pants-at-hip etc. stays correct).
     // DISABLED: re-enabling the tuck made tearing WORSE on a second outfit (Yarl
-    // Clothes 1) â€” generalized vertical rips across the dress. Moving inner-garment
+    // Clothes 1) Ã¢â‚¬â€ generalized vertical rips across the dress. Moving inner-garment
     // verts along the body normal is fundamentally a tearing operation, no matter how
     // soft. The tuck is OFF until replaced by a non-moving approach (collapse-to-
     // neighbour suppression). Layer clipping is left to the user's zap slider for now.
@@ -8258,7 +8258,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     }
 
     const bool kEnableAntiClipTuck = false;
-    // â”€â”€ REDESIGN STEP 1: master switch OFF for the whole tangled anti-clip block â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ REDESIGN STEP 1: master switch OFF for the whole tangled anti-clip block Ã¢â€â‚¬Ã¢â€â‚¬
     // Per the architecture review (ANTICLIP_ARCHITECTURE_REVIEW.md): disable the entire
     // post-solve anti-clip (tuck + collapse + suppress + cleanup) to establish a CLEAN,
     // tear-free BASE we can compare against. Code is kept (not deleted) until the new
@@ -8294,10 +8294,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // armor/belt sits thicker and needs more.
         auto clearanceFor = [](int outerPreset) -> float {
             switch (NormalizePreset(outerPreset)) {
-            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.20f;  // cloak/cape â€” small
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.20f;  // cloak/cape Ã¢â‚¬â€ small
             case DRAPE_PRESET_RIGID_ARMOR:
-            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.45f;  // armor â€” thick
-            case DRAPE_PRESET_BELT:            return 0.40f;  // belt â€” thick
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.45f;  // armor Ã¢â‚¬â€ thick
+            case DRAPE_PRESET_BELT:            return 0.40f;  // belt Ã¢â‚¬â€ thick
             default:                           return 0.30f;
             }
         };
@@ -8331,14 +8331,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (myGap <= allowed) continue;            // already tucked under this one
 
                     // BODY-CLAMP (review #2): never pull a vert closer to the body than a
-                    // tiny floor â€” if the outer mesh hugs the body so tight there's no room
+                    // tiny floor Ã¢â‚¬â€ if the outer mesh hugs the body so tight there's no room
                     // for the inner garment, do NOT reintroduce body clipping. Tuck only as
                     // far as the floor allows (partial fix beats a body poke-through).
                     const float kBodyFloor = 0.06f;            // min gap to keep off the body
                     float target = std::max(allowed, kBodyFloor);
                     if (myGap <= target) continue;
                     // SOFT push (half-step), not a hard snap: moving each vert all the
-                    // way at once tears the mesh (neighbours move by different amounts â†’
+                    // way at once tears the mesh (neighbours move by different amounts Ã¢â€ â€™
                     // edges over-stretch). The stretch relax below pulls neighbours along.
                     float step = (target - myGap) * 0.5f;
                     finalVerts[i] = Add(finalVerts[i], Scale(myNrm, step));
@@ -8350,7 +8350,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (roundMoved == 0) break;
         }
         // Relax over-stretch so the tuck pulls neighbours along instead of ripping.
-        // Asymmetric (resist stretch only) against the conformed rest length â€” same
+        // Asymmetric (resist stretch only) against the conformed rest length Ã¢â‚¬â€ same
         // constraint the main solver uses, so it never fights body-induced expansion.
         if (tucked > 0 && !useEdges.empty()) {
             for (int it = 0; it < 6; ++it) {
@@ -8372,11 +8372,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: anti-clip shape='%s' tuckedUnder=%d outers=%zu",
                  shapeName.c_str(), tucked, outerColliders->size());
 
-        // â”€â”€ Covered-vertex COLLAPSE (zap-style hide, no rips) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Covered-vertex COLLAPSE (zap-style hide, no rips) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // For verts that are genuinely COVERED by an outer garment AND have no room to
         // tuck (body conflict), we hide them WITHOUT moving visible geometry: collapse
         // each fully-covered vert onto a covered neighbour so its triangles become
-        // zero-area and vanish. Unlike moving verts (which tears â€” neighbours move by
+        // zero-area and vanish. Unlike moving verts (which tears Ã¢â‚¬â€ neighbours move by
         // different amounts), a collapse only ever shrinks an edge to length 0, so no
         // edge over-stretches. The CRUCIAL rule: a vert is collapsible ONLY if it AND
         // all its topological neighbours are covered (erode the region by one ring), so
@@ -8404,7 +8404,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // This vert was UNDER the outer garment in the base (checked above via
                     // baseBodyGap), so it is meant to be hidden by it. It CLIPS if its
                     // current body-gap is at/above the outer surface (poking out from under
-                    // the cloak). Hide it by collapse. We do NOT require a body conflict â€”
+                    // the cloak). Hide it by collapse. We do NOT require a body conflict Ã¢â‚¬â€
                     // any covered vert that pokes through is invisible-by-design and safe to
                     // collapse. Small tolerance so we only catch genuine pokethrough.
                     if (myGap > outerGap - 0.05f) {
@@ -8418,15 +8418,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (const auto& e : useEdges)
                 if (e.a < n && e.b < n) { adj[e.a].push_back(e.b); adj[e.b].push_back(e.a); }
             // 3) Collapse each COVERED vert that has at least one covered neighbour onto
-            //    that neighbour (shared edge â†’ length 0 â†’ triangle vanishes). A covered
+            //    that neighbour (shared edge Ã¢â€ â€™ length 0 Ã¢â€ â€™ triangle vanishes). A covered
             //    vert with NO covered neighbour is an isolated pokethrough on the boundary;
             //    collapsing it would pull a visible edge, so we leave it. Reading targets
             //    from a SNAPSHOT of the pre-collapse positions avoids chained drift.
             // 3) HIDE the covered region by sinking each covered vert to the body
-            //    surface, MINUS a depth â€” but only verts whose neighbours are ALSO covered
+            //    surface, MINUS a depth Ã¢â‚¬â€ but only verts whose neighbours are ALSO covered
             //    move the full depth; boundary verts (some neighbour visible) blend, so the
             //    surface tapers smoothly into the body instead of ripping. Because the sink
-            //    is along the body normal and the depth varies smoothly (full interior â†’
+            //    is along the body normal and the depth varies smoothly (full interior Ã¢â€ â€™
             //    zero at the visible boundary), no edge over-stretches: it is a smooth dent,
             //    not an isolated spike. The dented region is under the outer garment, so the
             //    dent is invisible and the pokethrough is gone.
@@ -8467,13 +8467,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                      shapeName.c_str(), coveredCount, collapsed);
         }
 
-        // â”€â”€ Covered-vertex suppression (DISABLED) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Covered-vertex suppression (DISABLED) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // The idea (zap covered inner verts where there's no room) is sound, but this
         // implementation moves verts deep INTO the body to hide them, which tears the
         // mesh: a hidden vert pulled 1-2u inward while its neighbours stay put creates
         // stretched/ripped triangles (observed hidden=172 feathered=475 deepestGap=-2.25).
         // The correct "hide" is collapsing a covered vert ONTO a neighbour (zero-area),
-        // not pushing it through the body â€” left for a future rewrite. For now the
+        // not pushing it through the body Ã¢â‚¬â€ left for a future rewrite. For now the
         // tuck-only pass above handles the easy cases; residual covered clipping is left
         // for the user's zap slider (no rips). Kept compiled-but-dead for reference.
         const bool kEnableSuppress = false;
@@ -8689,7 +8689,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!oc.Base().valid || !oc.Current().valid) continue;
             const float kClearance = clearanceFor(oc.preset);
             int stillBad = 0, bodyConflict = 0; float worstPen = 0, worstZ = 0, sumZ = 0;
-            float sumOuterGap = 0, minOuterGap = 1e9f;   // real bodyâ†”outer gap at conflict pts
+            float sumOuterGap = 0, minOuterGap = 1e9f;   // real bodyÃ¢â€ â€outer gap at conflict pts
             for (size_t i = 0; i < n; ++i) {
                 Vec3 bcp{0,0,0}, bn{0,0,1}; float bd2 = 0.0f;
                 int baseTri = -1; float bu = 0.0f, bv = 0.0f, bw = 0.0f;
@@ -9033,7 +9033,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
 
     // `force` bypasses the preset/size gate: callers that themselves BREAK the seam
-    // invariant (the body-volume rounds push twins along diverging normals — measured
+    // invariant (the body-volume rounds push twins along diverging normals â€” measured
     // 272 base-coincident pairs torn to 10.4u on the 10k-vert Vampire robes, which the
     // compact-loose gate excludes) must be able to restore it regardless of preset.
     auto applyFinalExactSeamWeld = [&](const char* stageLabel, bool force = false) -> int {
@@ -10082,12 +10082,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 }
             }
 
-            // Centre-line lateral restore, BOTH panels (front and back — the one-sided
+            // Centre-line lateral restore, BOTH panels (front and back â€” the one-sided
             // back-margin filter left the back seam free to wander). Target is the
             // AUTHORED lateral position (baseVerts.x), not supportVerts (vanilla): on a
             // laterally-symmetric body a centre seam has no legitimate reason to migrate
-            // sideways, and the verlet solve otherwise lets it meander ±1.8u (measured,
-            // Blacksmith apron back seam — the user-visible "linha entortando"). Vanilla
+            // sideways, and the verlet solve otherwise lets it meander Â±1.8u (measured,
+            // Blacksmith apron back seam â€” the user-visible "linha entortando"). Vanilla
             // as target would CEMENT whatever lateral error vanilla carries (+1.0 at the
             // waist band on this outfit).
             if (centerBand > 0.0f && centerStrength > 0.0f &&
@@ -10293,7 +10293,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // ── M3.1: final unified contact+stretch convergence (kUnifiedContact / DRAPE_UNIFIED) ──
+    // â”€â”€ M3.1: final unified contact+stretch convergence (kUnifiedContact / DRAPE_UNIFIED) â”€â”€
     // The last word on body-contact AND edge-length, projected TOGETHER. Every finishing
     // pass above moves verts and can re-violate the OTHER's invariant (a body push
     // re-stretches an edge; a stretch cap pulls a vert back into the body); running them
@@ -10314,7 +10314,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float pushK = EnvFloat("DRAPE_UNIFIED_PUSH", 0.3f);
         int capped = 0, pushed = 0;
         for (int it = 0; it < kIters; ++it) {
-            // (a) edge stretch cap (symmetric 50/50, pin-aware — a pinned/free edge lets
+            // (a) edge stretch cap (symmetric 50/50, pin-aware â€” a pinned/free edge lets
             //     the free end take the whole correction so the edge can't escape).
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                 const auto& e = useEdges[ei];
@@ -10349,7 +10349,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), kIters, capped, pushed);
     }
 
-    // ── Hanging-panel flatten (thigh-bump fix, 2026-07-03; kPanelFlatten / DRAPE_PANELS) ──
+    // â”€â”€ Hanging-panel flatten (thigh-bump fix, 2026-07-03; kPanelFlatten / DRAPE_PANELS) â”€â”€
     // ROOT CAUSE (measured, captures/Fur+Blacksmith): a garment authored HANGING off the
     // base body (per-vert authored gap grows where the body recedes, e.g. an apron over
     // the back of the thigh) gets its per-vert authored gaps re-applied over the MORPHED
@@ -10357,7 +10357,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // forming a straight hang and become a LOCAL LUMP over the thigh ("bump"), inherited
     // by our correction-mode presets (Fitted/Tubular preserve the authored gap by design).
     // RULE-BASED FIX (minimal): cloth with a large AUTHORED gap is not in designed contact
-    // there — it is hanging — and hanging cloth between contacts is straight/smooth; a
+    // there â€” it is hanging â€” and hanging cloth between contacts is straight/smooth; a
     // local lump has nothing supporting it. So: Laplacian-smooth ONLY the verts whose
     // authored gap says "hanging" (>= gapMin), inside a small convergence loop with the
     // edge cap + one-way body floor (M3.1 mechanics) so smoothing can't stretch or clip.
@@ -10375,21 +10375,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // loose solve inherited 5.76 (5th vanilla-inherited defect). All components target
     // AUTHORED data with contact-aware feathering, so the same gates apply.
     const bool panelsLoose = params.verletCloth && EnvToggle("DRAPE_PANELS_LOOSE", false);  // P2 toggle, ships dark
-    // RADIAL §6 concave-contact bridge ("pit bridge", 2026-07-08): cloth that FOLLOWED
-    // the body into a valley between two masses (the arm<->torso canyon at RM_Heavy —
+    // RADIAL Â§6 concave-contact bridge ("pit bridge", 2026-07-08): cloth that FOLLOWED
+    // the body into a valley between two masses (the arm<->torso canyon at RM_Heavy â€”
     // user's armpit crater; same family as the cofrinho) is IN CONTACT, but that contact
-    // came from nearest-point magnetism, not from the body pushing — the radial rule
+    // came from nearest-point magnetism, not from the body pushing â€” the radial rule
     // forbids treating it as support. Those verts get the same authored-curvature
     // restore below, OUTWARD-only, which lifts them to the span of their ring (the
     // bridge). Vanilla-inherited defect #6 (measured: vanilla and our output have the
     // identical crater; authored is clean), so it runs on BOTH solve paths.
-    // Skin-tight is excluded BY THE RULE (§5): it is the one behaviour where following
+    // Skin-tight is excluded BY THE RULE (Â§5): it is the one behaviour where following
     // the body into a concavity is correct, so "contact in a valley" is not a defect
     // there (caught on falmer Undies: pit lifts blew its stretch/bend energy up ~50%).
     // SHIPS OFF (2026-07-08): scored against the author's hand-sculpted RM_Heavy
     // reference, both pit variants LOSE (fitted path: 1.49 off / 1.54 on; and the v2
     // chord leaves a visible pinwheel at the pit from the front). The sculpt shows the
-    // real target — the pit FILLED to a shallow arm↔chest transition — which none of
+    // real target â€” the pit FILLED to a shallow armâ†”chest transition â€” which none of
     // the local operators built so far produce. v3 must be designed against the sculpt
     // reference (tools/osd_extract.py + tools/error_map.py). Knob kept for that work.
     const bool pitOn = EnvToggle("DRAPE_PIT_BRIDGE", false) &&
@@ -10425,11 +10425,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // Per-vert weights instead of a hard on/off (hard cutoffs read as visible lines):
         //  - authored feather (wAuth): ramps in over 1u above gapMin ("authored hanging").
         //  - contact feather (wContact): curvature at verts NEAR the morphed body is the
-        //    body PUSHING the cloth (the user's rule — legitimate contact like the butt
+        //    body PUSHING the cloth (the user's rule â€” legitimate contact like the butt
         //    apex, measured solvedGap 1.3-2.2), NOT a morph lump (bump floats at 2.4-5.5).
         //    Ramp 1.8->3.0. Applied DIRECTIONALLY below: INWARD corrections are gated by
         //    wAuth*wContact (never flatten a contact shape), while OUTWARD corrections use
-        //    wAuth alone — cloth spanning a CONCAVE body feature (the gluteal fold the
+        //    wAuth alone â€” cloth spanning a CONCAVE body feature (the gluteal fold the
         //    drape "draws" through the panel) may lift out of the hollow ("hollows get
         //    BRIDGED", the rule's third clause) without ever being pulled into the body.
         std::vector<uint8_t> eligible(n, 0);
@@ -10437,7 +10437,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         size_t nElig = 0, nPit = 0;
         // Ring-average positions (plain 1-ring) for the pit-bridge concavity test: a
         // vert sitting closer to the body than the point its ring spans is INSIDE a
-        // hollow that fitted/draped cloth should bridge (RADIAL_DRAPE_RULE §6).
+        // hollow that fitted/draped cloth should bridge (RADIAL_DRAPE_RULE Â§6).
         std::vector<Vec3> ringBase(n), ringCur(n);
         std::vector<int>  ringN(n, 0);
         if (pitOn) {
@@ -10459,7 +10459,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // magnetism only; airborne hollows belong to gravity-shadow/hbridge.
         const float pitNearGap  = EnvFloat("DRAPE_PIT_NEAR", 1.8f);
         // Second pit signal: triangle-quality COLLAPSE vs authored. The crater's visible
-        // wedges are knife-fold WALLS — verts slid TANGENTIALLY into the crease line, so
+        // wedges are knife-fold WALLS â€” verts slid TANGENTIALLY into the crease line, so
         // the ring-depth test misses them (their ring dips INTO the fold, depth<0) and a
         // quality drop (authored 0.44 -> solved 0.15, measured) is the direct, basis-free
         // measurement of that tangential distortion (same null-space the azimuth restore
@@ -10544,16 +10544,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
             if (wOut[i] > 0.0f || wPit[i] > 0.0f) { eligible[i] = 1; ++nElig; }
         }
-        // §6 CHORD BRIDGE (2026-07-08, v2 — the user-visible crater): the defect verts
-        // sit at their AUTHORED clearance on a body whose morph created a deep arm↔torso
-        // wedge — the cloth copies a body concavity that authored never had (the radial
+        // Â§6 CHORD BRIDGE (2026-07-08, v2 â€” the user-visible crater): the defect verts
+        // sit at their AUTHORED clearance on a body whose morph created a deep armâ†”torso
+        // wedge â€” the cloth copies a body concavity that authored never had (the radial
         // rule violation in its purest form). No local operator fixes that: normal moves
         // dead-end into the opposite canyon wall, rim CENTROIDS fall inside the arm
         // (measured, gRimCur=-3.0), and the axis-radial hbridge cannot even see the
         // wedge (the arm occludes it at the same angle). The bridge must span the wedge
         // MOUTH: for each pit vert take its 3-ring rim, pick the most ANTIPODAL pair
         // (the two sides of the crease), and lift the vert toward the SEGMENT between
-        // them — stopping at the depth the AUTHORED design kept below its own chord, so
+        // them â€” stopping at the depth the AUTHORED design kept below its own chord, so
         // designed hollows survive. Basin coverage: dilate eligibility 2 rings first
         // (contact-gated), because the basin interior is locally smooth and unsignalled.
         size_t nChord = 0;
@@ -10638,7 +10638,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         }
                     }
                 }
-                if (bestDot > -0.3f) continue;   // no genuinely opposite pair — not a crease
+                if (bestDot > -0.3f) continue;   // no genuinely opposite pair â€” not a crease
                 chordIdx.push_back((uint32_t)i);
                 chordEnds.push_back({bj, bk});
                 chordDepthAuth.push_back(
@@ -10707,7 +10707,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // whose edge touches an eligible one, so twins with no eligible member
                 // can still be split by this pass (caught 2026-07-08: pit-bridge edge
                 // caps opened the apron's centre-back seam). A pass welds everything it
-                // can move — vampire-tear lesson, 4th application.
+                // can move â€” vampire-tear lesson, 4th application.
                 for (const auto& g : seamGroups) {
                     Vec3 m{0.0f, 0.0f, 0.0f};
                     for (uint32_t vi : g) m = Add(m, finalVerts[vi]);
@@ -10718,7 +10718,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // Representative map: all seam twins share one accumulator slot, so their
             // Laplacian/normal see the UNION of both sides' neighbourhoods (a full disc).
             // Without this each twin has a one-sided half-disc whose average sits INSIDE
-            // a convex surface — a persistent inward bias that (c - c0) cannot cancel
+            // a convex surface â€” a persistent inward bias that (c - c0) cannot cancel
             // once the morph rescales it, visibly pulling the seam line inward (user-
             // caught: crease down the apron's centre-back seam, front fine).
             std::vector<uint32_t> rep(n);
@@ -10727,7 +10727,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 for (uint32_t vi : g) rep[vi] = g[0];
             // AUTHORED curvature field c0: the normal component of each vert's Laplacian
             // in the BASE mesh. The pass restores this field rather than flattening to
-            // zero — a fur tuft or sculpted fold (authored curvature) satisfies c≈c0 and
+            // zero â€” a fur tuft or sculpted fold (authored curvature) satisfies câ‰ˆc0 and
             // is untouched; only curvature the MORPH created (the lump: authored smooth,
             // morphed bumpy) is removed. Same D3 principle as the belt's authored offset.
             std::vector<float> c0(n, 0.0f);
@@ -10831,7 +10831,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float c = Dot(lap, nrm);
                     // Scale the authored curvature to the CURRENT local mesh scale: a
                     // uniformly inflated surface (RM_Heavy widening the back panel) has
-                    // c ~ s*c0 with the same shape — comparing against unscaled c0 left
+                    // c ~ s*c0 with the same shape â€” comparing against unscaled c0 left
                     // a persistent (c - c0) < 0 wherever the panel grew, strongest at the
                     // most-curved centre-back line (user-caught inward crease). Against
                     // s*c0, pure scaling is equilibrium; only SHAPE change (the lump) moves.
@@ -10840,15 +10840,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
                     float delta = (c - c0[i] * s) * smoothK;
                     // Directional gating: outward (+normal) may bridge hollows even in
-                    // contact zones (hanging wOut, and pit-bridge wPit — in the crater
+                    // contact zones (hanging wOut, and pit-bridge wPit â€” in the crater
                     // the ring average sits outward, so c >> c0 and delta is outward,
                     // lifting the vert to the bridge); inward is blocked near contact.
                     delta *= (delta > 0.0f) ? std::max(wOut[i], wPit[i]) : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
                 }
-                // (a2) §6 chord bridge: lift each pit vert toward the segment between its
+                // (a2) Â§6 chord bridge: lift each pit vert toward the segment between its
                 // antipodal rim pair (the mouth of the crease), stopping at the depth
-                // the AUTHORED design kept below its own chord. Full-vector — this is
+                // the AUTHORED design kept below its own chord. Full-vector â€” this is
                 // the move that exits the body wedge tangentially; the caps, floor,
                 // interlayer ceiling and welds below keep every step safe.
                 if (nChord > 0) {
@@ -10895,7 +10895,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // Azimuthal restore (lateral bow fix): pull each hanging vert's SIDEWAYS
                 // Laplacian back to its authored value. Direction is tangent around the
                 // body axis, so it can neither approach nor leave the body (no magnetism,
-                // no ballooning) — it only slides the panel laterally back to the authored
+                // no ballooning) â€” it only slides the panel laterally back to the authored
                 // line where vanilla's between-the-legs projection bent it.
                 if (azimuthK > 0.0f) {
                     for (size_t i = 0; i < n; ++i) {
@@ -10912,7 +10912,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             s = ClampRange((sumd[r] / (float)cnt[r]) / d0[i], 0.5f, 3.0f);
                         // Move OPPOSITE to the deviation: if the neighbourhood average sits
                         // to the vert's left more than authored, the vert itself drifted
-                        // right — slide it back left toward the authored lateral line.
+                        // right â€” slide it back left toward the authored lateral line.
                         float dA = ClampRange((a - a0[i] * s) * azimuthK * wOut[i],
                                               -radialMaxStep, radialMaxStep);
                         if (std::fabs(dA) <= 1.0e-5f) continue;
@@ -10920,7 +10920,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         finalVerts[i].y += azy * dA;
                     }
                 }
-                // (b) edge cap (same pin-aware split as M3.1) — smoothing can't tear.
+                // (b) edge cap (same pin-aware split as M3.1) â€” smoothing can't tear.
                 // Scoped to edges the PASS can move (an eligible endpoint): a global cap
                 // re-polices edges other passes left over 1.12 (the loose path's line
                 // locks do), yanking verts far from any panel/pit into pucker stars
@@ -10947,7 +10947,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, wa));
                     finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, wb));
                 }
-                // (c) one-way body floor on the smoothed verts — smoothing can't clip.
+                // (c) one-way body floor on the smoothed verts â€” smoothing can't clip.
                 if (bodyBVH && bodyBVH->valid) {
                     for (size_t i = 0; i < n; ++i) {
                         if (!eligible[i]) continue;
@@ -10971,7 +10971,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 weldSeams();
             }
             // Pit verts sit ON island junctions (the armpit is the arm<->torso stitch);
-            // per-vert lifts can open prox pairs — restore the invariant here, not at
+            // per-vert lifts can open prox pairs â€” restore the invariant here, not at
             // the end of the wreck (vampire-tear lesson, 3rd application).
             if (nPit > 0)
                 applyFinalProxSeamCap(6, "post-pit-prox-cap");
@@ -10980,47 +10980,47 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // ── Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) ──
+    // â”€â”€ Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) â”€â”€
     // The sculpt-driven fix for the armpit crater (vanilla-inherited defect #6), designed
     // against the author's hand-sculpted RM_Heavy reference (tools/osd_extract.py +
-    // tools/error_map.py). Measured: the defect is not just depth — the side-of-chest
+    // tools/error_map.py). Measured: the defect is not just depth â€” the side-of-chest
     // panel is CRUMPLED (spiky normal fans; compression is free in every pass of this
-    // pipeline, engine null-space #2) and dives into the arm↔torso wedge, while the
-    // sculpt keeps ONE smooth slightly-curved sheet spanning chest→arm (its gap to the
+    // pipeline, engine null-space #2) and dives into the armâ†”torso wedge, while the
+    // sculpt keeps ONE smooth slightly-curved sheet spanning chestâ†’arm (its gap to the
     // morphed body is 1.4u vs our 0.5u, displaced ~3.8u mostly TANGENTIALLY). Per-vert
     // operators cannot restore region-scale smoothness (all measured against the sculpt:
     // c0-restore no-ops, chord bridge loses 1.54 vs 1.49, authored-bind morph transfer
-    // 3.79≈3.78, continuous body sweep 3.80 — the canyon never closes below ~1u so
+    // 3.79â‰ˆ3.78, continuous body sweep 3.80 â€” the canyon never closes below ~1u so
     // squeeze physics never engages; even the best nearby body-delta oracle only reaches
     // 2.56). This pass refits each vert's authored 2-ring patch as a similarity
-    // transform (Müller shape matching: warm-started rotation extraction + scale clamped
+    // transform (MÃ¼ller shape matching: warm-started rotation extraction + scale clamped
     // to [1, smSMax] so regions may GROW with the morph but never shrink below authored)
     // and pulls the vert toward its authored local shape. Gate (frozen from the INPUT
-    // state — a per-iter gate closes as the region smooths and freezes halfway; dilated
+    // state â€” a per-iter gate closes as the region smooths and freezes halfway; dilated
     // 2 rings):
-    //   • AFFINE-fit residual: an affine map absorbs any smooth deformation including
+    //   â€¢ AFFINE-fit residual: an affine map absorbs any smooth deformation including
     //     legitimate anisotropic morph growth, so the leftover is high-freq crumple.
-    //     (A similarity-fit residual also flags smooth anisotropy — skirt regressed.)
-    //   • §6 WEDGE detector: mean body-vertex-normal dispersion within smWedgeR. Only
-    //     between two masses do body normals oppose (arm↔torso, thigh↔thigh); convex
-    //     contact (butt apex — never deflate a contact shape, panel-flatten lesson) and
-    //     the legs under the skirt vent stay coherent → gate closed there. Inside a
+    //     (A similarity-fit residual also flags smooth anisotropy â€” skirt regressed.)
+    //   â€¢ Â§6 WEDGE detector: mean body-vertex-normal dispersion within smWedgeR. Only
+    //     between two masses do body normals oppose (armâ†”torso, thighâ†”thigh); convex
+    //     contact (butt apex â€” never deflate a contact shape, panel-flatten lesson) and
+    //     the legs under the skirt vent stay coherent â†’ gate closed there. Inside a
     //     wedge even a smooth basin gets a floor strength (0.35): the basin interior is
     //     locally smooth but regionally wrong.
-    // Prototype-validated (Blacksmith RM_Heavy vs sculpt): global 1.487→1.428, armpit
-    // hot 3.78→2.77 (max 6.92→4.83), skirt/vent/back untouched, renders clean from
-    // multiple angles. Skin-tight excluded by rule §5 (following concavities is correct
+    // Prototype-validated (Blacksmith RM_Heavy vs sculpt): global 1.487â†’1.428, armpit
+    // hot 3.78â†’2.77 (max 6.92â†’4.83), skirt/vent/back untouched, renders clean from
+    // multiple angles. Skin-tight excluded by rule Â§5 (following concavities is correct
     // there); belts keep their authored float.
     // DEFAULT SCOPE = the validated envelope (sculpt-scored against the author's
     // hand-made RM_Heavy references for all 4 corpus outfits, 2026-07-08):
-    //  • FITTED_CLOTH only. It is the one preset where the pass WINS vs the sculpt
-    //    (BlackSmithTorso 1.482→1.405). Every Tubular/Auto/Rigid garment measured
-    //    LOSES (falmer Leg_Armor 1.37→1.86, Cuirass 1.84→2.08, fur BaseArmor
-    //    1.60→1.75, yarl Pants 1.47→1.59…): their sculpts KEEP the concave-following
+    //  â€¢ FITTED_CLOTH only. It is the one preset where the pass WINS vs the sculpt
+    //    (BlackSmithTorso 1.482â†’1.405). Every Tubular/Auto/Rigid garment measured
+    //    LOSES (falmer Leg_Armor 1.37â†’1.86, Cuirass 1.84â†’2.08, fur BaseArmor
+    //    1.60â†’1.75, yarl Pants 1.47â†’1.59â€¦): their sculpts KEEP the concave-following
     //    look. DRAPE_SM_ALL_PRESETS=1 widens for future reference-driven tuning.
-    //  • Correction path only: the verlet loose solve re-drapes far from authored on
+    //  â€¢ Correction path only: the verlet loose solve re-drapes far from authored on
     //    purpose, so an authored-local-shape restore fights the drape (measured,
-    //    yarl Clothes: worstEdgeStretch 3.4→6.2, maxDisplacement +3.4u, cloak
+    //    yarl Clothes: worstEdgeStretch 3.4â†’6.2, maxDisplacement +3.4u, cloak
     //    conflicts +180). DRAPE_SM_LOOSE ships dark, mirroring DRAPE_PANELS_LOOSE.
     bool smOn = EnvToggle("DRAPE_SHAPEMATCH", true) &&
                 (!params.verletCloth || EnvToggle("DRAPE_SM_LOOSE", false)) &&
@@ -11034,8 +11034,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #endif
     if (smOn && params.enabled && !useEdges.empty() && tris && bodyBVH && bodyBVH->valid &&
         n > 0 && n <= 0xFFFF) {
-        const float smAlpha  = EnvFloat("DRAPE_SM_ALPHA", 0.5f);
-        const int   smIters  = (int)EnvFloat("DRAPE_SM_ITERS", 20.0f);
+        // α=0.8 / iters=40 / dilate=3 (up from 0.5/20/2, 2026-07-09): the user tested
+        // the first build and STILL saw the crater — the conservative pull only reached
+        // armpit gap 0.83 vs the sculpt's 1.43. The harder pull + wider gate reach the
+        // pit's crumpled front rim (frozen at wgM=0.000 with dilate 2, measured) and
+        // lift gap to 1.05, hot-region sculpt error 2.88→2.46, max 4.98→4.18, WITHOUT
+        // touching real cloth stretch (worstEdgeStretch flat at 4.07 across every
+        // variant — the rising support-edge number is the intended vanilla-relative
+        // correction, misread the way magnetismCount misreads the bridge).
+        const float smAlpha  = EnvFloat("DRAPE_SM_ALPHA", 0.8f);
+        const int   smIters  = (int)EnvFloat("DRAPE_SM_ITERS", 40.0f);
         const float smSMax   = EnvFloat("DRAPE_SM_SMAX", 1.25f);
         const float smR0     = EnvFloat("DRAPE_SM_R0", 0.12f);
         const float smWedgeR = EnvFloat("DRAPE_SM_WEDGE_R", 4.0f);
@@ -11049,8 +11057,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             return id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id];
         };
         // Skin-tight-LIKE garments (authored gap tiny everywhere = painted on) follow
-        // body concavities BY DESIGN (§5) even when their preset resolves Fitted via
-        // 'Auto' (falmer Undies trap, 2nd time — pit-bridge hit it too). The preset
+        // body concavities BY DESIGN (Â§5) even when their preset resolves Fitted via
+        // 'Auto' (falmer Undies trap, 2nd time â€” pit-bridge hit it too). The preset
         // gate can't see this; the authored gap profile can.
         float aGapP75 = 0.0f;
         {
@@ -11070,9 +11078,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
         const float smTight = EnvFloat("DRAPE_SM_TIGHT", 0.45f);
         // A garment mostly COVERED by outer layers (falmer underdress beneath the
-        // plate cuirass) was sculpted AS an underlayer — its shape is the layer
+        // plate cuirass) was sculpted AS an underlayer â€” its shape is the layer
         // system's business, and its sculpt score got WORSE under this pass
-        // (1.68→1.91 measured). The blacksmith dress under its small belt is ~10%
+        // (1.68â†’1.91 measured). The blacksmith dress under its small belt is ~10%
         // covered and passes.
         float coveredFrac = 0.0f;
         if (outerColliders && !outerColliders->empty()) {
@@ -11096,10 +11104,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (nTot > 0) coveredFrac = (float)nCov / (float)nTot;
         }
         const float smCoverMax = EnvFloat("DRAPE_SM_COVER_MAX", 0.30f);
-        // Upper bound: a garment authored FLOATING (p75 gap > ~2u — the falmer
+        // Upper bound: a garment authored FLOATING (p75 gap > ~2u â€” the falmer
         // underdress at 2.65 vs the blacksmith dress at 1.20) is drape-dominated,
         // hanging-cloth territory (panel-flatten's gapMin=1.5 marks hanging); its
-        // sculpt score got WORSE under authored-shape restore (1.68→1.91 measured).
+        // sculpt score got WORSE under authored-shape restore (1.68â†’1.91 measured).
         const float smLooseMax = EnvFloat("DRAPE_SM_LOOSE_MAX", 2.0f);
         if (aGapP75 < smTight || aGapP75 > smLooseMax) {
             HLog("detour: shape-match shape='%s' SKIPPED gap-profile (aGapP75=%.3f outside [%.2f,%.2f])",
@@ -11143,7 +11151,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         std::vector<std::vector<uint32_t>> members(n);
         for (size_t i = 0; i < n; ++i) members[rep[i]].push_back((uint32_t)i);
         // rep-graph adjacency: twins share one node so patches see the union of both
-        // sides' neighbourhoods (full disc — same reasoning as panel-flatten's rep[]).
+        // sides' neighbourhoods (full disc â€” same reasoning as panel-flatten's rep[]).
         std::vector<std::vector<uint32_t>> adjR(n);
         for (const auto& e : useEdges) {
             if (e.a >= n || e.b >= n) continue;
@@ -11156,7 +11164,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             std::sort(v.begin(), v.end());
             v.erase(std::unique(v.begin(), v.end()), v.end());
         }
-        // 2-ring patch per rep (self + ring1 + ring2)
+        // Patch per rep (self + smRings rings). Patch scale must EXCEED the defect
+        // scale: 2-ring (~3u) patches are smaller than the armâ†”torso wedge (~5u), so
+        // a smooth basin satisfies local similarity and the dive persists (measured:
+        // knob sweep plateaued at hot 2.59 / gap 0.94 vs the sculpt's 1.43).
+        const int smRings = (int)EnvFloat("DRAPE_SM_RINGS", 2.0f);
         std::vector<std::vector<uint32_t>> patch(n);
         {
             std::vector<uint32_t> stamp(n, 0), fr, nx;
@@ -11168,7 +11180,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 P.push_back((uint32_t)r);
                 stamp[r] = sc;
                 fr.assign(1, (uint32_t)r);
-                for (int d = 0; d < 2; ++d) {
+                for (int d = 0; d < smRings; ++d) {
                     nx.clear();
                     for (uint32_t u : fr)
                         for (uint32_t w : adjR[u])
@@ -11195,7 +11207,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (uint32_t j : patch[r]) s2 += Len2(Sub(baseVerts[j], c));
             paNorm2[r] = s2;
         }
-        // §6 wedge detector: body vertex normals once, then per-rep normal dispersion
+        // Â§6 wedge detector: body vertex normals once, then per-rep normal dispersion
         // within smWedgeR (z-window pre-filter keeps the scan linear-ish).
         const float wr2 = smWedgeR * smWedgeR;
         auto buildVN = [](const BodyBVH& bvh) {
@@ -11235,8 +11247,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         for (size_t b = 0; b < refByZ.size(); ++b) refZSorted[b] = g_refBodyBVH.verts[refByZ[b]].z;
         // Concavity-signed wedge strength at pos vs a body: dispersion of nearby
         // body normals, gated by the SIGN of normal-vs-position rotation (in a true
-        // §6 wedge normals rotate AGAINST positions; on a thin convex mass — shin,
-        // forearm — the same dispersion appears but K>0, not a wedge).
+        // Â§6 wedge normals rotate AGAINST positions; on a thin convex mass â€” shin,
+        // forearm â€” the same dispersion appears but K>0, not a wedge).
         auto wedgeAt = [&](const BodyBVH& bvh, const std::vector<Vec3>& vn,
                            const std::vector<uint32_t>& byZ, const std::vector<float>& zs,
                            const Vec3& p) -> float {
@@ -11280,8 +11292,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 continue;
             // Only the MORPH-CREATED part of the wedge is a defect: if the AUTHORED
             // garment already sat in an authored-body wedge, following it is DESIGN
-            // (§5 — caught on falmer Undies/yarl Pants: the groin/crotch concavity
-            // exists authored, SM yanked it, worstSupportEdgeStretch 1.13→9.33).
+            // (Â§5 â€” caught on falmer Undies/yarl Pants: the groin/crotch concavity
+            // exists authored, SM yanked it, worstSupportEdgeStretch 1.13â†’9.33).
             // Same doctrine as panel-flatten's authored-curvature target: authored
             // data carries the design intent.
             float wg = wedgeAt(*bodyBVH, bodyVN, bodyByZ, zSorted, finalVerts[r])
@@ -11337,8 +11349,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             float awShape = ClampRange((rn - smR0 * 0.35f) / (smR0 * 0.65f), 0.0f, 1.0f);
             aw[r] = wg * (smBasin + (1.0f - smBasin) * awShape);
         }
-        // Dilate the gate 2 rings (the basin interior is locally smooth = unsignalled).
-        for (int d = 0; d < 2; ++d) {
+        // Dilate the gate (the basin interior is locally smooth = unsignalled, and
+        // the crumpled FRONT-CHEST rim of the pit reads as convex to the wedge
+        // detector â€” measured: the residual worst verts v66/69/140/142 sat 3 rings
+        // from the nearest open vert with wgM=0.000 and never moved).
+        const int smDilate = (int)EnvFloat("DRAPE_SM_DILATE", 3.0f);
+        for (int d = 0; d < smDilate; ++d) {
             std::vector<float> a2 = aw;
             for (size_t r = 0; r < n; ++r) {
                 if (patch[r].empty() || vertRigidSM(r)) continue;
@@ -11349,7 +11365,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
         // Cloth authored under an outer layer is the LAYER system's business, not
         // shape restoration's (caught: waist verts under the BlackSmithBelt lifted
-        // laterally into the belt, worstGarmentFacePen 0.34→1.40 — the gap-space
+        // laterally into the belt, worstGarmentFacePen 0.34â†’1.40 â€” the gap-space
         // ceiling cannot stop tangential entries; falmer Cuirass_Torso needed 4u,
         // its plate floats further off the underdress). Applied AFTER dilation so
         // leaked eligibility is cleared too.
@@ -11360,14 +11376,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 for (const OuterCollider& oc : *outerColliders) {
                     Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
                     float bd2 = 0.0f;
-                    // Authored-space proximity (design says "under the layer")…
+                    // Authored-space proximity (design says "under the layer")â€¦
                     bool under = oc.Base().valid &&
                                  BVHClosestPointEx(oc.Base(), baseVerts[r], bcp, bnrm, bd2,
                                                    nullptr, nullptr, nullptr, nullptr) &&
                                  bd2 <= exR * exR;
-                    // …or CURRENT-space proximity (collision cares about now, and the
+                    // â€¦or CURRENT-space proximity (collision cares about now, and the
                     // falmer plate sits >4u from the underdress in authored space yet
-                    // the lift still crossed it — authored distance is a bad predictor
+                    // the lift still crossed it â€” authored distance is a bad predictor
                     // for floating outer layers).
                     if (!under && oc.Current().valid &&
                         BVHClosestPointEx(oc.Current(), finalVerts[r], bcp, bnrm, bd2,
@@ -11432,7 +11448,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                            + K[row * 3 + 2] * R[2 * 3 + col];
                 std::copy(out, out + 9, R);
             };
-            // Warm-started per-rep rotations (identity at start; Müller's extraction
+            // Warm-started per-rep rotations (identity at start; MÃ¼ller's extraction
             // converges in a couple of steps per round once warm).
             std::vector<std::array<float, 9>> Rrot(n, {1.0f, 0.0f, 0.0f,
                                                        0.0f, 1.0f, 0.0f,
@@ -11470,7 +11486,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float s = ClampRange(sNum / std::max(paNorm2[r], 1.0e-9f), 1.0f, smSMax);
                     Vec3 target = Add(qc, Scale(mulMV(R, Sub(baseVerts[r], paC[r])), s));
                     Vec3 step = Scale(Sub(target, finalVerts[r]), smAlpha * aw[r]);
-                    // NOTE: invMass is NOT consulted — restore passes move any vert
+                    // NOTE: invMass is NOT consulted â€” restore passes move any vert
                     // (panel-flatten precedent); the fitted path pins the very contact
                     // verts this pass exists to fix (caught: armpit worst verts were
                     // invMass=0, the pass no-opped on exactly the defect).
@@ -11508,7 +11524,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     for (uint32_t vi : grp) finalVerts[vi] = m;
                 }
             }
-            // Wedge verts sit on island junctions (armpit = arm↔torso stitch): restore
+            // Wedge verts sit on island junctions (armpit = armâ†”torso stitch): restore
             // the prox-pair invariant in-pass (vampire-tear lesson, 5th application).
             applyFinalProxSeamCap(6, "post-shapematch-prox-cap");
         }
@@ -12146,7 +12162,7 @@ struct ReplayOptions {
 };
 
 // Per-vertex float diagnosis (2026-07-03, thigh-bump investigation): for every vertex,
-// its position and its signed gap to the body in three states — AUTHORED (base vert vs
+// its position and its signed gap to the body in three states â€” AUTHORED (base vert vs
 // base body), VANILLA (rawDiff-conformed vert vs morphed body), SOLVED (our result vs
 // morphed body). float = gap - authoredGap localizes WHERE a garment floats beyond its
 // design clearance and WHO introduced it (vanilla input vs our solve).
@@ -12737,10 +12753,10 @@ static int WriteSelfTestCapture(const fs::path& path) {
 }
 
 // Deterministic geometry check for the gravity-shadow (plan Part 9), no capture
-// needed. Builds a synthetic PROTRUSION — a flat square plate at z=20 over the
-// footprint x,y in [-6,6] — and asserts the three clauses of the user's rule:
+// needed. Builds a synthetic PROTRUSION â€” a flat square plate at z=20 over the
+// footprint x,y in [-6,6] â€” and asserts the three clauses of the user's rule:
 //   (1) a vertex directly BELOW the plate is in-shadow and pushed HORIZONTALLY out
-//       to the plate silhouette (+clearance) — plumb hang below the protrusion;
+//       to the plate silhouette (+clearance) â€” plumb hang below the protrusion;
 //   (2) a vertex OUTSIDE the footprint is FREE (one-sided: never pulled in);
 //   (3) a vertex ABOVE the plate is FREE (body above the ceiling casts no shadow).
 static int RunShadowSelfTest() {
@@ -12793,7 +12809,7 @@ static int RunShadowSelfTest() {
                                            clearance, wallSlope, maxRing, ox, oy);
         check("vertex above the protrusion is FREE", !pushed);
     }
-    // (3b) ceiling BAKED below the plate → the plate is not stamped → casts no shadow.
+    // (3b) ceiling BAKED below the plate â†’ the plate is not stamped â†’ casts no shadow.
     {
         GravityShadow lowCeil;
         BuildGravityShadow(verts, tris, 1.0f, /*ceiling*/10.0f, lowCeil);
@@ -12988,7 +13004,7 @@ static void Detour_GenResult(
 
     // Skip genital / body-part meshes entirely: they are body geometry, not garments,
     // so cloth + layer logic is pointless and can deform them. Vanilla conform already
-    // ran above (g_origGenResult) â€” returning now leaves that correct result in place.
+    // ran above (g_origGenResult) Ã¢â‚¬â€ returning now leaves that correct result in place.
     {
         std::string ln = lower(*shapeName);
         static const char* kBodyPartTokens[] = {
@@ -12997,7 +13013,7 @@ static void Detour_GenResult(
         for (const char* tok : kBodyPartTokens) {
             if (NameHas(ln, tok)) {
                 if (g_missingShapesLogged.insert(*shapeName).second)
-                    HLog("detour: SKIP body-part mesh '%s' â†’ vanilla conform", shapeName->c_str());
+                    HLog("detour: SKIP body-part mesh '%s' Ã¢â€ â€™ vanilla conform", shapeName->c_str());
                 return;
             }
         }
@@ -13081,11 +13097,11 @@ static void Detour_GenResult(
             bodyBVH = &bvhIt->second;
     }
 
-    // â”€â”€ Static cloth pass (main path) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Static cloth pass (main path) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!presetMask.empty() && g_getRawResultDiff && g_setResultDiff) {
         TargetDataDiffs rawDiff;
         if (HostGetRawResultDiff(self, shapeName, sliderName, rawDiff)) {
-            // rawDiff empty â†’ this slider has no conform overlap with this shape:
+            // rawDiff empty Ã¢â€ â€™ this slider has no conform overlap with this shape:
             // ApplyStaticClothPass would return false immediately and the result
             // diff is also empty/trivial. Fall through to ZeroVertDiff (no-op).
             // This is expected behavior; no log entry needed per slider.
@@ -13096,7 +13112,7 @@ static void Detour_GenResult(
             // (strictly higher layer rank), kept SEPARATE so the nearest-point can never
             // jump between cloak/belt/pants (review #1). Each carries the outer mesh's
             // base + current surface and its preset (for adaptive clearance). The
-            // outermost mesh (highest rank) gets an empty list â†’ never deformed.
+            // outermost mesh (highest rank) gets an empty list Ã¢â€ â€™ never deformed.
             int myLayerRank = 0;
             { auto it = g_shapeLayer.find(*shapeName); if (it != g_shapeLayer.end()) myLayerRank = it->second; }
             std::vector<OuterCollider> outerColliders;
@@ -13288,9 +13304,9 @@ static void Detour_GenResult(
                          stats.influenceZeroVerts, edgeCount);
                     return;
                 }
-                // HostSetResultDiff failed â€” fall through to ZeroVertDiff
+                // HostSetResultDiff failed Ã¢â‚¬â€ fall through to ZeroVertDiff
                 HLog("detour: SKIPPED shape='%s' slider='%s' preset='%s' "
-                     "reason='HostSetResultDiff failed' â†’ FALLBACK_SCALE",
+                     "reason='HostSetResultDiff failed' Ã¢â€ â€™ FALLBACK_SCALE",
                      shapeName->c_str(), sliderName->c_str(), PresetName(preset));
             } else if (!rawDiff.empty()) {
                 // rawDiff was non-empty but pass still rejected (preset disabled, etc.)
@@ -13299,7 +13315,7 @@ static void Detour_GenResult(
                         ? "preset disables static pass (skin-tight)"
                         : "solver returned false";
                     HLog("detour: SKIPPED shape='%s' slider='%s' preset='%s' "
-                         "reason='%s' â†’ FALLBACK_SCALE",
+                         "reason='%s' Ã¢â€ â€™ FALLBACK_SCALE",
                          shapeName->c_str(), sliderName->c_str(), PresetName(preset), reason);
                 }
             }
@@ -13307,20 +13323,20 @@ static void Detour_GenResult(
             // HostGetRawResultDiff failed (ABI issue or missing RVA)
             if (g_fallbackShapesLogged.insert(*shapeName).second)
                 HLog("detour: SKIPPED static cloth shape='%s' "
-                     "reason='HostGetRawResultDiff failed' â†’ FALLBACK_SCALE",
+                     "reason='HostGetRawResultDiff failed' Ã¢â€ â€™ FALLBACK_SCALE",
                      shapeName->c_str());
         }
     } else if (!presetMask.empty()) {
         // Host methods not wired (offsets not confirmed for this exe build)
         if (g_fallbackShapesLogged.insert(*shapeName).second)
             HLog("detour: SKIPPED static cloth shape='%s' "
-                 "reason='%s' â†’ FALLBACK_SCALE",
+                 "reason='%s' Ã¢â€ â€™ FALLBACK_SCALE",
                  shapeName->c_str(),
                  !g_getRawResultDiff ? "GetRawResultDiff RVA not wired"
                  : "SetResultDiff RVA not wired");
     }
 
-    // â”€â”€ Fallback: ZeroVertDiff mask scale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Fallback: ZeroVertDiff mask scale Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Scales each vanilla conform diff by the preset mask weight; drops near-zero
     // entries. This is the safety net, not the feature.
     if (!presetMask.empty()) {
@@ -13337,7 +13353,7 @@ static void Detour_GenResult(
     }
 }
 
-// â”€â”€ Public API (called by version.dll after injection) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Public API (called by version.dll after injection) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 extern "C" __declspec(dllexport)
 int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
@@ -13351,7 +13367,7 @@ int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
     g_opts.looseDistance = looseDistance;
 
     if (!drape_off::Configured()) {
-        HLog("install: offsets not configured for this build â€” hook disabled");
+        HLog("install: offsets not configured for this build Ã¢â‚¬â€ hook disabled");
         return -2;
     }
 
