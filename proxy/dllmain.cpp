@@ -25,8 +25,7 @@ static std::atomic<PfnDrapeSetProcessingIntensity> g_setProcessingIntensity{null
 static std::atomic<PfnDrapeSetSliderFilter> g_setSliderFilter{nullptr};
 static std::atomic_bool g_hookReady{false};
 
-static HMODULE          g_selfMod         = nullptr;  // this proxy DLL's module (for the kbd hook)
-static HHOOK            g_kbHook          = nullptr;  // WH_KEYBOARD_LL (low-level) keyboard hook
+static HMODULE          g_selfMod         = nullptr;  // this proxy DLL's module
 static DWORD            g_osProcId        = 0;        // OutfitStudio PID (act only when it's focused)
 static std::atomic_bool g_conformRunning{false};      // guard: don't re-enter while a conform runs
 
@@ -234,44 +233,36 @@ static LRESULT CALLBACK ConformCbtProc(int nCode, WPARAM wParam, LPARAM lParam) 
 }
 
 // ── Keyboard shortcut: Ctrl+Alt+C triggers Smart Conform All ──────────
-// wxWidgets owns its own accelerator table, which an injected DLL can't cleanly
-// join, so the native "Conform All\tCtrl+Shift+C" path is off-limits. A thread-scoped
-// WH_KEYBOARD hook did NOT work: the GL canvas / wx consume the key before the thread
-// hook sees it (and with Alt held it becomes a SYSTEM key). So we use a low-level hook
-// (WH_KEYBOARD_LL), which intercepts every key BEFORE any window, regardless of focus.
-// To stay polite (not a global hotkey) we act only when an OutfitStudio window is in
-// the foreground. LL hooks are delivered to the installing thread's message queue, so
-// the hook lives on its own message-loop thread (KbHookThreadProc). NOTE: on ABNT2
-// (pt-BR) keyboards AltGr == Ctrl+Alt, so AltGr+C also fires this (accepted tradeoff).
-static LRESULT CALLBACK DrapeLLKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
-        const KBDLLHOOKSTRUCT* kb = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
-        if (kb && kb->vkCode == 'C') {
-            const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool alt  = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;  // VK_MENU = Alt
-            DWORD fgPid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
-            if (ctrl && alt && fgPid == g_osProcId &&
-                g_hookReady.load(std::memory_order_acquire) &&
-                g_conformAllId && g_osHwnd &&
-                !g_conformRunning.load(std::memory_order_acquire)) {
-                DbgLog("LLKeyboard: Ctrl+Alt+C -> Smart Conform All");
+// Third approach. wxWidgets owns its accelerator table (can't join it from an injected
+// DLL); a thread-scoped WH_KEYBOARD hook never fired (GL canvas/wx eat the key first);
+// a WH_KEYBOARD_LL hook also stayed silent under MO2's usvfs (and usvfs double-loads
+// this DLL, chaining two half-configured hooks — see the instance guard in
+// InjectThread). So: NO hooks. A dedicated thread polls GetAsyncKeyState at ~33 Hz and
+// edge-detects the combo. Immune to wx/GL/usvfs message routing entirely; acts only
+// when OutfitStudio is the foreground process, so it is not a global hotkey. Logs every
+// detection with all gate values so a silent failure is diagnosable from the log alone.
+// NOTE: on ABNT2 (pt-BR) keyboards AltGr == Ctrl+Alt, so AltGr+C also fires (accepted).
+static DWORD WINAPI KbPollThreadProc(LPVOID) {
+    DbgLog("KbPoll: thread started (Ctrl+Alt+C poller)");
+    bool wasDown = false;
+    for (;;) {
+        Sleep(30);
+        const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool alt  = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;   // VK_MENU = Alt
+        const bool cKey = (GetAsyncKeyState('C')        & 0x8000) != 0;
+        const bool combo = ctrl && alt && cKey;
+        if (combo && !wasDown) {   // fire once per press, not while held
+            DWORD fgPid = 0;
+            GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
+            const bool ready   = g_hookReady.load(std::memory_order_acquire);
+            const bool running = g_conformRunning.load(std::memory_order_acquire);
+            DbgLog("KbPoll: Ctrl+Alt+C fgPid=%lu osPid=%lu ready=%d conformAllId=%u running=%d hwnd=%p",
+                   fgPid, g_osProcId, ready ? 1 : 0, g_conformAllId, running ? 1 : 0,
+                   (void*)g_osHwnd);
+            if (fgPid == g_osProcId && ready && g_conformAllId && g_osHwnd && !running)
                 PostMessageA(g_osHwnd, WM_COMMAND, MAKEWPARAM(DRAPE_CMD_ID, 0), 0);
-                return 1;  // swallow so a stray 'c' isn't typed
-            }
         }
-    }
-    return CallNextHookEx(nullptr, code, wParam, lParam);
-}
-
-// Owns the low-level keyboard hook + its required message loop for the process life.
-static DWORD WINAPI KbHookThreadProc(LPVOID) {
-    g_kbHook = SetWindowsHookExA(WH_KEYBOARD_LL, DrapeLLKeyboardProc, g_selfMod, 0);
-    DbgLog("KbHookThread: WH_KEYBOARD_LL installed=%p", (void*)g_kbHook);
-    if (!g_kbHook) return 1;
-    MSG msg;
-    while (GetMessageA(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        wasDown = combo;
     }
     return 0;
 }
@@ -374,27 +365,29 @@ static bool TryInjectMenu(HWND hw) {
     }
     if (!sliderMenu) { DbgLog("  TryInject: 'Slider' menu not found"); return false; }
 
-    // Already injected? (avoid duplicates on retry)
+    // Find "Conform All" FIRST — g_conformAllId must be learned even on the
+    // "already injected" path below, or a re-entering instance keeps a dead config.
     int nItems = GetMenuItemCount(sliderMenu);
-    for (int i = 0; i < nItems; ++i) {
-        if (GetMenuItemID(sliderMenu, i) == DRAPE_CMD_ID) {
-            DbgLog("  TryInject: Drape item already present");
-            return true;
-        }
-    }
-
-    // Find "Conform All" position
     int insertPos = 1;
     bool foundConformAll = false;
     for (int i = 0; i < nItems; ++i) {
         char lbl[128] = {};
         GetMenuStringA(sliderMenu, i, lbl, sizeof(lbl), MF_BYPOSITION);
-        if (std::string(lbl).find("Conform All") != std::string::npos) {
+        if (std::string(lbl).find("Conform All") != std::string::npos &&
+            std::string(lbl).find("Smart") == std::string::npos) {   // skip our own item
             g_conformAllId = GetMenuItemID(sliderMenu, i);
             insertPos = i + 1;
             foundConformAll = true;
             DbgLog("  TryInject: found 'Conform All' at pos %d, id=%u", i, g_conformAllId);
             break;
+        }
+    }
+
+    // Already injected? (avoid duplicates on retry)
+    for (int i = 0; i < nItems; ++i) {
+        if (GetMenuItemID(sliderMenu, i) == DRAPE_CMD_ID) {
+            DbgLog("  TryInject: Drape item already present (conformAllId=%u)", g_conformAllId);
+            return true;
         }
     }
     if (!foundConformAll) {
@@ -420,6 +413,27 @@ static bool TryInjectMenu(HWND hw) {
 static DWORD WINAPI InjectThread(LPVOID) {
     DbgLog("InjectThread: started");
 
+    // Single-instance guard. Under MO2's usvfs this DLL can be loaded TWICE into the
+    // same process (import table + a later LoadLibrary("version.dll") resolving to a
+    // different VFS path, which defeats the loader's dedup). The second instance has
+    // its own copy of every global: it re-subclasses the window OVER the first
+    // instance, sees the menu already injected, and never learns g_conformAllId — so
+    // it swallows our WM_COMMAND with a dead config. A named per-PID mutex lets only
+    // the FIRST instance install anything; later instances no-op. Handle deliberately
+    // leaked (lifetime = process).
+    {
+        char mtxName[64];
+        _snprintf_s(mtxName, sizeof(mtxName), _TRUNCATE,
+                    "Local\\DrapeProxyActive_%lu", GetCurrentProcessId());
+        HANDLE mtx = CreateMutexA(nullptr, TRUE, mtxName);
+        if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            DbgLog("InjectThread: another proxy instance is active in this process; standing down");
+            CloseHandle(mtx);
+            return 0;
+        }
+        DbgLog("InjectThread: primary proxy instance (mutex '%s')", mtxName);
+    }
+
     // Poll until OutfitStudio frame appears (up to 60 s)
     HWND hw = nullptr;
     for (int i = 0; i < 600 && !hw; ++i) {
@@ -435,10 +449,9 @@ static DWORD WINAPI InjectThread(LPVOID) {
         SetWindowLongPtrA(hw, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DrapeWndProc)));
     DbgLog("InjectThread: subclassed WndProc, oldProc=0x%p", (void*)g_oldProc);
 
-    // Install the Ctrl+Alt+C shortcut via a low-level keyboard hook on its own
-    // message-loop thread (see KbHookThreadProc / DrapeLLKeyboardProc).
+    // Install the Ctrl+Alt+C shortcut via the polling thread (see KbPollThreadProc).
     g_osProcId = GetCurrentProcessId();
-    CreateThread(nullptr, 0, KbHookThreadProc, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, KbPollThreadProc, nullptr, 0, nullptr);
 
     // Install the in-memory "Smart Conform" hook: load the heavy DLL (its nifly
     // static initializers run now, after OutfitStudio is up, so no startup crash)
