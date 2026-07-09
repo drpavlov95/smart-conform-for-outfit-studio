@@ -299,6 +299,7 @@ static float Clamp01(float v);
 static bool NameHas(const std::string& lowerName, const char* token);
 static int NormalizePreset(int preset);
 static float PresetFollowWeight(int preset, float rawWeight);
+static bool EnvToggle(const char* name, bool dflt);
 
 static uint32_t EdgeKey(uint16_t a, uint16_t b) {
     if (a > b) std::swap(a, b);
@@ -882,6 +883,28 @@ static ResolvedPresetChoice ResolvePresetForShapeLocked(const std::string& shape
         if (out.geometryPreset != DRAPE_PRESET_AUTO) {
             out.effectivePreset = out.geometryPreset;
             out.source = "geometry";
+            // Sculpt-driven reroute (2026-07-09, GATED default OFF): scored against
+            // the user's hand sculpts, the geometry heuristic's LOOSE_DRAPED verdict
+            // LOSES to the fitted/correction path on every STRUCTURED garment tested
+            // — yarl Clothes 1.71→0.83 (loose splays the skirt open exposing the
+            // legs), falmer Cloth 4.45→2.40 (loose curls the loincloth flaps up),
+            // vampire robes 2.19→1.13 (loose collapses the robe skirt); only a true
+            // cape is a wash (yarl Cloak 2.11↔2.05). The user hand-sculpts by
+            // conforming to the body, not physics-draping. Ships OFF because the
+            // sculpt is a STATIC reference and the loose path may still be wanted for
+            // in-game motion — a product call for the user. Enable via env
+            // DRAPE_ROUTE_FITTED=1 (harness) or the live flag file (OutfitStudio) to
+            // route every auto-Loose garment down the fitted path.
+            bool rerouteFitted = EnvToggle("DRAPE_ROUTE_FITTED", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+            rerouteFitted = rerouteFitted ||
+                            fs::exists("E:/SkyrimDev/Drape/route_fitted.flag");
+#endif
+            if (rerouteFitted &&
+                out.effectivePreset == DRAPE_PRESET_LOOSE_DRAPED) {
+                out.effectivePreset = DRAPE_PRESET_FITTED_CLOTH;
+                out.source = "geometry+reroute-fitted";
+            }
             return out;
         }
         out.effectivePreset = GuessPresetFromShapeName(shapeName);
@@ -12312,6 +12335,14 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         float fp = EnvFloat("DRAPE_FORCE_PRESET", -1.0f);
         if (fp >= 0.0f) replayPreset = (int)fp;
     }
+    // Mirror the live sculpt-driven reroute in replay so the harness/corpus reflect
+    // what OutfitStudio would do (the capture bakes cap.preset, but ResolvePreset's
+    // reroute only fires live — apply the same rule here on the baked preset). Only
+    // rewrites Loose→Fitted, and only when the flag is set; default OFF keeps replay
+    // byte-identical. See the reroute note in ResolvePresetForShapeLocked.
+    if (EnvToggle("DRAPE_ROUTE_FITTED", false) &&
+        NormalizePreset(replayPreset) == DRAPE_PRESET_LOOSE_DRAPED)
+        replayPreset = DRAPE_PRESET_FITTED_CLOTH;
     StaticSolveStats stats;
     out.passOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, replayPreset,
                                       cap.baseVerts,
