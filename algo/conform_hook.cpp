@@ -10232,6 +10232,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             supBase = &g_refBodyBVH; supCur = bodyBVH; supName = "body";
         }
         if (supBase && supCur) {
+            // A vert floating far off its support has an ILL-DEFINED bind: its target is
+            // (morphed support point + off * morphed NORMAL), and the normal SWINGS as the
+            // body morphs, so a far target moves several units sideways and twists the flap
+            // (user-caught: Yarl belt flap distorted at RM_Heavy). Cap which verts become
+            // ARAP HANDLES by authored offset — the wrap (small offset, real contact) drives
+            // the rigid transform and CARRIES the far flap, instead of the flap being pinned
+            // to a swinging far target. Default large = current behaviour; kept env-tunable.
+            const float kBeltHandleMaxOff = EnvFloat("DRAPE_BELT_HANDLE_MAXOFF", 1.0e9f);
             // 1) per-vert bind + morphed target; flag well-conditioned (interior) binds.
             std::vector<ArapVec3> arap(n);
             std::vector<ArapVec3> target(n);
@@ -10251,7 +10259,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 Vec3 pos = Add(mp, Scale(mn, off));
                 target[i] = { pos.x, pos.y, pos.z };
                 hasTarget[i] = 1;
-                if (u >= 0.05f && v >= 0.05f && w >= 0.05f) wellCond[i] = 1;  // accurate offset dir
+                if (u >= 0.05f && v >= 0.05f && w >= 0.05f &&
+                    std::fabs(off) <= kBeltHandleMaxOff) wellCond[i] = 1;  // accurate offset dir
             }
             // 2) connected components: each disconnected island (wrap/strap/buckle) needs
             //    its own handles or its ARAP block is singular (unconstrained rigid body).
@@ -11045,7 +11054,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     //    purpose, so an authored-local-shape restore fights the drape (measured,
     //    yarl Clothes: worstEdgeStretch 3.4â†’6.2, maxDisplacement +3.4u, cloak
     //    conflicts +180). DRAPE_SM_LOOSE ships dark, mirroring DRAPE_PANELS_LOOSE.
-    bool smOn = EnvToggle("DRAPE_SHAPEMATCH", true) &&
+    // RETIRED default OFF (2026-07-09): the whole DRAPE_SHAPEMATCH armpit work chased a
+    // "crater" that turned out to be the USER'S OWN body sculpt (a 3BBB armpit dip they
+    // had carved into the body mesh for this project) — the cloth was CORRECTLY following
+    // the body, Smart Conform was never wrong, and my OSD "reference" was measured against
+    // a DIFFERENT (crater-less) body so it looked filled. The user has since removed the
+    // crater and restored the stock 3BBB RM_Heavy slider. On the now-smooth body this pass
+    // still fires (arm↔torso is mildly concave) and LIFTS the cloth up to 4u OFF the body,
+    // puffing the armpit into a jagged bulge (rendered, new capture). Correct behaviour is
+    // to follow the body, which the pass-off result does. Kept behind the flag (not deleted)
+    // in case a genuine crumple defect ever needs it, but it must never default on again
+    // without a reference VERIFIED to share the capture's body. LESSON: an OSD sculpt is a
+    // valid target ONLY if it was made against the same body as the capture.
+    bool smOn = EnvToggle("DRAPE_SHAPEMATCH", false) &&
                 (!params.verletCloth || EnvToggle("DRAPE_SM_LOOSE", false)) &&
                 (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH ||
                  EnvToggle("DRAPE_SM_ALL_PRESETS", false)) &&
