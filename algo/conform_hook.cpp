@@ -10232,32 +10232,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             supBase = &g_refBodyBVH; supCur = bodyBVH; supName = "body";
         }
         if (supBase && supCur) {
-            // A vert floating far off its support has an ILL-DEFINED bind: its target is
-            // (morphed support point + off * morphed NORMAL), and the normal SWINGS as the
-            // body morphs, so a far target moves several units sideways and twists the flap
-            // (user-caught: Yarl belt flap distorted at RM_Heavy). Cap which verts become
-            // ARAP HANDLES by authored offset — the wrap (small offset, real contact) drives
-            // the rigid transform and CARRIES the far flap, instead of the flap being pinned
-            // to a swinging far target. Default large = current behaviour; kept env-tunable.
             // Cap which verts become ARAP HANDLES by authored offset (2.4u default,
             // 2026-07-09). A vert floating far off its support has an ILL-DEFINED bind:
             // its target is (morphed support point + off * morphed NORMAL), and the normal
-            // SWINGS as the body morphs, so a far target moves several units sideways and
-            // twists the piece — the Yarl belt's hanging pendant zig-zagged (user-caught).
-            // Capping handles lets the wrap (small offset, real contact) drive the rigid
-            // transform and CARRY the far flap/pendant, instead of it being pinned to a
-            // swinging far target. Validated on the user's fresh Yarl belt capture (which
-            // rests on the BODY at offsetMean 2.393 — the same support the live conform
-            // logged): pendant strain 0.57->0.50 (below vanilla 0.54), the wrap band drops
-            // only from ARAP-smooth to ~vanilla-smooth. SAFE for other belts: a tight belt
-            // (all offsets < 2.4) loses no handles = no-op; a very loose belt (all > 2.4)
-            // has every vert re-promoted per component by kMinHandles = no-op. Env override
-            // DRAPE_BELT_HANDLE_MAXOFF=1e9 disables for A/B.
+            // SWINGS as the body morphs, twisting far pieces. Capping handles lets the wrap
+            // (small offset, real contact) drive the rigid transform. Env override
+            // DRAPE_BELT_HANDLE_MAXOFF=1e9 disables.
             float kBeltHandleMaxOff = EnvFloat("DRAPE_BELT_HANDLE_MAXOFF", 2.4f);
             // 1) per-vert bind + morphed target; flag well-conditioned (interior) binds.
             std::vector<ArapVec3> arap(n);
             std::vector<ArapVec3> target(n);
             std::vector<uint8_t> hasTarget(n, 0), wellCond(n, 0);
+            std::vector<float> offAbs(n, 0.0f);   // |authored offset| per vert (for strap detect)
             double offSum = 0.0; int offCnt = 0;  // DIAG: authored offset field magnitude
             for (size_t i = 0; i < n; ++i) {
                 arap[i] = { baseVerts[i].x, baseVerts[i].y, baseVerts[i].z };  // ARAP rest = base
@@ -10268,6 +10254,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 float off = std::sqrt(d2);
                 if (Dot(Sub(baseVerts[i], cp), nrm) < 0.0f) off = -off;   // signed
                 offSum += off; ++offCnt;
+                offAbs[i] = std::fabs(off);
                 Vec3 mp = TriPointBary(*supCur, tri, u, v, w);
                 Vec3 mn = supCur->faceNormal[(size_t)tri];
                 Vec3 pos = Add(mp, Scale(mn, off));
@@ -10313,6 +10300,39 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!hIdx.empty() && SolveArap(arap, aTris, hIdx, hTgt, 4)) {
                 for (size_t i = 0; i < n; ++i)
                     finalVerts[i] = Vec3{ arap[i].x, arap[i].y, arap[i].z };
+                // Thin DANGLING STRAPS keep VANILLA, not ARAP (2026-07-09, Yarl belt
+                // pendant). A hanging strap is its own small island far off the support;
+                // the ARAP fits it rigidly to handles on the twisting waist and twists/jags
+                // the connection, while vanilla's per-vert projection hangs it clean and
+                // straight (measured: vanilla clearly straighter in profile). So: a belt
+                // island that is a MINORITY of the mesh (< maxFrac) AND floats far
+                // (mean|offset| > minOff) reverts to the vanilla conform position. The main
+                // wrap band (largest island, real contact) keeps its ARAP smoothing. SAFE:
+                // a one-piece belt is all one big island (never reverts); a tight strap
+                // (small offset) never reverts.
+                const float kStrapMaxFrac = EnvFloat("DRAPE_BELT_STRAP_MAXFRAC", 0.40f);
+                const float kStrapMinOff  = EnvFloat("DRAPE_BELT_STRAP_MINOFF", 2.0f);
+                std::unordered_map<int, int> compSize;
+                std::unordered_map<int, double> compOffSum;
+                for (size_t i = 0; i < n; ++i) {
+                    int r = findRoot((int)i);
+                    ++compSize[r];
+                    compOffSum[r] += offAbs[i];
+                }
+                size_t nStrap = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    int r = findRoot((int)i);
+                    int sz = compSize[r];
+                    if (sz <= 0) continue;
+                    float frac = (float)sz / (float)n;
+                    float meanOff = (float)(compOffSum[r] / (double)sz);
+                    if (frac < kStrapMaxFrac && meanOff > kStrapMinOff) {
+                        finalVerts[i] = Add(baseVerts[i], DiffAt(rawDiff, (uint16_t)i));
+                        ++nStrap;
+                    }
+                }
+                if (nStrap > 0)
+                    HLog("belt M1 ARAP: %zu strap verts reverted to vanilla (thin dangling islands)", nStrap);
                 // One-way body floor (the plan's kept safety net): ARAP has no body-
                 // collision awareness, and negative authored offsets (belt inner shell
                 // below the dress) can land verts inside the body. Push ONLY penetrating
