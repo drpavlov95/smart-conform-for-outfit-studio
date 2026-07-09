@@ -1296,3 +1296,58 @@ chest→arm transition on the Blacksmith (and any exposed fitted-cloth garment i
 band). NEXT: keep score_all.py handy (tmp/smval has base/refbody/off/on per corpus
 garment); consider folding sculpt-score into the harness; widen the SM envelope only
 with reference-validated evidence per class.
+
+---
+
+## Part 22 — Armpit ceiling + reference-driven defect triage (2026-07-09, AFK session)
+
+**Armpit tuning (shipped 5b8dcd0, DLL 02:46):** the user tested the first shape-match
+build and still saw the crater — it had only reached armpit gap 0.83 vs the sculpt's 1.43.
+Root of the shortfall (measured): the pit's crumpled FRONT-CHEST rim (v66/69/140/142) reads
+convex to the wedge detector (wgM=0.000) and sat frozen 3 rings outside the gate. Defaults
+α 0.5→0.8, iters 20→40, gate dilation 2→3 (new DRAPE_SM_DILATE / SM_RINGS knobs). Result:
+gap 0.83→1.05, hot sculpt-error 2.88→2.46, max 4.98→4.18. SAFE: worstEdgeStretch (real
+cloth stretch) is byte-flat at 4.07 across every variant — only the vanilla-relative
+support-edge deviation rises (the intended correction, misread like magnetismCount). Full
+front/back renders confirm skirt/vent/back untouched. Only BlackSmithTorso resolves
+Fitted+in-band in the whole corpus, so the drift is confined to it; goldens rebaselined.
+
+**ARMPIT CEILING (measured, decisive):** decomposing the remaining hot residual
+(sculpt − tuned) against the body normal: total 2.46u = 1.13 normal (signed +0.60 lift) +
+2.05 TANGENTIAL, and the tangential is mostly VERTICAL-down (z 1.60) + outward-to-arm. The
+sculpt lets the underarm cloth DRAPE DOWN AND OUT along the arm; our conform tucks it UP
+into the crease. No solve-time observable predicts the sculpt gap (auth_gap / ring_span /
+morph_reced correlations all ≈0 — the sculpt just holds a ~constant 1.4u clearance sheet).
+So the last ~2u is a hand-made drape RELOCATION, not a depth fill; shape-matching restores
+authored LOCAL shape (gap ~0.5) and structurally cannot relocate a vert 2.5u. An additive
+outward bridge does nothing here (the shape-matched sheet is already locally smooth, so
+verts aren't below their rim — prototyped, gap 1.05→1.06). The armpit is at the ceiling of
+what a local authored-shape restore reaches; closing it further is a fitted-drape problem
+(let underarm cloth sag toward the arm), high-risk, deferred to user direction.
+
+**Reference-driven triage (the new routine — score every garment vs its hand sculpt, render
+the worst, separate real defect from legit drape variation):** tools/score_sculpt.py over
+all 18 corpus garments, ranked by mean error vs sculpt. The tuned pass touches ONLY
+BlackSmithTorso (1.482→1.406 BETTER); everything else byte-identical (no collateral,
+confirmed). The furthest-from-sculpt garments, RENDERED and diagnosed:
+
+| garment | mean | p95/max | verdict from the render |
+|---|---|---|---|
+| falmer Cloth (loincloth) | 4.45 | 7.9/13.9 | REAL: our loose flaps collapse inward+short; sculpt hangs full & long |
+| vampire robes_alt | 2.19 | 6.2/12.9 | REAL: lower robe panels collapse in around legs; sculpt flares out |
+| yarl Cloak | 2.11 | 5.0/7.9 | minor: hanging tail pinches thin vs sculpt's fuller drape |
+| yarl Clothes (dress) | 1.71 | 6.6/12.8 | REAL: front skirt caves into a crotch cavity; sculpt drapes over thighs |
+| yarl Pants | 1.47 | 6.6/12.1 | minor: pants match; 12u max is a localized crotch-seam spot only |
+
+**DOMINANT REMAINING DEFECT CLASS = loose-drape inward collapse.** Every loose skirt/flap/
+robe pulls IN toward the body (or into the leg gap) instead of hanging at the authored
+fullness the sculpt preserves; the fitted/tubular/rigid garments are all within ~1.9u and
+look correct. This is the single biggest corpus-wide opportunity by sculpt-error and it is
+one coherent root cause on the LOOSE/verlet path (the monotonic radial envelope + gravity
+pulling cloth inward at wide RM_Heavy hips, instead of bridging the hollow / holding
+authored flare — cf. [[project-gravity-shadow-rule]], RADIAL_DRAPE_RULE §6). NEXT when the
+user directs loose-path work: first establish OUR-defect vs vanilla-inherited via
+--input-obj (the harness already carries vanilla), then target the envelope's inward bias
+against these five sculpt references. Left untouched this session — loose-path changes are
+high-risk and need the user in the loop. Sculpt refs for all five are built in tmp/smval;
+tools/score_sculpt.py + build_sculpts triage are reusable.
