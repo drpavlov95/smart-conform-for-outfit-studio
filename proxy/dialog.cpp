@@ -646,8 +646,11 @@ static const char* QualityDesc(int level) {
 static const char* PresetLabel(int preset) {
     switch (preset) {
     case DRAPE_PRESET_SKIN_TIGHT: return "Skin-tight";
-    case DRAPE_PRESET_FITTED_CLOTH: return "Fitted Cloth";
-    case DRAPE_PRESET_LOOSE_DRAPED: return "Loose Draped";
+    // Fitted + Loose merged into ONE cloth preset (2026-07-09, solver remaps
+    // Loose Draped to the fitted path). Legacy rows stored as Loose Draped
+    // display as Cloth too - they solve identically.
+    case DRAPE_PRESET_FITTED_CLOTH: return "Cloth";
+    case DRAPE_PRESET_LOOSE_DRAPED: return "Cloth";
     case DRAPE_PRESET_TUBULAR: return "Tubular";
     case DRAPE_PRESET_FLEXIBLE_ARMOR: return "Flexible Armor";
     case DRAPE_PRESET_RIGID_ARMOR: return "Rigid Armor";
@@ -657,25 +660,28 @@ static const char* PresetLabel(int preset) {
     }
 }
 
+static const int kComboPresets[] = {
+    DRAPE_PRESET_AUTO,
+    DRAPE_PRESET_SKIN_TIGHT,
+    DRAPE_PRESET_FITTED_CLOTH,   // "Cloth" (fitted+loose merged)
+    DRAPE_PRESET_TUBULAR,
+    DRAPE_PRESET_FLEXIBLE_ARMOR,
+    DRAPE_PRESET_RIGID_ARMOR,
+    DRAPE_PRESET_BELT,
+    DRAPE_PRESET_RIGID_ACCESSORY,
+};
+static constexpr int kComboPresetCount = (int)std::size(kComboPresets);
+
 static int PresetFromComboIndex(int idx) {
-    static const int kPresets[] = {
-        DRAPE_PRESET_AUTO,
-        DRAPE_PRESET_SKIN_TIGHT,
-        DRAPE_PRESET_FITTED_CLOTH,
-        DRAPE_PRESET_LOOSE_DRAPED,
-        DRAPE_PRESET_TUBULAR,
-        DRAPE_PRESET_FLEXIBLE_ARMOR,
-        DRAPE_PRESET_RIGID_ARMOR,
-        DRAPE_PRESET_BELT,
-        DRAPE_PRESET_RIGID_ACCESSORY,
-    };
-    if (idx < 0 || idx >= (int)std::size(kPresets))
+    if (idx < 0 || idx >= kComboPresetCount)
         return DRAPE_PRESET_AUTO;
-    return kPresets[idx];
+    return kComboPresets[idx];
 }
 
 static int ComboIndexForPreset(int preset) {
-    for (int i = 0; i < 9; ++i)
+    if (preset == DRAPE_PRESET_LOOSE_DRAPED)     // legacy rows select "Cloth"
+        preset = DRAPE_PRESET_FITTED_CLOTH;
+    for (int i = 0; i < kComboPresetCount; ++i)
         if (PresetFromComboIndex(i) == preset)
             return i;
     return 0;
@@ -698,7 +704,7 @@ static int GuessPresetForShapeUi(const std::string& shape) {
     if (NameContains(n, "skirt") || NameContains(n, "dress") ||
         NameContains(n, "robe") || NameContains(n, "tunic") ||
         NameContains(n, "fur") || NameContains(n, "cloak"))
-        return DRAPE_PRESET_LOOSE_DRAPED;
+        return DRAPE_PRESET_FITTED_CLOTH;   // merged cloth preset
     if (NameContains(n, "pants") || NameContains(n, "sleeve") ||
         NameContains(n, "glove") || NameContains(n, "boot") ||
         NameContains(n, "arm") || NameContains(n, "leg"))
@@ -714,7 +720,7 @@ static int GuessPresetForShapeUi(const std::string& shape) {
 }
 
 static void PopulatePresetCombo(HWND combo) {
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < kComboPresetCount; ++i) {
         int preset = PresetFromComboIndex(i);
         SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)PresetLabel(preset));
     }
