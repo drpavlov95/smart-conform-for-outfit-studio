@@ -11177,223 +11177,132 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #endif
         if (cleftOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
             params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
-            g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
-            // Defaults tuned on the live Blacksmith capture (butt_cleft6.png):
-            // 0.08/0.45/8 left a faint groove (equilibrium stops at the threshold);
-            // 0.04/0.60/16 reads continuous like the loose target, ~19 verts/round.
-            const float kCBNear     = EnvFloat("DRAPE_CLEFT_NEAR", 8.0f);   // groove verts sit 4.6-6.2 off (cleft floor recedes)
-            const float kCBDepthMin = EnvFloat("DRAPE_CLEFT_DEPTH", 0.04f); // min cloth-surface dip (ring-outward)
-            const float kCBBlend    = EnvFloat("DRAPE_CLEFT_K", 0.60f);
-            const int   kCBIters    = (int)EnvFloat("DRAPE_CLEFT_ITERS", 16.0f);
-            // 1-ring adjacency.
-            std::vector<std::vector<uint32_t>> nbr(n);
-            for (const auto& e : useEdges) {
-                if (e.a >= n || e.b >= n) continue;
-                nbr[e.a].push_back(e.b);
-                nbr[e.b].push_back(e.a);
+            n > 0 && n <= 0xFFFF) {
+            // v3 (2026-07-10): BODY-DERIVED ROI. The cloth-side groove detection
+            // (dip x lateral concavity) proved unstable across live states: on the
+            // fresh capture it reached the cofrinho with 2 verts / 0.16u while
+            // leaking 2.4u into the hem and the front midline (user-visible: it
+            // disturbed the gathered pleats above the waistband and left the butt
+            // untouched). The intergluteal cleft is a property of the BODY, which
+            // is identical every conform: scan the morphed body once per z-slice
+            // (back half), find the deep central V between the two cheek summits,
+            // and enforce the cloth chord ONLY there. Pleats, hem and belly are
+            // excluded by construction.
+            const float kCBDip    = EnvFloat("DRAPE_CLEFT_BODY_DIP", 1.2f);   // min body V depth
+            const float kCBBlend  = EnvFloat("DRAPE_CLEFT_K", 0.60f);
+            const int   kCBIters  = (int)EnvFloat("DRAPE_CLEFT_ITERS", 6.0f);
+            const float kCBStep   = EnvFloat("DRAPE_CLEFT_STEP", 0.6f);
+            // 1) Body ROI per 2u z-slice: back verts (y>0), lateral profile
+            //    maxY(x); shoulders = the outermost summits on each side, dip =
+            //    min(shoulderY) - centerY. Slices with dip >= kCBDip define the
+            //    cleft; record shoulder x positions per slice.
+            struct CleftSlice { float xl, xr; };
+            std::unordered_map<int, CleftSlice> roi;   // key = (int)floor(z/2)
+            {
+                std::unordered_map<int, std::unordered_map<int, float>> prof; // zslice -> xbin -> maxY
+                for (const Vec3& bv : bodyBVH->verts) {
+                    if (bv.y <= 0.0f) continue;
+                    int zs = (int)std::floor(bv.z * 0.5f);
+                    int xb = (int)std::floor(bv.x);
+                    auto& row = prof[zs];
+                    auto it = row.find(xb);
+                    if (it == row.end() || bv.y > it->second) row[xb] = bv.y;
+                }
+                for (auto& kv : prof) {
+                    auto& row = kv.second;
+                    float cY = -1e30f;
+                    for (int xb = -2; xb <= 1; ++xb) {
+                        auto it = row.find(xb);
+                        if (it != row.end()) cY = std::max(cY, it->second);
+                    }
+                    if (cY < -1e29f) continue;
+                    float lY = -1e30f, rY = -1e30f; int lx = 0, rx = 0;
+                    for (int xb = -12; xb <= -3; ++xb) {
+                        auto it = row.find(xb);
+                        if (it != row.end() && it->second > lY) { lY = it->second; lx = xb; }
+                    }
+                    for (int xb = 2; xb <= 11; ++xb) {
+                        auto it = row.find(xb);
+                        if (it != row.end() && it->second > rY) { rY = it->second; rx = xb; }
+                    }
+                    if (lY < -1e29f || rY < -1e29f) continue;
+                    float dip = std::min(lY, rY) - cY;
+                    if (dip < kCBDip) continue;
+                    roi[kv.first] = CleftSlice{ (float)lx + 0.5f, (float)rx + 0.5f };
+                }
             }
-            // Detection, two independent gates (both must fire):
-            // (a) the cloth locally DIPS toward the body relative to its ring
-            //     (hollowCur = ring-centroid body-gap minus own gap) - it is copying
-            //     a groove;
-            // (b) the BODY ITSELF is laterally concave beneath (sample the body's
-            //     closest-point walls +-2.5u along the horizontal tangent; in a
-            //     groove both wall normals lean back toward the centre). This is
-            //     what separates the glute cleft (body groove -> bridge it, even
-            //     though it is AUTHORED - the tension semantics override) from a
-            //     decorative pleat (cloth groove over a SMOOTH body -> weight 0,
-            //     the pleat survives). The earlier morph-amplified gate failed
-            //     here: the cofrinho groove is mostly authored (9 verts active).
-            // Cloth vertex normals (for the across-the-groove tangent: the BODY's
-            // nearest-point normal is a groove WALL for exactly the verts we care
-            // about, which points the tangent ALONG the groove - measured, zero
-            // detections. The cloth normal over a groove faces outward, so its
-            // horizontal perpendicular crosses the groove). Recomputed each
-            // iteration: as the groove line lifts, its FLANKS become the new local
-            // concavity and qualify next round - the fill propagates outward and
-            // stops by itself once no concavity spans the body groove (the taut
-            // state; a single static detection lifted only the 11 seam-line verts
-            // and left the visible groove).
-            std::vector<Vec3> clothVN(n, Vec3{0,0,0});
-            auto rebuildClothVN = [&]() {
-                std::fill(clothVN.begin(), clothVN.end(), Vec3{0,0,0});
-                if (!tris) return;
-                for (const auto& t : *tris) {
-                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
-                    Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
-                                    Sub(finalVerts[t[2]], finalVerts[t[0]]));
-                    for (int k = 0; k < 3; ++k) clothVN[t[k]] = Add(clothVN[t[k]], fn);
-                }
-                for (size_t i = 0; i < n; ++i) {
-                    float l = Len(clothVN[i]);
-                    if (l > 1.0e-6f) clothVN[i] = Scale(clothVN[i], 1.0f / l);
-                }
-            };
-            rebuildClothVN();
-            // Gate values MEASURED at the Blacksmith groove (gatefunnel.py): the
-            // groove verts sit 4.6-6.2u off the body (the cleft floor recedes), so
-            // any near-contact gate rejects them, and the BODY-GAP hollow measure
-            // goes NEGATIVE over a deep cleft (right for the armpit, wrong here).
-            // Correct detection: (a) the CLOTH SURFACE itself dips - the ring
-            // centroid sits OUTWARD of the vert along the cloth normal; (b) the
-            // BODY is laterally concave beneath (wall normals lean inward: +0.9..
-            // +1.2 at the cleft, -0.27 at a decorative pleat - the pleat guard).
-            std::vector<float> w(n, 0.0f);
-            std::vector<Vec3>  wTang(n, Vec3{0,0,0});   // across-groove dir per active vert
-            auto detect = [&]() -> int {
-                std::fill(w.begin(), w.end(), 0.0f);
-                int active = 0;
-                for (size_t i = 0; i < n; ++i) {
-                    if (nbr[i].size() < 3) continue;
-                    if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                    float cGap = 0.0f;
-                    if (!BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr)) continue;
-                    if (cGap < -0.5f || cGap > kCBNear) continue;
-                    const Vec3& nc = clothVN[i];
-                    Vec3 rc{0,0,0};
-                    for (uint32_t j : nbr[i]) rc = Add(rc, finalVerts[j]);
-                    rc = Scale(rc, 1.0f / (float)nbr[i].size());
-                    float clothDip = Dot(Sub(rc, finalVerts[i]), nc);   // + = local cloth concavity
-                    if (clothDip < kCBDepthMin) continue;
-                    Vec3 tang{ -nc.y, nc.x, 0.0f };            // horizontal, across the groove
-                    float tl = Len(tang);
-                    if (tl < 0.35f) continue;                   // top/bottom-facing cloth: skip
-                    tang = Scale(tang, 1.0f / tl);
-                    float conc = 0.0f;
-                    {
-                        Vec3 cpP{0,0,0}, nP{0,0,1}, cpM{0,0,0}, nM{0,0,1};
-                        float d2P = 0.0f, d2M = 0.0f;
-                        if (BVHClosestPoint(*bodyBVH, Add(finalVerts[i], Scale(tang, 2.5f)), cpP, nP, d2P) &&
-                            BVHClosestPoint(*bodyBVH, Sub(finalVerts[i], Scale(tang, 2.5f)), cpM, nM, d2M)) {
-                            conc = Dot(nP, Scale(tang, -1.0f)) + Dot(nM, tang);
+            if (!roi.empty()) {
+                auto weldExact = [&]() {
+                    for (const auto& grp : exactSeamGroups) {
+                        if (grp.size() < 2) continue;
+                        Vec3 avg{0.0f, 0.0f, 0.0f};
+                        int cnt = 0;
+                        for (uint32_t vi : grp) {
+                            if (vi >= n) continue;
+                            avg = Add(avg, finalVerts[vi]);
+                            ++cnt;
+                        }
+                        if (cnt < 2) continue;
+                        avg = Scale(avg, 1.0f / (float)cnt);
+                        for (uint32_t vi : grp)
+                            if (vi < n) finalVerts[vi] = avg;
+                    }
+                };
+                // 2) Chord enforcement per iteration: for each ROI slice, cloth
+                //    shoulder anchors = outermost (max y) BACK cloth verts within
+                //    +-1.5u of each body shoulder column; every back cloth vert
+                //    BETWEEN the shoulders lifts toward the chord (y only, outward,
+                //    step-capped). Iterated with floor/weld until converged.
+                int lifted = 0, ranIters = 0;
+                for (int it = 0; it < kCBIters; ++it) {
+                    int moved = 0;
+                    for (auto& kv : roi) {
+                        float zLo = kv.first * 2.0f, zHi = zLo + 2.0f;
+                        const CleftSlice& cs = kv.second;
+                        float aY = -1e30f, bY = -1e30f;
+                        float aX = cs.xl, bX = cs.xr;
+                        for (size_t i = 0; i < n; ++i) {
+                            const Vec3& p = finalVerts[i];
+                            if (p.y <= 0.0f || p.z < zLo - 1.0f || p.z >= zHi + 1.0f) continue;
+                            if (std::fabs(p.x - cs.xl) <= 1.5f && p.y > aY) { aY = p.y; aX = p.x; }
+                            if (std::fabs(p.x - cs.xr) <= 1.5f && p.y > bY) { bY = p.y; bX = p.x; }
+                        }
+                        if (aY < -1e29f || bY < -1e29f || bX - aX < 1.0f) continue;
+                        for (size_t i = 0; i < n; ++i) {
+                            if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                            Vec3& p = finalVerts[i];
+                            if (p.y <= 0.0f || p.z < zLo || p.z >= zHi) continue;
+                            if (p.x <= aX + 0.5f || p.x >= bX - 0.5f) continue;
+                            float t = (p.x - aX) / (bX - aX);
+                            float chordY = aY + t * (bY - aY);
+                            float lift = chordY - p.y;
+                            if (lift <= 0.02f) continue;
+                            p.y += std::min(lift * kCBBlend, kCBStep);
+                            ++moved;
                         }
                     }
-                    float concW = ClampRange((conc - 0.25f) / 0.5f, 0.0f, 1.0f);
-                    if (concW <= 0.0f) continue;
-                    w[i] = ClampRange((clothDip - kCBDepthMin) / 0.35f, 0.0f, 1.0f) * concW;
-                    wTang[i] = tang;
-                    if (w[i] > 0.0f) ++active;
-                }
-                return active;
-            };
-            // CHORD LIFT (level-2 bridge, 2026-07-10): pure smoothing killed the
-            // groove's shading but the user still sees the dip live - the spec is
-            // the full peak-to-peak chord: taut cloth touches the two cheeks and
-            // crosses STRAIGHT between them, air underneath. For each detected
-            // groove vert, march across the groove (greedy neighbour walk along
-            // +-tang) until the dip signal ends = the two SHOULDER verts on the
-            // cheeks; project the vert onto the shoulder-to-shoulder segment and
-            // lift it toward that chord along the cloth normal (outward-only,
-            // step-capped; iterated with re-detect so it converges and stops).
-            auto marchShoulder = [&](uint32_t start, const Vec3& dir,
-                                     std::vector<uint32_t>& path) -> int {
-                uint32_t cur = start;
-                for (int step = 0; step < 10; ++step) {
-                    float bestAdv = 0.25f;   // must make real progress across
-                    int bestJ = -1;
-                    for (uint32_t j : nbr[cur]) {
-                        float adv = Dot(Sub(finalVerts[j], finalVerts[cur]), dir);
-                        if (adv > bestAdv) { bestAdv = adv; bestJ = (int)j; }
+                    if (moved == 0) break;
+                    lifted += moved;
+                    ++ranIters;
+                    for (size_t i = 0; i < n; ++i) {
+                        Vec3 t = finalVerts[i];
+                        if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
                     }
-                    if (bestJ < 0) return -1;
-                    cur = (uint32_t)bestJ;
-                    if (w[cur] <= 0.0f) return (int)cur;   // out of the dip = shoulder
-                    path.push_back(cur);                    // intermediate groove vert
+                    weldExact();
                 }
-                return -1;
-            };
-            auto weldExact = [&]() {
-                for (const auto& grp : exactSeamGroups) {
-                    if (grp.size() < 2) continue;
-                    Vec3 avg{0.0f, 0.0f, 0.0f};
-                    int cnt = 0;
-                    for (uint32_t vi : grp) {
-                        if (vi >= n) continue;
-                        avg = Add(avg, finalVerts[vi]);
-                        ++cnt;
-                    }
-                    if (cnt < 2) continue;
-                    avg = Scale(avg, 1.0f / (float)cnt);
-                    for (uint32_t vi : grp)
-                        if (vi < n) finalVerts[vi] = avg;
+                if (lifted > 0) {
+                    // NO extra prox/support-cap invocations here: those helpers do
+                    // corrective work wherever violations exist GLOBALLY (measured:
+                    // 1384 edges adjusted, 4.7u moves at the waistband z70-78 - the
+                    // "pass disturbs unrelated regions" the user saw; the lift
+                    // itself moved 12 verts inside the ROI). The final-body-floor's
+                    // own cap cycles police the mesh right after this pass anyway.
+                    weldExact();
+                    int zMin = 9999, zMax = -9999;
+                    for (auto& kv : roi) { zMin = std::min(zMin, kv.first * 2); zMax = std::max(zMax, kv.first * 2 + 2); }
+                    HLog("detour: cleft-bridge shape='%s' roiSlices=%zu z=[%d..%d] lifted=%d iters=%d k=%.2f",
+                         shapeName.c_str(), roi.size(), zMin, zMax, lifted, ranIters, kCBBlend);
                 }
-            };
-            int firstActive = 0, lastActive = 0, ranIters = 0;
-            for (int it = 0; it < kCBIters; ++it) {
-                if (it > 0) rebuildClothVN();
-                int active = detect();
-                if (it == 0) firstActive = active;
-                lastActive = active;
-                if (active < (it == 0 ? 8 : 1)) break;
-                ++ranIters;
-                // Feather one ring outward (soft region boundary).
-                std::vector<float> wf = w;
-                for (size_t i = 0; i < n; ++i) {
-                    if (w[i] > 0.0f) continue;
-                    float mx = 0.0f;
-                    for (uint32_t j : nbr[i]) mx = std::max(mx, w[j]);
-                    if (mx > 0.0f) wf[i] = 0.5f * mx;
-                }
-                // 1) chord lift: for each detected seed, march BOTH ways to the
-                //    shoulders, then lift EVERY groove vert on the march path to
-                //    its projection on the shoulder-to-shoulder chord. Full gain
-                //    (not dip-weighted: the dip-weighted version converged to the
-                //    detection threshold, never to the chord - measured identical
-                //    renders), outward-only, step-capped per iteration.
-                std::vector<Vec3> next = finalVerts;
-                const float kCBMaxStep = EnvFloat("DRAPE_CLEFT_STEP", 0.6f);
-                for (size_t i = 0; i < n; ++i) {
-                    if (w[i] <= 0.0f) continue;
-                    std::vector<uint32_t> path;
-                    path.push_back((uint32_t)i);
-                    int L = marchShoulder((uint32_t)i, Scale(wTang[i], -1.0f), path);
-                    int R = marchShoulder((uint32_t)i, wTang[i], path);
-                    if (L < 0 || R < 0) continue;
-                    Vec3 A = finalVerts[(size_t)L], B = finalVerts[(size_t)R];
-                    Vec3 AB = Sub(B, A);
-                    float ab2 = Len2(AB);
-                    if (ab2 < 1.0e-6f) continue;
-                    for (uint32_t p : path) {
-                        if (p < invMass.size() && invMass[p] <= 0.0f) continue;
-                        float t = ClampRange(Dot(Sub(finalVerts[p], A), AB) / ab2, 0.0f, 1.0f);
-                        Vec3 chord = Add(A, Scale(AB, t));
-                        float lift = Dot(Sub(chord, finalVerts[p]), clothVN[p]);   // outward-only
-                        if (lift <= 0.0f) continue;
-                        lift = std::min(lift * kCBBlend, kCBMaxStep);
-                        Vec3 cand = Add(finalVerts[p], Scale(clothVN[p], lift));
-                        // Keep the strongest lift if multiple seeds cover this vert.
-                        if (Dot(Sub(cand, next[p]), clothVN[p]) > 0.0f) next[p] = cand;
-                    }
-                }
-                finalVerts.swap(next);
-                // 2) one light Laplacian on the feathered region coheres the lift.
-                next = finalVerts;
-                for (size_t i = 0; i < n; ++i) {
-                    if (wf[i] <= 0.0f || nbr[i].empty()) continue;
-                    if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                    Vec3 avg{0,0,0};
-                    for (uint32_t j : nbr[i]) avg = Add(avg, finalVerts[j]);
-                    avg = Scale(avg, 1.0f / (float)nbr[i].size());
-                    next[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.25f * wf[i]));
-                }
-                finalVerts.swap(next);
-                for (size_t i = 0; i < n; ++i) {
-                    if (wf[i] <= 0.0f) continue;
-                    Vec3 t = finalVerts[i];
-                    if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
-                }
-                weldExact();
-            }
-            if (ranIters > 0) {
-                // Prox-pair invariant (vampire-tear lesson, 6th application): the
-                // vampire's split-island seams are NEAR pairs, not exact twins -
-                // weldExact alone left them to drift (worstEdgeStretch 5.45 -> 8.88
-                // on vampire_robes_alt, measured). Restore them in-pass.
-                applyFinalProxSeamCap(6, "cleft-prox-cap");
-                applyFinalSupportCap(8, "cleft-bridge-cap");
-                weldExact();
-                HLog("detour: cleft-bridge shape='%s' active=%d->%d iters=%d/%d k=%.2f depthMin=%.2f",
-                     shapeName.c_str(), firstActive, lastActive, ranIters, kCBIters, kCBBlend, kCBDepthMin);
             }
         }
     }
