@@ -11247,9 +11247,44 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     }
                 }
                 if (lifted > 0) {
+                    // FINAL SMOOTH (M4 lesson: collision-correctness != visual
+                    // smoothness). The angle-binned radial push leaves a ~30-degree
+                    // ridge along bin boundaries (x=0 center-back is one) that
+                    // catches light as a bright line in OutfitStudio's shaded view
+                    // (user-reported "tear" on the Blacksmith skirt; measured:
+                    // worst dihedral cos +0.93 -> +0.86 with the pass on). Mirror
+                    // the gravity-shadow's final tangential smoothing: pure
+                    // Laplacian on the touched verts, then re-floor, then re-weld.
+                    const int kFHFinalSmooth = (int)EnvFloat("DRAPE_FITTED_HBRIDGE_SMOOTH", 4.0f);
+                    for (int it = 0; it < kFHFinalSmooth; ++it) {
+                        std::vector<Vec3> sum(n, Vec3{});
+                        std::vector<int> cnt(n, 0);
+                        for (const auto& e : useEdges) {
+                            if (e.a >= n || e.b >= n) continue;
+                            sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                            sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                        }
+                        for (size_t i = 0; i < n; ++i) {
+                            if (!touched[i] || cnt[i] <= 0) continue;
+                            Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                            finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.5f));
+                        }
+                    }
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!touched[i]) continue;
+                        Vec3 t = finalVerts[i];
+                        if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
+                    }
+                    for (auto& kv : twinGroups) {
+                        if (kv.second.size() < 2) continue;
+                        Vec3 avg{0,0,0};
+                        for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
+                        avg = Scale(avg, 1.0f / (float)kv.second.size());
+                        for (uint32_t j : kv.second) finalVerts[j] = avg;
+                    }
                     applyFinalSupportCap(8, "fitted-hbridge-cap");
-                    HLog("detour: fitted-hbridge shape='%s' lifted=%d hangVerts=%d iters=%d push=%.2f angle=%d",
-                         shapeName.c_str(), lifted, nHang, kFHIters, kFHPush, kFHAngle);
+                    HLog("detour: fitted-hbridge shape='%s' lifted=%d hangVerts=%d iters=%d push=%.2f angle=%d smooth=%d",
+                         shapeName.c_str(), lifted, nHang, kFHIters, kFHPush, kFHAngle, kFHFinalSmooth);
                 }
             }
         }
