@@ -4967,10 +4967,38 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) {
                     float dist = std::sqrt(d2);
                     float sign = Dot(Sub(supportVerts[i], cp), nrm);  // >0 outside
+                    // CONTACT-AWARE REST (2026-07-09, cofrinho spec): a vert whose
+                    // nearest body surface faces UP and is CLOSE is RESTING on the
+                    // body (glute top, shoulder slope) - soft cloth lies there and
+                    // draws the silhouette instead of being flattened by the hang
+                    // treatment. Dampen the BONE drape signal too (the glute verts
+                    // get sig~1 from pelvis weights, not from the gap boost), so
+                    // they keep conform-follow. True hanging cloth (horizontal or
+                    // downward-facing nearest surface: skirt sides, under-butt,
+                    // between-legs spans) is untouched - the anti-tuck doctrine
+                    // stays. DRAPE_HANG_CONTACT=0 restores the old behaviour.
+                    // SHIPS DARK (default OFF): corpus showed the pre-classification
+                    // dampening regresses LAYERED loose garments (yarl Clothes poke
+                    // through the cloak, worstGarmentPen 1.4->9.0) - the resting
+                    // behaviour must be taught to the verlet/finishing passes, not to
+                    // the classifier. Kept for harness A/B (DRAPE_HANG_CONTACT=1).
+                    float restW = 0.0f;
+                    if (sign > 0.0f && nrm.z > 0.0f &&
+                        EnvToggle("DRAPE_HANG_CONTACT", false)) {
+                        const float kRestUpStart = EnvFloat("DRAPE_HANG_REST_UP", 0.30f);
+                        const float kRestMaxDist = EnvFloat("DRAPE_HANG_REST_DIST", 2.6f);
+                        const float kRestSigMax  = EnvFloat("DRAPE_HANG_REST_SIG", 0.75f);
+                        float upW   = ClampRange((nrm.z - kRestUpStart) / 0.35f, 0.0f, 1.0f);
+                        float nearW = ClampRange((kRestMaxDist - dist) / 1.0f, 0.0f, 1.0f);
+                        restW = upW * nearW;
+                        sig *= (1.0f - restW * kRestSigMax);
+                    }
                     if (sign > 0.0f && dist > kGapNear) {
                         // Map gap [near..far] Ã¢â€ â€™ hang factor [0..1].
                         float hang = ClampRange((dist - kGapNear) / (kGapFar - kGapNear),
                                                 0.0f, 1.0f);
+                        // Resting verts don't get the gap boost either (same restW).
+                        hang *= (1.0f - restW);
                         if (hang > 0.0f) {
                             float boosted = std::max(sig, hang);
                             if (boosted > sig + 0.01f) ++hangVerts;
@@ -11089,6 +11117,84 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    // Ã¢â€â‚¬Ã¢â€â‚¬ TENSION CHORD (2026-07-09, cofrinho spec: FITTED bridges body hollows) Ã¢â€â‚¬Ã¢â€â‚¬
+    // The user's material semantics: FITTED = tensioned cloth, so where the garment
+    // spans a BODY concavity (the glute cleft top) it should form a smooth CHORD
+    // between the contact shoulders, not copy the crease. panel-flatten cannot do
+    // this: its target is AUTHORED curvature and the author sculpted the garment on
+    // a cleft body, so the crease IS authored and survives (measured: gapMin 1.5->0.5
+    // leaves the cofrinho V unchanged). This pass targets the RING CENTROID instead:
+    // a vert that (a) sits in the near-contact band, (b) dips into a body hollow
+    // relative to its ring (ring-centroid body-gap exceeds the vert's by
+    // kTensionHollow), and (c) whose ring centroid lies FARTHER from the body (the
+    // move is outward-only, so it can neither clip nor magnetise) is blended toward
+    // the centroid. Exact seam twins are re-welded each round (vampire-tear lesson).
+    // FITTED_CLOTH only; DRAPE_TENSION_CHORD=0 disables.
+    if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
+        EnvToggle("DRAPE_TENSION_CHORD", true) &&
+        params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
+        n > 0 && n <= 0xFFFF) {
+        const float kTensionHollow = EnvFloat("DRAPE_TENSION_HOLLOW", 0.35f);
+        const float kTensionBand   = EnvFloat("DRAPE_TENSION_BAND", 3.0f);
+        const float kTensionK      = EnvFloat("DRAPE_TENSION_K", 0.45f);
+        const int   kTensionIters  = (int)EnvFloat("DRAPE_TENSION_ITERS", 5.0f);
+        // 1-ring adjacency sums.
+        std::vector<std::vector<uint32_t>> nbr(n);
+        for (const auto& e : useEdges) {
+            if (e.a >= n || e.b >= n) continue;
+            nbr[e.a].push_back(e.b);
+            nbr[e.b].push_back(e.a);
+        }
+        // Exact-twin groups (coincident base verts = sewn seam copies).
+        std::unordered_map<uint64_t, std::vector<uint32_t>> twinGroups;
+        {
+            auto q = [](float v) -> uint64_t {
+                return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+            };
+            for (size_t i = 0; i < n; ++i) {
+                const Vec3& p = baseVerts[i];
+                uint64_t k = (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+                twinGroups[k].push_back((uint32_t)i);
+            }
+        }
+        int lifted = 0;
+        for (int it = 0; it < kTensionIters; ++it) {
+            std::vector<Vec3> next = finalVerts;
+            int roundLifted = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (nbr[i].size() < 3) continue;
+                if (i < invMass.size() && invMass[i] <= 0.0f) continue;   // pinned
+                float gV = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], gV, nullptr)) continue;
+                if (gV < -0.5f || gV > kTensionBand) continue;            // contact band only
+                Vec3 c{0,0,0};
+                for (uint32_t j : nbr[i]) c = Add(c, finalVerts[j]);
+                c = Scale(c, 1.0f / (float)nbr[i].size());
+                float gC = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, c, gC, nullptr)) continue;
+                float hollow = gC - gV;                    // vert dips under its ring
+                if (hollow < kTensionHollow) continue;     // not spanning a hollow
+                float w = ClampRange((hollow - kTensionHollow) / 0.9f, 0.0f, 1.0f);
+                next[i] = Add(finalVerts[i], Scale(Sub(c, finalVerts[i]), kTensionK * w));
+                ++roundLifted;
+            }
+            if (roundLifted == 0) break;
+            lifted += roundLifted;
+            finalVerts.swap(next);
+            // Re-weld exact seam twins (average the group) so the lift can't split seams.
+            for (auto& kv : twinGroups) {
+                if (kv.second.size() < 2) continue;
+                Vec3 avg{0,0,0};
+                for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
+                avg = Scale(avg, 1.0f / (float)kv.second.size());
+                for (uint32_t j : kv.second) finalVerts[j] = avg;
+            }
+        }
+        if (lifted > 0)
+            HLog("detour: tension-chord shape='%s' lifted=%d iters=%d hollow=%.2f k=%.2f",
+                 shapeName.c_str(), lifted, kTensionIters, kTensionHollow, kTensionK);
+    }
+
     // â”€â”€ Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) â”€â”€
     // The sculpt-driven fix for the armpit crater (vanilla-inherited defect #6), designed
     // against the author's hand-sculpted RM_Heavy reference (tools/osd_extract.py +
@@ -11676,6 +11782,58 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
         }   // aGapP75 >= smTight (not skin-tight-like)
+    }
+
+    // TRUE-final body floor (2026-07-09, the loose waistband clip). The designated
+    // last-line clearance (final-body-clearance, ~:9912) is deliberately weak (one
+    // round, step <= 0.25) so a vert 1.5u deep stays 1.25u deep, AND several passes
+    // that move thousands of verts still run after it (loose-azimuth-restore,
+    // authored-line-locks, panel-flatten). Measured: 19 deep pens (max 1.5u) at the
+    // cinched waistband z75-90 back on loose garments = the user-visible poke-through;
+    // fitted's 91 pens are 0.29u shallow and invisible. This floor runs after EVERY
+    // position-editing pass, right before writeback: full push-out to a 0.06 floor
+    // (same semantics as final-body-reclear :7659), rigid plates excluded (keep exact
+    // shape). Exact seam twins get identical push targets (same position -> same
+    // closest point), so welds survive. DRAPE_FINAL_FLOOR=0 disables.
+    // OUTERMOST LAYER ONLY: the cover/suppress passes deliberately bury covered
+    // verts INSIDE the body to hide them under outer garments (pants waist under
+    // the clothes); flooring those digs them back out and pokes them through the
+    // outer layer (measured on yarl Pants: worstGarmentPen 2.96 -> 5.67). A clip is
+    // user-visible only on the outermost layer, which is exactly where the floor
+    // is needed (Blacksmith torso waistband) and where no cover pass buries verts.
+    if (bodyBVH && bodyBVH->valid && (!outerColliders || outerColliders->empty()) &&
+        EnvToggle("DRAPE_FINAL_FLOOR", true)) {
+        const float kFinalFloorClear = 0.06f;
+        auto floorable = [&](size_t i) -> bool {
+            int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+            // Rigid plates keep their exact shape and placement (a translation was
+            // tried and embeds the island's far side - a plate near a limb has no
+            // clip-free rigid motion; the rigid-island pass owns their placement).
+            return !(id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id]);
+        };
+        // Floor -> seam-aware stretch cap -> floor. A bare one-shot push of a
+        // 1.5u-deep vert spikes its edges (vampire worstEdgeStretch 3.14 -> 4.99)
+        // and a Laplacian relaxation is WORSE on seam-heavy meshes (7.87, the
+        // vampire-tear failure mode). applyFinalSupportCap is the pipeline's
+        // designated tear police (seam-group aware); alternating it with the push
+        // converges with pens ~0 and no new tears.
+        int floored = 0;
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            int moved = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (!floorable(i)) continue;
+                Vec3 target = finalVerts[i];
+                if (!BVHCollideVertex(*bodyBVH, target, kFinalFloorClear)) continue;
+                finalVerts[i] = target;
+                ++moved;
+            }
+            if (cycle == 0) floored = moved;
+            if (moved == 0) break;
+            applyFinalSupportCap(16, "final-floor-stretch-cap");
+        }
+        if (floored > 0)
+            HLog("detour: final-body-floor shape='%s' clr=%.2f pushed=%d",
+                 shapeName.c_str(), kFinalFloorClear, floored);
     }
 
     static constexpr float kWriteEps2 = 1.0e-10f;
