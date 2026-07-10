@@ -11145,8 +11145,200 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // this (its target is AUTHORED curvature and the crease is authored).
     // FITTED_CLOTH only (the merged Loose arrives here remapped);
     // DRAPE_FITTED_HBRIDGE=0 disables.
+    // SHIPS DARK (2026-07-09 night): the user's verdict on the merge - "fitted was
+    // near-perfect; I only wanted the loose cofrinho behaviour, keep EVERYTHING else
+    // as it was". The bridge as shipped did not read as the loose bridge live, so it
+    // goes dark until it demonstrably reproduces it (fitted_hbridge_on.flag / env
+    // for A/B against the user's OS export in tmp/torso_live.obj).
+    bool fittedHBridge = EnvToggle("DRAPE_FITTED_HBRIDGE", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    fittedHBridge = fittedHBridge || fs::exists("E:/SkyrimDev/Drape/fitted_hbridge_on.flag");
+#endif
+
+    // Ã¢â€â‚¬Ã¢â€â‚¬ CLEFT-BRIDGE SMOOTH (2026-07-10) Ã¢â€â‚¬Ã¢â€â‚¬ the butt bridge, done right this time.
+    // Measured mechanism (loose-minus-fitted delta field, tmp/beltlive/deltafield.py):
+    // the old loose path killed the glute-cleft groove NOT by pushing cloth out
+    // (hbridge: no-op there) but by verlet gravity-settle + 9 rounds of Laplacian,
+    // which erases the high-frequency groove the vanilla conform copies from the
+    // MORPHED body's cleft. A python prototype confirmed pure region smoothing
+    // reproduces the loose look; the full pit machinery (DRAPE_PIT_BRIDGE) also
+    // does but moves 83% of the mesh and spikes the front hem - too broad.
+    // This pass: pit-style DETECTION only (morph-AMPLIFIED lateral body hollow:
+    // hollow depth NOW minus hollow depth AUTHORED - so designed pleats/grooves
+    // keep weight 0 and survive), then weighted Laplacian smoothing with the
+    // three hard-learned protections: canonical exactSeamGroups weld each round
+    // (front-seam twin ladder!), body floor on touched verts, seam-aware support
+    // cap at the end. DRAPE_CLEFT_BRIDGE=0 or cleft_bridge_off.flag disables.
+    {
+        bool cleftOn = EnvToggle("DRAPE_CLEFT_BRIDGE", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (fs::exists("E:/SkyrimDev/Drape/cleft_bridge_off.flag"))
+            cleftOn = false;
+#endif
+        if (cleftOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
+            params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
+            g_refBodyBVH.valid && n > 0 && n <= 0xFFFF) {
+            // Defaults tuned on the live Blacksmith capture (butt_cleft6.png):
+            // 0.08/0.45/8 left a faint groove (equilibrium stops at the threshold);
+            // 0.04/0.60/16 reads continuous like the loose target, ~19 verts/round.
+            const float kCBNear     = EnvFloat("DRAPE_CLEFT_NEAR", 8.0f);   // groove verts sit 4.6-6.2 off (cleft floor recedes)
+            const float kCBDepthMin = EnvFloat("DRAPE_CLEFT_DEPTH", 0.04f); // min cloth-surface dip (ring-outward)
+            const float kCBBlend    = EnvFloat("DRAPE_CLEFT_K", 0.60f);
+            const int   kCBIters    = (int)EnvFloat("DRAPE_CLEFT_ITERS", 16.0f);
+            // 1-ring adjacency.
+            std::vector<std::vector<uint32_t>> nbr(n);
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n) continue;
+                nbr[e.a].push_back(e.b);
+                nbr[e.b].push_back(e.a);
+            }
+            // Detection, two independent gates (both must fire):
+            // (a) the cloth locally DIPS toward the body relative to its ring
+            //     (hollowCur = ring-centroid body-gap minus own gap) - it is copying
+            //     a groove;
+            // (b) the BODY ITSELF is laterally concave beneath (sample the body's
+            //     closest-point walls +-2.5u along the horizontal tangent; in a
+            //     groove both wall normals lean back toward the centre). This is
+            //     what separates the glute cleft (body groove -> bridge it, even
+            //     though it is AUTHORED - the tension semantics override) from a
+            //     decorative pleat (cloth groove over a SMOOTH body -> weight 0,
+            //     the pleat survives). The earlier morph-amplified gate failed
+            //     here: the cofrinho groove is mostly authored (9 verts active).
+            // Cloth vertex normals (for the across-the-groove tangent: the BODY's
+            // nearest-point normal is a groove WALL for exactly the verts we care
+            // about, which points the tangent ALONG the groove - measured, zero
+            // detections. The cloth normal over a groove faces outward, so its
+            // horizontal perpendicular crosses the groove). Recomputed each
+            // iteration: as the groove line lifts, its FLANKS become the new local
+            // concavity and qualify next round - the fill propagates outward and
+            // stops by itself once no concavity spans the body groove (the taut
+            // state; a single static detection lifted only the 11 seam-line verts
+            // and left the visible groove).
+            std::vector<Vec3> clothVN(n, Vec3{0,0,0});
+            auto rebuildClothVN = [&]() {
+                std::fill(clothVN.begin(), clothVN.end(), Vec3{0,0,0});
+                if (!tris) return;
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                    Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                    for (int k = 0; k < 3; ++k) clothVN[t[k]] = Add(clothVN[t[k]], fn);
+                }
+                for (size_t i = 0; i < n; ++i) {
+                    float l = Len(clothVN[i]);
+                    if (l > 1.0e-6f) clothVN[i] = Scale(clothVN[i], 1.0f / l);
+                }
+            };
+            rebuildClothVN();
+            // Gate values MEASURED at the Blacksmith groove (gatefunnel.py): the
+            // groove verts sit 4.6-6.2u off the body (the cleft floor recedes), so
+            // any near-contact gate rejects them, and the BODY-GAP hollow measure
+            // goes NEGATIVE over a deep cleft (right for the armpit, wrong here).
+            // Correct detection: (a) the CLOTH SURFACE itself dips - the ring
+            // centroid sits OUTWARD of the vert along the cloth normal; (b) the
+            // BODY is laterally concave beneath (wall normals lean inward: +0.9..
+            // +1.2 at the cleft, -0.27 at a decorative pleat - the pleat guard).
+            std::vector<float> w(n, 0.0f);
+            auto detect = [&]() -> int {
+                std::fill(w.begin(), w.end(), 0.0f);
+                int active = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (nbr[i].size() < 3) continue;
+                    if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                    float cGap = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, finalVerts[i], cGap, nullptr)) continue;
+                    if (cGap < -0.5f || cGap > kCBNear) continue;
+                    const Vec3& nc = clothVN[i];
+                    Vec3 rc{0,0,0};
+                    for (uint32_t j : nbr[i]) rc = Add(rc, finalVerts[j]);
+                    rc = Scale(rc, 1.0f / (float)nbr[i].size());
+                    float clothDip = Dot(Sub(rc, finalVerts[i]), nc);   // + = local cloth concavity
+                    if (clothDip < kCBDepthMin) continue;
+                    Vec3 tang{ -nc.y, nc.x, 0.0f };            // horizontal, across the groove
+                    float tl = Len(tang);
+                    if (tl < 0.35f) continue;                   // top/bottom-facing cloth: skip
+                    tang = Scale(tang, 1.0f / tl);
+                    float conc = 0.0f;
+                    {
+                        Vec3 cpP{0,0,0}, nP{0,0,1}, cpM{0,0,0}, nM{0,0,1};
+                        float d2P = 0.0f, d2M = 0.0f;
+                        if (BVHClosestPoint(*bodyBVH, Add(finalVerts[i], Scale(tang, 2.5f)), cpP, nP, d2P) &&
+                            BVHClosestPoint(*bodyBVH, Sub(finalVerts[i], Scale(tang, 2.5f)), cpM, nM, d2M)) {
+                            conc = Dot(nP, Scale(tang, -1.0f)) + Dot(nM, tang);
+                        }
+                    }
+                    float concW = ClampRange((conc - 0.25f) / 0.5f, 0.0f, 1.0f);
+                    if (concW <= 0.0f) continue;
+                    w[i] = ClampRange((clothDip - kCBDepthMin) / 0.35f, 0.0f, 1.0f) * concW;
+                    if (w[i] > 0.0f) ++active;
+                }
+                return active;
+            };
+            auto weldExact = [&]() {
+                for (const auto& grp : exactSeamGroups) {
+                    if (grp.size() < 2) continue;
+                    Vec3 avg{0.0f, 0.0f, 0.0f};
+                    int cnt = 0;
+                    for (uint32_t vi : grp) {
+                        if (vi >= n) continue;
+                        avg = Add(avg, finalVerts[vi]);
+                        ++cnt;
+                    }
+                    if (cnt < 2) continue;
+                    avg = Scale(avg, 1.0f / (float)cnt);
+                    for (uint32_t vi : grp)
+                        if (vi < n) finalVerts[vi] = avg;
+                }
+            };
+            int firstActive = 0, lastActive = 0, ranIters = 0;
+            for (int it = 0; it < kCBIters; ++it) {
+                if (it > 0) rebuildClothVN();
+                int active = detect();
+                if (it == 0) firstActive = active;
+                lastActive = active;
+                if (active < (it == 0 ? 8 : 1)) break;
+                ++ranIters;
+                // Feather one ring outward (soft region boundary).
+                std::vector<float> wf = w;
+                for (size_t i = 0; i < n; ++i) {
+                    if (w[i] > 0.0f) continue;
+                    float mx = 0.0f;
+                    for (uint32_t j : nbr[i]) mx = std::max(mx, w[j]);
+                    if (mx > 0.0f) wf[i] = 0.5f * mx;
+                }
+                std::vector<Vec3> next = finalVerts;
+                for (size_t i = 0; i < n; ++i) {
+                    if (wf[i] <= 0.0f || nbr[i].empty()) continue;
+                    if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                    Vec3 avg{0,0,0};
+                    for (uint32_t j : nbr[i]) avg = Add(avg, finalVerts[j]);
+                    avg = Scale(avg, 1.0f / (float)nbr[i].size());
+                    next[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), kCBBlend * wf[i]));
+                }
+                finalVerts.swap(next);
+                for (size_t i = 0; i < n; ++i) {
+                    if (wf[i] <= 0.0f) continue;
+                    Vec3 t = finalVerts[i];
+                    if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
+                }
+                weldExact();
+            }
+            if (ranIters > 0) {
+                // Prox-pair invariant (vampire-tear lesson, 6th application): the
+                // vampire's split-island seams are NEAR pairs, not exact twins -
+                // weldExact alone left them to drift (worstEdgeStretch 5.45 -> 8.88
+                // on vampire_robes_alt, measured). Restore them in-pass.
+                applyFinalProxSeamCap(6, "cleft-prox-cap");
+                applyFinalSupportCap(8, "cleft-bridge-cap");
+                weldExact();
+                HLog("detour: cleft-bridge shape='%s' active=%d->%d iters=%d/%d k=%.2f depthMin=%.2f",
+                     shapeName.c_str(), firstActive, lastActive, ranIters, kCBIters, kCBBlend, kCBDepthMin);
+            }
+        }
+    }
+
     if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
-        EnvToggle("DRAPE_FITTED_HBRIDGE", true) &&
+        fittedHBridge &&
         params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
         n > 0 && n <= 0xFFFF) {
         // FITTED-HBRIDGE (2026-07-09 v2, replaces the ring-centroid "tension chord"
@@ -11185,18 +11377,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (BuildHorizontalBridgeProfile(bodyBVH->verts, bodyBVH->tris,
                                              kHBridgeZCell, kHBridgeAngleBins,
                                              ceiling, prof)) {
-                // Exact-twin groups (coincident base verts = sewn seam copies).
-                std::unordered_map<uint64_t, std::vector<uint32_t>> twinGroups;
-                {
-                    auto q = [](float v) -> uint64_t {
-                        return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
-                    };
-                    for (size_t i = 0; i < n; ++i) {
-                        const Vec3& p = baseVerts[i];
-                        uint64_t k = (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
-                        twinGroups[k].push_back((uint32_t)i);
+                // Seam welding uses the pipeline's canonical exactSeamGroups (base
+                // tol 0.003). The first version hashed coordinates rounded to 0.01,
+                // which puts coincident twins straddling a rounding boundary in
+                // DIFFERENT buckets - that unwelded ladder was the Blacksmith
+                // front-seam tear (splits up to 1.73u from this pass alone).
+                auto weldExactGroups = [&]() {
+                    for (const auto& grp : exactSeamGroups) {
+                        if (grp.size() < 2) continue;
+                        Vec3 avg{0.0f, 0.0f, 0.0f};
+                        int cnt = 0;
+                        for (uint32_t vi : grp) {
+                            if (vi >= n) continue;
+                            avg = Add(avg, finalVerts[vi]);
+                            ++cnt;
+                        }
+                        if (cnt < 2) continue;
+                        avg = Scale(avg, 1.0f / (float)cnt);
+                        for (uint32_t vi : grp)
+                            if (vi < n) finalVerts[vi] = avg;
                     }
-                }
+                };
                 std::vector<uint8_t> touched(n, 0);
                 int lifted = 0;
                 std::vector<float> clothR;
@@ -11238,13 +11439,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         Vec3 t = finalVerts[i];
                         if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
                     }
-                    for (auto& kv : twinGroups) {
-                        if (kv.second.size() < 2) continue;
-                        Vec3 avg{0,0,0};
-                        for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
-                        avg = Scale(avg, 1.0f / (float)kv.second.size());
-                        for (uint32_t j : kv.second) finalVerts[j] = avg;
-                    }
+                    weldExactGroups();
                 }
                 if (lifted > 0) {
                     // FINAL SMOOTH (M4 lesson: collision-correctness != visual
@@ -11275,13 +11470,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         Vec3 t = finalVerts[i];
                         if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
                     }
-                    for (auto& kv : twinGroups) {
-                        if (kv.second.size() < 2) continue;
-                        Vec3 avg{0,0,0};
-                        for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
-                        avg = Scale(avg, 1.0f / (float)kv.second.size());
-                        for (uint32_t j : kv.second) finalVerts[j] = avg;
-                    }
+                    weldExactGroups();
                     applyFinalSupportCap(8, "fitted-hbridge-cap");
                     HLog("detour: fitted-hbridge shape='%s' lifted=%d hangVerts=%d iters=%d push=%.2f angle=%d smooth=%d",
                          shapeName.c_str(), lifted, nHang, kFHIters, kFHPush, kFHAngle, kFHFinalSmooth);
@@ -11925,6 +12114,49 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // vampire-tear failure mode). applyFinalSupportCap is the pipeline's
         // designated tear police (seam-group aware); alternating it with the push
         // converges with pens ~0 and no new tears.
+        // Exact-seam weld for THIS pass (2026-07-10, the Blacksmith front-seam tear).
+        // The skirt's centre seams are coincident twin LADDERS (v393<->v411 etc, the
+        // halves share almost no edges); the pipeline's final-exact-seam-weld runs
+        // BEFORE this floor, so any differential push here re-opens them (measured:
+        // floor alone split twins up to 0.86u, and the support cap - not seam-aware
+        // on the fitted path - split them further). End every cycle by collapsing
+        // each exactSeamGroup to its floored MEAN: members are coincident, so one
+        // BVHCollideVertex on the mean serves the whole group.
+        auto weldGroupsFloored = [&]() {
+            for (const auto& grp : exactSeamGroups) {
+                if (grp.size() < 2) continue;
+                Vec3 avg{0.0f, 0.0f, 0.0f};
+                int cnt = 0;
+                bool allFloorable = true;
+                float maxSpread2 = 0.0f;
+                Vec3 first{0,0,0};
+                bool haveFirst = false;
+                for (uint32_t vi : grp) {
+                    if (vi >= n) continue;
+                    avg = Add(avg, finalVerts[vi]);
+                    ++cnt;
+                    if (!floorable(vi)) allFloorable = false;
+                    if (!haveFirst) { first = finalVerts[vi]; haveFirst = true; }
+                    else maxSpread2 = std::max(maxSpread2, Len2(Sub(finalVerts[vi], first)));
+                }
+                // Only groups THIS pass could have split need welding; untouched
+                // coincident groups are a no-op and buried groups must not be
+                // dragged around.
+                if (cnt < 2 || maxSpread2 < 1.0e-8f) continue;
+                avg = Scale(avg, 1.0f / (float)cnt);
+                // Floor the mean only when EVERY member is floorable: a mixed group
+                // (one member covered by an outer garment = deliberately buried by
+                // the cover pass) must stay buried - flooring the mean dragged the
+                // fur Pants' buried waist out through the outer layer
+                // (worstEdgeStretch 4.1 -> 9.9, measured).
+                if (allFloorable) {
+                    Vec3 t = avg;
+                    if (BVHCollideVertex(*bodyBVH, t, kFinalFloorClear)) avg = t;
+                }
+                for (uint32_t vi : grp)
+                    if (vi < n) finalVerts[vi] = avg;
+            }
+        };
         int floored = 0;
         for (int cycle = 0; cycle < 3; ++cycle) {
             int moved = 0;
@@ -11938,6 +12170,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (cycle == 0) floored = moved;
             if (moved == 0) break;
             applyFinalSupportCap(16, "final-floor-stretch-cap");
+            weldGroupsFloored();
         }
         if (floored > 0)
             HLog("detour: final-body-floor shape='%s' clr=%.2f pushed=%d",
