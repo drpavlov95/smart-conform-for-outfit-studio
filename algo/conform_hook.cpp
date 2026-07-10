@@ -4528,6 +4528,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (rawDiff.empty() || baseVerts.empty())
         return false;
 
+    // MERGED CLOTH PRESET (2026-07-09, user decision): Loose Draped solves down the
+    // FITTED path. Measured across every outfit tested live and against the hand
+    // sculpts, fitted wins everywhere loose was supposed to (yarl Clothes 1.71->0.83,
+    // falmer Cloth 4.45->2.40, vampire robes 2.19->1.13 vs sculpt; straight hem vs
+    // wavy hem) EXCEPT the glute-cleft bridge, which is imported into the fitted
+    // path as the fitted-hbridge pass below. Fitted+Loose are a continuum, not two
+    // regimes - the 50+ coupled branches of the loose fork are why each fix landed
+    // on one side only. Categorical presets (skin-tight, belt, rigid, tubular) stay.
+    // Escape hatches: DRAPE_MERGE_LOOSE=0 env, or loose_split.flag live.
+    {
+        bool mergeLoose = EnvToggle("DRAPE_MERGE_LOOSE", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (fs::exists("E:/SkyrimDev/Drape/loose_split.flag"))
+            mergeLoose = false;
+#endif
+        if (mergeLoose && NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) {
+            HLog("merged-preset: shape='%s' Loose Draped -> Fitted path", shapeName.c_str());
+            preset = DRAPE_PRESET_FITTED_CLOTH;
+        }
+    }
+
     StaticSolveParams params = StaticParamsForPreset(preset);
     if (!params.enabled)
         return false;
@@ -11117,82 +11138,121 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ TENSION CHORD (2026-07-09, cofrinho spec: FITTED bridges body hollows) Ã¢â€â‚¬Ã¢â€â‚¬
-    // The user's material semantics: FITTED = tensioned cloth, so where the garment
-    // spans a BODY concavity (the glute cleft top) it should form a smooth CHORD
-    // between the contact shoulders, not copy the crease. panel-flatten cannot do
-    // this: its target is AUTHORED curvature and the author sculpted the garment on
-    // a cleft body, so the crease IS authored and survives (measured: gapMin 1.5->0.5
-    // leaves the cofrinho V unchanged). This pass targets the RING CENTROID instead:
-    // a vert that (a) sits in the near-contact band, (b) dips into a body hollow
-    // relative to its ring (ring-centroid body-gap exceeds the vert's by
-    // kTensionHollow), and (c) whose ring centroid lies FARTHER from the body (the
-    // move is outward-only, so it can neither clip nor magnetise) is blended toward
-    // the centroid. Exact seam twins are re-welded each round (vampire-tear lesson).
-    // FITTED_CLOTH only; DRAPE_TENSION_CHORD=0 disables.
+    // Ã¢â€â‚¬Ã¢â€â‚¬ FITTED-HBRIDGE (cofrinho spec: FITTED bridges the glute cleft) Ã¢â€â‚¬Ã¢â€â‚¬
+    // The user's material semantics: FITTED = tensioned cloth, so where a hanging
+    // panel spans a lateral BODY concavity (the butt cleft) it forms a smooth chord
+    // between the mounds instead of copying the crease. panel-flatten cannot do
+    // this (its target is AUTHORED curvature and the crease is authored).
+    // FITTED_CLOTH only (the merged Loose arrives here remapped);
+    // DRAPE_FITTED_HBRIDGE=0 disables.
     if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
-        EnvToggle("DRAPE_TENSION_CHORD", true) &&
+        EnvToggle("DRAPE_FITTED_HBRIDGE", true) &&
         params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
         n > 0 && n <= 0xFFFF) {
-        const float kTensionHollow = EnvFloat("DRAPE_TENSION_HOLLOW", 0.35f);
-        const float kTensionBand   = EnvFloat("DRAPE_TENSION_BAND", 3.0f);
-        const float kTensionK      = EnvFloat("DRAPE_TENSION_K", 0.45f);
-        const int   kTensionIters  = (int)EnvFloat("DRAPE_TENSION_ITERS", 5.0f);
-        // 1-ring adjacency sums.
-        std::vector<std::vector<uint32_t>> nbr(n);
-        for (const auto& e : useEdges) {
-            if (e.a >= n || e.b >= n) continue;
-            nbr[e.a].push_back(e.b);
-            nbr[e.b].push_back(e.a);
+        // FITTED-HBRIDGE (2026-07-09 v2, replaces the ring-centroid "tension chord"
+        // which measurably could not reproduce the loose butt-bridge: dist-to-loose
+        // in the cleft zone stayed ~1.7u across every knob). hbridge was DESIGNED
+        // for "lateral concavities such as the butt cleft" but lived only in the
+        // verlet (loose) path; the merged preset imports it for the fitted path's
+        // HANGING PANELS (authored gap marks hanging - same signal as panel-flatten).
+        // Deliberately WITHOUT gravity-shadow: the shadow's column push is what
+        // splayed the yarl skirt open between the legs on the old loose path; the
+        // angle-capped hbridge cannot see wide pass-through gaps. Twins re-welded
+        // per round; seam-aware support cap at the end.
+        const float kFHPush   = EnvFloat("DRAPE_FITTED_HBRIDGE_PUSH", 0.35f);
+        const int   kFHIters  = (int)EnvFloat("DRAPE_FITTED_HBRIDGE_ITERS", 6.0f);
+        const int   kFHAngle  = (int)EnvFloat("DRAPE_HBRIDGE_ANGLE", (float)kHBridgeMaxAngle);
+        const float kFHDepth  = EnvFloat("DRAPE_HBRIDGE_DEPTH", kHBridgeBodyDepth);
+        const float kFHDip    = EnvFloat("DRAPE_HBRIDGE_DIP", kHBridgeClothDip);
+        const float kFHMaxStep = EnvFloat("DRAPE_HBRIDGE_MAX_STEP", kHBridgeMaxStep);
+        const float kFHHangGap = EnvFloat("DRAPE_FITTED_HBRIDGE_GAP", 1.0f);
+        // Hanging weight from AUTHORED clearance (a bodice hugs at ~0.1-0.5, the
+        // apron/skirt panels hang at >1). Pinned verts excluded.
+        std::vector<float> hangW(n, 0.0f);
+        float ceiling = -1.0e30f;
+        int nHang = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+            float aGap = 0.0f;
+            if (!g_refBodyBVH.valid ||
+                !BVHSignedGap(g_refBodyBVH, baseVerts[i], aGap, nullptr)) continue;
+            float w = ClampRange((aGap - kFHHangGap) / 1.0f, 0.0f, 1.0f);
+            hangW[i] = w;
+            if (w >= 0.20f) { ceiling = std::max(ceiling, finalVerts[i].z); ++nHang; }
         }
-        // Exact-twin groups (coincident base verts = sewn seam copies).
-        std::unordered_map<uint64_t, std::vector<uint32_t>> twinGroups;
-        {
-            auto q = [](float v) -> uint64_t {
-                return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
-            };
-            for (size_t i = 0; i < n; ++i) {
-                const Vec3& p = baseVerts[i];
-                uint64_t k = (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
-                twinGroups[k].push_back((uint32_t)i);
+        if (nHang >= 16 && ceiling > -1.0e29f) {
+            HorizontalBridgeProfile prof;
+            if (BuildHorizontalBridgeProfile(bodyBVH->verts, bodyBVH->tris,
+                                             kHBridgeZCell, kHBridgeAngleBins,
+                                             ceiling, prof)) {
+                // Exact-twin groups (coincident base verts = sewn seam copies).
+                std::unordered_map<uint64_t, std::vector<uint32_t>> twinGroups;
+                {
+                    auto q = [](float v) -> uint64_t {
+                        return (uint64_t)(uint32_t)(int32_t)std::llround(v * 100.0f);
+                    };
+                    for (size_t i = 0; i < n; ++i) {
+                        const Vec3& p = baseVerts[i];
+                        uint64_t k = (q(p.x) * 73856093ull) ^ (q(p.y) * 19349663ull) ^ (q(p.z) * 83492791ull);
+                        twinGroups[k].push_back((uint32_t)i);
+                    }
+                }
+                std::vector<uint8_t> touched(n, 0);
+                int lifted = 0;
+                std::vector<float> clothR;
+                for (int it = 0; it < kFHIters; ++it) {
+                    BuildHorizontalBridgeClothProfile(prof, finalVerts, hangW, clothR);
+                    int moved = 0;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (hangW[i] < 0.20f) continue;
+                        float targetR = 0.0f, dirX = 0.0f, dirY = 0.0f;
+                        if (HorizontalBridgeTargetR(prof, clothR, finalVerts[i],
+                                                    params.bodyClearance, kHBridgeZWindow,
+                                                    kFHAngle, kFHDepth, kFHDip,
+                                                    targetR, dirX, dirY) &&
+                            MoveRadiallyOut(finalVerts[i], dirX, dirY,
+                                            std::min(targetR, RadialRadius(finalVerts[i]) + kFHMaxStep),
+                                            kFHPush * hangW[i])) {
+                            touched[i] = 1;
+                            ++moved;
+                        }
+                    }
+                    if (moved == 0) break;
+                    lifted += moved;
+                    // Light Laplacian on touched verts (coheres the grid quantisation),
+                    // then body floor, then twin re-weld (vampire-tear lesson).
+                    std::vector<Vec3> sum(n, Vec3{});
+                    std::vector<int> cnt(n, 0);
+                    for (const auto& e : useEdges) {
+                        if (e.a >= n || e.b >= n) continue;
+                        sum[e.a] = Add(sum[e.a], finalVerts[e.b]); ++cnt[e.a];
+                        sum[e.b] = Add(sum[e.b], finalVerts[e.a]); ++cnt[e.b];
+                    }
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!touched[i] || cnt[i] <= 0) continue;
+                        Vec3 avg = Scale(sum[i], 1.0f / (float)cnt[i]);
+                        finalVerts[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.30f));
+                    }
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!touched[i]) continue;
+                        Vec3 t = finalVerts[i];
+                        if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
+                    }
+                    for (auto& kv : twinGroups) {
+                        if (kv.second.size() < 2) continue;
+                        Vec3 avg{0,0,0};
+                        for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
+                        avg = Scale(avg, 1.0f / (float)kv.second.size());
+                        for (uint32_t j : kv.second) finalVerts[j] = avg;
+                    }
+                }
+                if (lifted > 0) {
+                    applyFinalSupportCap(8, "fitted-hbridge-cap");
+                    HLog("detour: fitted-hbridge shape='%s' lifted=%d hangVerts=%d iters=%d push=%.2f angle=%d",
+                         shapeName.c_str(), lifted, nHang, kFHIters, kFHPush, kFHAngle);
+                }
             }
         }
-        int lifted = 0;
-        for (int it = 0; it < kTensionIters; ++it) {
-            std::vector<Vec3> next = finalVerts;
-            int roundLifted = 0;
-            for (size_t i = 0; i < n; ++i) {
-                if (nbr[i].size() < 3) continue;
-                if (i < invMass.size() && invMass[i] <= 0.0f) continue;   // pinned
-                float gV = 0.0f;
-                if (!BVHSignedGap(*bodyBVH, finalVerts[i], gV, nullptr)) continue;
-                if (gV < -0.5f || gV > kTensionBand) continue;            // contact band only
-                Vec3 c{0,0,0};
-                for (uint32_t j : nbr[i]) c = Add(c, finalVerts[j]);
-                c = Scale(c, 1.0f / (float)nbr[i].size());
-                float gC = 0.0f;
-                if (!BVHSignedGap(*bodyBVH, c, gC, nullptr)) continue;
-                float hollow = gC - gV;                    // vert dips under its ring
-                if (hollow < kTensionHollow) continue;     // not spanning a hollow
-                float w = ClampRange((hollow - kTensionHollow) / 0.9f, 0.0f, 1.0f);
-                next[i] = Add(finalVerts[i], Scale(Sub(c, finalVerts[i]), kTensionK * w));
-                ++roundLifted;
-            }
-            if (roundLifted == 0) break;
-            lifted += roundLifted;
-            finalVerts.swap(next);
-            // Re-weld exact seam twins (average the group) so the lift can't split seams.
-            for (auto& kv : twinGroups) {
-                if (kv.second.size() < 2) continue;
-                Vec3 avg{0,0,0};
-                for (uint32_t j : kv.second) avg = Add(avg, finalVerts[j]);
-                avg = Scale(avg, 1.0f / (float)kv.second.size());
-                for (uint32_t j : kv.second) finalVerts[j] = avg;
-            }
-        }
-        if (lifted > 0)
-            HLog("detour: tension-chord shape='%s' lifted=%d iters=%d hollow=%.2f k=%.2f",
-                 shapeName.c_str(), lifted, kTensionIters, kTensionHollow, kTensionK);
     }
 
     // â”€â”€ Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) â”€â”€
@@ -11795,21 +11855,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // (same semantics as final-body-reclear :7659), rigid plates excluded (keep exact
     // shape). Exact seam twins get identical push targets (same position -> same
     // closest point), so welds survive. DRAPE_FINAL_FLOOR=0 disables.
-    // OUTERMOST LAYER ONLY: the cover/suppress passes deliberately bury covered
+    // UNCOVERED VERTS ONLY: the cover/suppress passes deliberately bury covered
     // verts INSIDE the body to hide them under outer garments (pants waist under
     // the clothes); flooring those digs them back out and pokes them through the
     // outer layer (measured on yarl Pants: worstGarmentPen 2.96 -> 5.67). A clip is
-    // user-visible only on the outermost layer, which is exactly where the floor
-    // is needed (Blacksmith torso waistband) and where no cover pass buries verts.
-    if (bodyBVH && bodyBVH->valid && (!outerColliders || outerColliders->empty()) &&
-        EnvToggle("DRAPE_FINAL_FLOOR", true)) {
+    // user-visible only where no outer garment covers it. Coverage is PER VERT, not
+    // per garment: a 300-vert belt registering as the torso's "outer" must not
+    // disqualify the whole 2316-vert torso from its waistband fix - only the verts
+    // actually near an outer surface are skipped.
+    if (bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_FINAL_FLOOR", true)) {
         const float kFinalFloorClear = 0.06f;
+        const float kCoveredDist = EnvFloat("DRAPE_FINAL_FLOOR_COVER", 2.0f);
         auto floorable = [&](size_t i) -> bool {
             int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
             // Rigid plates keep their exact shape and placement (a translation was
             // tried and embeds the island's far side - a plate near a limb has no
             // clip-free rigid motion; the rigid-island pass owns their placement).
-            return !(id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id]);
+            if (id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id])
+                return false;
+            if (outerColliders) {
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Current().valid) continue;
+                    Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                    if (BVHClosestPoint(oc.Current(), finalVerts[i], cp, nrm, d2) &&
+                        d2 < kCoveredDist * kCoveredDist)
+                        return false;   // covered by an outer garment: leave buried
+                }
+            }
+            return true;
         };
         // Floor -> seam-aware stretch cap -> floor. A bare one-shot push of a
         // 1.5u-deep vert spikes its edges (vampire worstEdgeStretch 3.14 -> 4.99)
