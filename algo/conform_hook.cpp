@@ -11239,6 +11239,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // BODY is laterally concave beneath (wall normals lean inward: +0.9..
             // +1.2 at the cleft, -0.27 at a decorative pleat - the pleat guard).
             std::vector<float> w(n, 0.0f);
+            std::vector<Vec3>  wTang(n, Vec3{0,0,0});   // across-groove dir per active vert
             auto detect = [&]() -> int {
                 std::fill(w.begin(), w.end(), 0.0f);
                 int active = 0;
@@ -11270,9 +11271,36 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     float concW = ClampRange((conc - 0.25f) / 0.5f, 0.0f, 1.0f);
                     if (concW <= 0.0f) continue;
                     w[i] = ClampRange((clothDip - kCBDepthMin) / 0.35f, 0.0f, 1.0f) * concW;
+                    wTang[i] = tang;
                     if (w[i] > 0.0f) ++active;
                 }
                 return active;
+            };
+            // CHORD LIFT (level-2 bridge, 2026-07-10): pure smoothing killed the
+            // groove's shading but the user still sees the dip live - the spec is
+            // the full peak-to-peak chord: taut cloth touches the two cheeks and
+            // crosses STRAIGHT between them, air underneath. For each detected
+            // groove vert, march across the groove (greedy neighbour walk along
+            // +-tang) until the dip signal ends = the two SHOULDER verts on the
+            // cheeks; project the vert onto the shoulder-to-shoulder segment and
+            // lift it toward that chord along the cloth normal (outward-only,
+            // step-capped; iterated with re-detect so it converges and stops).
+            auto marchShoulder = [&](uint32_t start, const Vec3& dir,
+                                     std::vector<uint32_t>& path) -> int {
+                uint32_t cur = start;
+                for (int step = 0; step < 10; ++step) {
+                    float bestAdv = 0.25f;   // must make real progress across
+                    int bestJ = -1;
+                    for (uint32_t j : nbr[cur]) {
+                        float adv = Dot(Sub(finalVerts[j], finalVerts[cur]), dir);
+                        if (adv > bestAdv) { bestAdv = adv; bestJ = (int)j; }
+                    }
+                    if (bestJ < 0) return -1;
+                    cur = (uint32_t)bestJ;
+                    if (w[cur] <= 0.0f) return (int)cur;   // out of the dip = shoulder
+                    path.push_back(cur);                    // intermediate groove vert
+                }
+                return -1;
             };
             auto weldExact = [&]() {
                 for (const auto& grp : exactSeamGroups) {
@@ -11306,14 +11334,47 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     for (uint32_t j : nbr[i]) mx = std::max(mx, w[j]);
                     if (mx > 0.0f) wf[i] = 0.5f * mx;
                 }
+                // 1) chord lift: for each detected seed, march BOTH ways to the
+                //    shoulders, then lift EVERY groove vert on the march path to
+                //    its projection on the shoulder-to-shoulder chord. Full gain
+                //    (not dip-weighted: the dip-weighted version converged to the
+                //    detection threshold, never to the chord - measured identical
+                //    renders), outward-only, step-capped per iteration.
                 std::vector<Vec3> next = finalVerts;
+                const float kCBMaxStep = EnvFloat("DRAPE_CLEFT_STEP", 0.6f);
+                for (size_t i = 0; i < n; ++i) {
+                    if (w[i] <= 0.0f) continue;
+                    std::vector<uint32_t> path;
+                    path.push_back((uint32_t)i);
+                    int L = marchShoulder((uint32_t)i, Scale(wTang[i], -1.0f), path);
+                    int R = marchShoulder((uint32_t)i, wTang[i], path);
+                    if (L < 0 || R < 0) continue;
+                    Vec3 A = finalVerts[(size_t)L], B = finalVerts[(size_t)R];
+                    Vec3 AB = Sub(B, A);
+                    float ab2 = Len2(AB);
+                    if (ab2 < 1.0e-6f) continue;
+                    for (uint32_t p : path) {
+                        if (p < invMass.size() && invMass[p] <= 0.0f) continue;
+                        float t = ClampRange(Dot(Sub(finalVerts[p], A), AB) / ab2, 0.0f, 1.0f);
+                        Vec3 chord = Add(A, Scale(AB, t));
+                        float lift = Dot(Sub(chord, finalVerts[p]), clothVN[p]);   // outward-only
+                        if (lift <= 0.0f) continue;
+                        lift = std::min(lift * kCBBlend, kCBMaxStep);
+                        Vec3 cand = Add(finalVerts[p], Scale(clothVN[p], lift));
+                        // Keep the strongest lift if multiple seeds cover this vert.
+                        if (Dot(Sub(cand, next[p]), clothVN[p]) > 0.0f) next[p] = cand;
+                    }
+                }
+                finalVerts.swap(next);
+                // 2) one light Laplacian on the feathered region coheres the lift.
+                next = finalVerts;
                 for (size_t i = 0; i < n; ++i) {
                     if (wf[i] <= 0.0f || nbr[i].empty()) continue;
                     if (i < invMass.size() && invMass[i] <= 0.0f) continue;
                     Vec3 avg{0,0,0};
                     for (uint32_t j : nbr[i]) avg = Add(avg, finalVerts[j]);
                     avg = Scale(avg, 1.0f / (float)nbr[i].size());
-                    next[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), kCBBlend * wf[i]));
+                    next[i] = Add(finalVerts[i], Scale(Sub(avg, finalVerts[i]), 0.25f * wf[i]));
                 }
                 finalVerts.swap(next);
                 for (size_t i = 0; i < n; ++i) {
