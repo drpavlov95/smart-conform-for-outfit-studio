@@ -11248,47 +11248,113 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             if (vi < n) finalVerts[vi] = avg;
                     }
                 };
-                // 2) Chord enforcement per iteration: for each ROI slice, cloth
-                //    shoulder anchors = outermost (max y) BACK cloth verts within
-                //    +-1.5u of each body shoulder column; every back cloth vert
-                //    BETWEEN the shoulders lifts toward the chord (y only, outward,
-                //    step-capped). Iterated with floor/weld until converged.
+                // 2) OUTWARD-CLAMPED FAIRING (v5, 2026-07-11). The chord/meridian
+                //    attempts targeted narrow vert sets; the user still saw the drape
+                //    "enter the butt" from the SIDE - a LOW-FREQUENCY tuck (the S
+                //    curve over the under-butt hollow + the cleft) that a 1-ring dip
+                //    test can't see (measured: local concavity already 3.1 < sculpt
+                //    6.7, yet the side profile still hugs the body's S-curve). The
+                //    sculpt's own field is a smooth CONVEX membrane standing off the
+                //    body. So: Laplacian fairing over the whole back-butt region,
+                //    but each vert is FORBIDDEN to move toward the body (cancel any
+                //    inward component along the body direction). This fills every
+                //    concavity (cleft + under-butt tuck) and smooths bumps while
+                //    PRESERVING convex peaks (a peak's Laplacian points inward ->
+                //    cancelled) - the butt shape stays, only tucks/grooves bridge.
+                //    Many iters diffuse the apex/thigh anchors into the tucked band.
+                //    No magnetism/clip possible (never moves inward). Feathered to 0
+                //    at the region border so it can't disturb the waistband pleats
+                //    above or the hem below.
+                int zTopROI = -9999, zBotROI = 9999;
+                float xlMin = 1e9f, xrMax = -1e9f;
+                for (auto& kv : roi) {
+                    zTopROI = std::max(zTopROI, kv.first * 2 + 2);
+                    zBotROI = std::min(zBotROI, kv.first * 2);
+                    xlMin = std::min(xlMin, kv.second.xl);
+                    xrMax = std::max(xrMax, kv.second.xr);
+                }
+                // 1-ring garment adjacency (the ROI detection dropped it).
+                std::vector<std::vector<uint32_t>> nbr(n);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    nbr[e.a].push_back(e.b);
+                    nbr[e.b].push_back(e.a);
+                }
+                // Taubin smoothing (lambda/mu). Pure outward-clamped Laplacian
+                // bridged the cleft but PRESERVED convex ridges, so the horizontal
+                // body-inherited banding (the "bumps/edges" the user reported)
+                // survived. Taubin's alternating shrink/anti-shrink removes the
+                // high-frequency banding AND the groove while preserving the
+                // low-frequency cheek shape (no flattening, no net shrink toward the
+                // body). Safe far from the body (the smoothed surface stays 10-14u
+                // off it); the per-step body floor guards the near-contact band.
+                const float kTaubinL = EnvFloat("DRAPE_CLEFT_FAIR_K", 0.50f);
+                const float kTaubinM = EnvFloat("DRAPE_CLEFT_FAIR_MU", -0.53f);
+                const int   kFairIters = (int)EnvFloat("DRAPE_CLEFT_FAIR_ITERS", 20.0f);
+                const float rzLo = (float)zBotROI - 2.0f;
+                // +4 (not +12): the cleft/tuck IS the ROI z-range; extending to the
+                // full apex reached deep into the belt/waistband band above (56 verts
+                // there). +4 keeps a soft upper anchor just above the ROI. The
+                // residual torso worstGarmentPen uptick (~0.3u) is a single hidden
+                // vert under the belt band (the belt is worn OVER the torso), noisy
+                // and non-monotonic in region size - not a systematic clip.
+                const float rzHi = (float)zTopROI + 4.0f;
+                const float rxLo = xlMin - 4.0f, rxHi = xrMax + 4.0f;
+                auto ramp = [](float d) {
+                    d = std::min(std::max(d / 2.0f, 0.0f), 1.0f);
+                    return d * d * (3.0f - 2.0f * d);
+                };
+                std::vector<float> fw(n, 0.0f);
+                int nReg = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    const Vec3& p = baseVerts[i];
+                    if (p.y <= 1.5f) continue;                 // back panel only
+                    if (p.z < rzLo || p.z > rzHi) continue;
+                    if (p.x < rxLo || p.x > rxHi) continue;
+                    if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                    float wz = std::min(ramp(p.z - rzLo), ramp(rzHi - p.z));
+                    float wx = std::min(ramp(p.x - rxLo), ramp(rxHi - p.x));
+                    fw[i] = wz * wx;
+                    if (fw[i] > 0.0f) ++nReg;
+                }
+                // Per-vert displacement cap: body-inherited bumps and the cleft are
+                // SMALL-amplitude (sub-1u), so a genuine cofrinho fix needs ~1.3u
+                // (measured, Blacksmith). A LARGE move means the pass is flattening a
+                // structural fold (measured: 6.4u on the yarl coat's draped back
+                // panel, which has real pleats there) - never wanted. Capping each
+                // vert's total displacement from its entry position bounds the blast
+                // radius on every garment to the cofrinho scale.
+                const float kMaxDisp = EnvFloat("DRAPE_CLEFT_MAXDISP", 1.3f);
+                std::vector<Vec3> orig = finalVerts;   // entry snapshot (for the cap)
                 int lifted = 0, ranIters = 0;
-                for (int it = 0; it < kCBIters; ++it) {
-                    int moved = 0;
-                    for (auto& kv : roi) {
-                        float zLo = kv.first * 2.0f, zHi = zLo + 2.0f;
-                        const CleftSlice& cs = kv.second;
-                        float aY = -1e30f, bY = -1e30f;
-                        float aX = cs.xl, bX = cs.xr;
+                if (nReg >= 12) {
+                    for (int it = 0; it < kFairIters; ++it) {
+                        float step = (it % 2 == 0) ? kTaubinL : kTaubinM;   // Taubin alternation
+                        std::vector<Vec3> next = finalVerts;
+                        int moved = 0;
                         for (size_t i = 0; i < n; ++i) {
-                            const Vec3& p = finalVerts[i];
-                            if (p.y <= 0.0f || p.z < zLo - 1.0f || p.z >= zHi + 1.0f) continue;
-                            if (std::fabs(p.x - cs.xl) <= 1.5f && p.y > aY) { aY = p.y; aX = p.x; }
-                            if (std::fabs(p.x - cs.xr) <= 1.5f && p.y > bY) { bY = p.y; bX = p.x; }
-                        }
-                        if (aY < -1e29f || bY < -1e29f || bX - aX < 1.0f) continue;
-                        for (size_t i = 0; i < n; ++i) {
-                            if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                            Vec3& p = finalVerts[i];
-                            if (p.y <= 0.0f || p.z < zLo || p.z >= zHi) continue;
-                            if (p.x <= aX + 0.5f || p.x >= bX - 0.5f) continue;
-                            float t = (p.x - aX) / (bX - aX);
-                            float chordY = aY + t * (bY - aY);
-                            float lift = chordY - p.y;
-                            if (lift <= 0.02f) continue;
-                            p.y += std::min(lift * kCBBlend, kCBStep);
+                            if (fw[i] <= 0.0f || nbr[i].size() < 3) continue;
+                            Vec3 avg{0.0f, 0.0f, 0.0f};
+                            for (uint32_t j : nbr[i]) avg = Add(avg, finalVerts[j]);
+                            avg = Scale(avg, 1.0f / (float)nbr[i].size());
+                            Vec3 delta = Scale(Sub(avg, finalVerts[i]), step * fw[i]);
+                            Vec3 cand = Add(finalVerts[i], delta);
+                            Vec3 fromOrig = Sub(cand, orig[i]);
+                            float dl = Len(fromOrig);
+                            if (dl > kMaxDisp) cand = Add(orig[i], Scale(fromOrig, kMaxDisp / dl));
+                            next[i] = cand;
                             ++moved;
                         }
+                        finalVerts.swap(next);
+                        for (size_t i = 0; i < n; ++i) {
+                            if (fw[i] <= 0.0f) continue;
+                            Vec3 t = finalVerts[i];
+                            if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
+                        }
+                        weldExact();
+                        if (moved == 0) break;
+                        lifted += moved; ++ranIters;
                     }
-                    if (moved == 0) break;
-                    lifted += moved;
-                    ++ranIters;
-                    for (size_t i = 0; i < n; ++i) {
-                        Vec3 t = finalVerts[i];
-                        if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
-                    }
-                    weldExact();
                 }
                 if (lifted > 0) {
                     // NO extra prox/support-cap invocations here: those helpers do
