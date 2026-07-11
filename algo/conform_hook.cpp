@@ -11373,6 +11373,93 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    // Ã¢â€â‚¬Ã¢â€â‚¬ HEM / HANGING-CLOTH DISPLACEMENT SMOOTHING (2026-07-11, user item #3) Ã¢â€â‚¬Ã¢â€â‚¬
+    // Far-from-body cloth (dress hems, robe skirts) inherits the body's morph detail
+    // through the vanilla conform's proximity propagation, producing subtle bumps and
+    // edges even where the cloth never touches the body - most visible on wide
+    // low-poly skirts (user-reported). Fix: Taubin-smooth the DISPLACEMENT FIELD
+    // (result - base), not the positions. The body-inherited bumps live in the
+    // displacement; the authored geometry (pleats, folds, the split) lives in the
+    // base and is preserved EXACTLY. Scoped to genuinely HANGING verts (body gap >
+    // kNear, so draped/contact cloth is untouched - no magnetism, no clip), capped
+    // per vert, exact-seam welded (twins share base, so a welded displacement keeps
+    // them coincident -> ladder 0). Prototyped in python first (vampire robe visibly
+    // smoother, structure preserved). FITTED_CLOTH (merged Cloth) only.
+    // DRAPE_HEM_SMOOTH=0 or hem_smooth_off.flag disables.
+    {
+        bool hemOn = EnvToggle("DRAPE_HEM_SMOOTH", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (fs::exists("E:/SkyrimDev/Drape/hem_smooth_off.flag")) hemOn = false;
+#endif
+        if (hemOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
+            params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
+            n > 0 && n <= 0xFFFF) {
+            const float kHemNear = EnvFloat("DRAPE_HEM_NEAR", 2.5f);
+            const float kHemFar  = EnvFloat("DRAPE_HEM_FAR", 4.5f);
+            const float kHemL    = EnvFloat("DRAPE_HEM_K", 0.50f);
+            const float kHemM    = EnvFloat("DRAPE_HEM_MU", -0.53f);
+            const int   kHemIters= (int)EnvFloat("DRAPE_HEM_ITERS", 20.0f);
+            const float kHemCap  = EnvFloat("DRAPE_HEM_CAP", 1.0f);
+            std::vector<float> hw(n, 0.0f);
+            int nHang = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                hw[i] = ClampRange((g - kHemNear) / (kHemFar - kHemNear), 0.0f, 1.0f);
+                if (hw[i] > 0.0f) ++nHang;
+            }
+            if (nHang >= 16) {
+                std::vector<std::vector<uint32_t>> hnbr(n);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    hnbr[e.a].push_back(e.b);
+                    hnbr[e.b].push_back(e.a);
+                }
+                std::vector<Vec3> d(n), d0(n);
+                for (size_t i = 0; i < n; ++i) { d[i] = Sub(finalVerts[i], baseVerts[i]); d0[i] = d[i]; }
+                auto weldD = [&]() {
+                    for (const auto& grp : exactSeamGroups) {
+                        if (grp.size() < 2) continue;
+                        Vec3 avg{0,0,0}; int c = 0;
+                        for (uint32_t vi : grp) { if (vi < n) { avg = Add(avg, d[vi]); ++c; } }
+                        if (c < 2) continue;
+                        avg = Scale(avg, 1.0f / (float)c);
+                        for (uint32_t vi : grp) if (vi < n) d[vi] = avg;
+                    }
+                };
+                for (int it = 0; it < kHemIters; ++it) {
+                    float step = (it % 2 == 0) ? kHemL : kHemM;   // Taubin
+                    std::vector<Vec3> nd = d;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (hw[i] <= 0.0f || hnbr[i].size() < 3) continue;
+                        Vec3 avg{0,0,0};
+                        for (uint32_t j : hnbr[i]) avg = Add(avg, d[j]);
+                        avg = Scale(avg, 1.0f / (float)hnbr[i].size());
+                        Vec3 cand = Add(d[i], Scale(Sub(avg, d[i]), step * hw[i]));
+                        Vec3 ch = Sub(cand, d0[i]);
+                        float cl = Len(ch);
+                        if (cl > kHemCap) cand = Add(d0[i], Scale(ch, kHemCap / cl));
+                        nd[i] = cand;
+                    }
+                    d.swap(nd);
+                    weldD();
+                }
+                int hemMoved = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (hw[i] <= 0.0f) continue;
+                    Vec3 p = Add(baseVerts[i], d[i]);
+                    BVHCollideVertex(*bodyBVH, p, 0.06f);
+                    if (Len2(Sub(p, finalVerts[i])) > 1.0e-6f) ++hemMoved;
+                    finalVerts[i] = p;
+                }
+                if (hemMoved > 0)
+                    HLog("detour: hem-smooth shape='%s' hangVerts=%d moved=%d iters=%d cap=%.2f",
+                         shapeName.c_str(), nHang, hemMoved, kHemIters, kHemCap);
+            }
+        }
+    }
+
     if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
         fittedHBridge &&
         params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
