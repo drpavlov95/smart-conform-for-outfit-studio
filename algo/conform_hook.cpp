@@ -11199,9 +11199,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             struct CleftSlice { float xl, xr; };
             std::unordered_map<int, CleftSlice> roi;   // key = (int)floor(z/2)
             {
+                // Height guard: the intergluteal cleft lives in the LOWER body half.
+                // Without this the spine groove between the shoulder blades also
+                // reads as a "deep central V between two summits" (seen LIVE:
+                // roiSlices reached z98 and the pass smoothed the upper back).
+                float bzMin = 1e30f, bzMax = -1e30f;
+                for (const Vec3& bv : bodyBVH->verts) {
+                    bzMin = std::min(bzMin, bv.z);
+                    bzMax = std::max(bzMax, bv.z);
+                }
+                const float zCeil = bzMin + 0.55f * (bzMax - bzMin);
                 std::unordered_map<int, std::unordered_map<int, float>> prof; // zslice -> xbin -> maxY
                 for (const Vec3& bv : bodyBVH->verts) {
-                    if (bv.y <= 0.0f) continue;
+                    if (bv.y <= 0.0f || bv.z > zCeil) continue;
                     int zs = (int)std::floor(bv.z * 0.5f);
                     int xb = (int)std::floor(bv.x);
                     auto& row = prof[zs];
@@ -11280,17 +11290,24 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     nbr[e.a].push_back(e.b);
                     nbr[e.b].push_back(e.a);
                 }
-                // Taubin smoothing (lambda/mu). Pure outward-clamped Laplacian
-                // bridged the cleft but PRESERVED convex ridges, so the horizontal
-                // body-inherited banding (the "bumps/edges" the user reported)
-                // survived. Taubin's alternating shrink/anti-shrink removes the
-                // high-frequency banding AND the groove while preserving the
-                // low-frequency cheek shape (no flattening, no net shrink toward the
-                // body). Safe far from the body (the smoothed surface stays 10-14u
-                // off it); the per-step body floor guards the near-contact band.
-                const float kTaubinL = EnvFloat("DRAPE_CLEFT_FAIR_K", 0.50f);
-                const float kTaubinM = EnvFloat("DRAPE_CLEFT_FAIR_MU", -0.53f);
-                const int   kFairIters = (int)EnvFloat("DRAPE_CLEFT_FAIR_ITERS", 20.0f);
+                // v7 SMOOTHED-OFFSET FOLLOW (2026-07-11, calibrated against the
+                // user's hand-sculpt with a SURFACE-to-surface metric - the per-
+                // vertex metric punishes invisible tangential slide and had been
+                // rejecting good candidates). The sculpt's butt treatment is NOT
+                // feature-preserving smoothing (Taubin kept the two-cheek anatomy
+                // the user wants erased) and NOT uniform shrink (regionally wrong):
+                // it is a smooth pencil-skirt surface that FOLLOWS THE BODY AT A
+                // GENEROUS CLEARANCE with the anatomy blurred out. Implement exactly
+                // that: target[i] = bodyClosestPoint + bodyNormal * kClear, then
+                // heavily Laplacian-smooth the TARGET FIELD over the garment graph
+                // (kills the cleft/anatomy in the offset surface), then blend verts
+                // to targets by the feathered region weight. Measured: surface
+                // distance to the sculpt 1.03 -> 0.91 (p95 2.07 -> 1.63), cheek
+                // slimness 10.73 -> 9.75 vs sculpt 9.85, side-profile S-curve
+                // replaced by the sculpt's straight tucked fall.
+                const float kClear      = EnvFloat("DRAPE_CLEFT_CLEAR", 1.8f);
+                const float kTgtSmooth  = EnvFloat("DRAPE_CLEFT_FAIR_K", 0.50f);
+                const int   kFairIters  = (int)EnvFloat("DRAPE_CLEFT_FAIR_ITERS", 30.0f);
                 const float rzLo = (float)zBotROI - 2.0f;
                 // +4 (not +12): the cleft/tuck IS the ROI z-range; extending to the
                 // full apex reached deep into the belt/waistband band above (56 verts
@@ -11317,44 +11334,55 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     fw[i] = wz * wx;
                     if (fw[i] > 0.0f) ++nReg;
                 }
-                // Per-vert displacement cap: body-inherited bumps and the cleft are
-                // SMALL-amplitude (sub-1u), so a genuine cofrinho fix needs ~1.3u
-                // (measured, Blacksmith). A LARGE move means the pass is flattening a
-                // structural fold (measured: 6.4u on the yarl coat's draped back
-                // panel, which has real pleats there) - never wanted. Capping each
-                // vert's total displacement from its entry position bounds the blast
-                // radius on every garment to the cofrinho scale.
-                const float kMaxDisp = EnvFloat("DRAPE_CLEFT_MAXDISP", 1.3f);
+                // Per-vert displacement cap: bounds the blast radius on garments
+                // whose back panel legitimately drapes far from the offset surface
+                // (the yarl coat's pleated panel - a full offset-follow there would
+                // vacuum its folds). The Blacksmith pencil skirt needs ~2u.
+                const float kMaxDisp = EnvFloat("DRAPE_CLEFT_MAXDISP", 2.2f);
                 std::vector<Vec3> orig = finalVerts;   // entry snapshot (for the cap)
                 int lifted = 0, ranIters = 0;
                 if (nReg >= 12) {
+                    // 1) raw offset targets on the region.
+                    std::vector<Vec3> tgt = finalVerts;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (fw[i] <= 0.0f) continue;
+                        Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                        if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                        tgt[i] = Add(cp, Scale(nrm, kClear));
+                    }
+                    // 2) heavy Laplacian smoothing of the TARGET FIELD (erases the
+                    //    cleft/anatomy from the offset surface).
                     for (int it = 0; it < kFairIters; ++it) {
-                        float step = (it % 2 == 0) ? kTaubinL : kTaubinM;   // Taubin alternation
-                        std::vector<Vec3> next = finalVerts;
-                        int moved = 0;
+                        std::vector<Vec3> nt = tgt;
                         for (size_t i = 0; i < n; ++i) {
                             if (fw[i] <= 0.0f || nbr[i].size() < 3) continue;
                             Vec3 avg{0.0f, 0.0f, 0.0f};
-                            for (uint32_t j : nbr[i]) avg = Add(avg, finalVerts[j]);
+                            for (uint32_t j : nbr[i]) avg = Add(avg, tgt[j]);
                             avg = Scale(avg, 1.0f / (float)nbr[i].size());
-                            Vec3 delta = Scale(Sub(avg, finalVerts[i]), step * fw[i]);
-                            Vec3 cand = Add(finalVerts[i], delta);
-                            Vec3 fromOrig = Sub(cand, orig[i]);
-                            float dl = Len(fromOrig);
-                            if (dl > kMaxDisp) cand = Add(orig[i], Scale(fromOrig, kMaxDisp / dl));
-                            next[i] = cand;
-                            ++moved;
+                            nt[i] = Add(tgt[i], Scale(Sub(avg, tgt[i]), kTgtSmooth));
                         }
-                        finalVerts.swap(next);
-                        for (size_t i = 0; i < n; ++i) {
-                            if (fw[i] <= 0.0f) continue;
-                            Vec3 t = finalVerts[i];
-                            if (BVHCollideVertex(*bodyBVH, t, 0.06f)) finalVerts[i] = t;
-                        }
-                        weldExact();
-                        if (moved == 0) break;
-                        lifted += moved; ++ranIters;
+                        tgt.swap(nt);
+                        ++ranIters;
                     }
+                    // 3) blend verts toward the smoothed offset surface, capped.
+                    for (size_t i = 0; i < n; ++i) {
+                        if (fw[i] <= 0.0f) continue;
+                        Vec3 cand = Add(finalVerts[i], Scale(Sub(tgt[i], finalVerts[i]), fw[i]));
+                        Vec3 fromOrig = Sub(cand, orig[i]);
+                        float dl = Len(fromOrig);
+                        if (dl > kMaxDisp) cand = Add(orig[i], Scale(fromOrig, kMaxDisp / dl));
+                        finalVerts[i] = cand;
+                        ++lifted;
+                    }
+                    // 4) generous body floor (the sculpt never hugs closer than
+                    //    ~1.2u here; 0.6 prevents any vacuum-onto-skin look), weld.
+                    const float kCleftFloor = EnvFloat("DRAPE_CLEFT_FLOOR", 0.6f);
+                    for (size_t i = 0; i < n; ++i) {
+                        if (fw[i] <= 0.0f) continue;
+                        Vec3 t = finalVerts[i];
+                        if (BVHCollideVertex(*bodyBVH, t, kCleftFloor)) finalVerts[i] = t;
+                    }
+                    weldExact();
                 }
                 if (lifted > 0) {
                     // NO extra prox/support-cap invocations here: those helpers do
