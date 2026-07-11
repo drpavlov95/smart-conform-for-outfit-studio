@@ -11189,9 +11189,6 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // and enforce the cloth chord ONLY there. Pleats, hem and belly are
             // excluded by construction.
             const float kCBDip    = EnvFloat("DRAPE_CLEFT_BODY_DIP", 1.2f);   // min body V depth
-            const float kCBBlend  = EnvFloat("DRAPE_CLEFT_K", 0.60f);
-            const int   kCBIters  = (int)EnvFloat("DRAPE_CLEFT_ITERS", 6.0f);
-            const float kCBStep   = EnvFloat("DRAPE_CLEFT_STEP", 0.6f);
             // 1) Body ROI per 2u z-slice: back verts (y>0), lateral profile
             //    maxY(x); shoulders = the outermost summits on each side, dip =
             //    min(shoulderY) - centerY. Slices with dip >= kCBDip define the
@@ -11339,15 +11336,25 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // (the yarl coat's pleated panel - a full offset-follow there would
                 // vacuum its folds). The Blacksmith pencil skirt needs ~2u.
                 const float kMaxDisp = EnvFloat("DRAPE_CLEFT_MAXDISP", 2.2f);
+                // BRIDGE GUARD (2026-07-11): follow the offset surface ONLY where the
+                // cloth DRAPES near the body (gap < kMaxGap). Cloth that hangs FAR
+                // from the body is BRIDGING a gap - an open robe/skirt spanning
+                // between the legs (vampire) - and pulling it to the body offset
+                // re-creates the "dress enters between the legs" tuck the merge
+                // fixed (measured: 14 vampire crotch verts pulled in 0.9u, one to
+                // gap 8.4 -> ~2u). The Blacksmith pencil skirt drapes the butt at
+                // <=4.5u so it is fully kept; only genuine bridging is excluded.
+                const float kMaxGap = EnvFloat("DRAPE_CLEFT_MAXGAP", 5.0f);
                 std::vector<Vec3> orig = finalVerts;   // entry snapshot (for the cap)
                 int lifted = 0, ranIters = 0;
                 if (nReg >= 12) {
-                    // 1) raw offset targets on the region.
+                    // 1) raw offset targets on the region (drape-gated).
                     std::vector<Vec3> tgt = finalVerts;
                     for (size_t i = 0; i < n; ++i) {
                         if (fw[i] <= 0.0f) continue;
                         Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
-                        if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                        if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) { fw[i] = 0.0f; continue; }
+                        if (std::sqrt(d2) > kMaxGap) { fw[i] = 0.0f; continue; }   // bridging: leave it
                         tgt[i] = Add(cp, Scale(nrm, kClear));
                     }
                     // 2) heavy Laplacian smoothing of the TARGET FIELD (erases the
@@ -11394,8 +11401,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     weldExact();
                     int zMin = 9999, zMax = -9999;
                     for (auto& kv : roi) { zMin = std::min(zMin, kv.first * 2); zMax = std::max(zMax, kv.first * 2 + 2); }
-                    HLog("detour: cleft-bridge shape='%s' roiSlices=%zu z=[%d..%d] lifted=%d iters=%d k=%.2f",
-                         shapeName.c_str(), roi.size(), zMin, zMax, lifted, ranIters, kCBBlend);
+                    HLog("detour: cleft-bridge shape='%s' roiSlices=%zu z=[%d..%d] moved=%d smooth=%d clear=%.2f maxDisp=%.2f maxGap=%.2f",
+                         shapeName.c_str(), roi.size(), zMin, zMax, lifted, ranIters, kClear, kMaxDisp, kMaxGap);
                 }
             }
         }
