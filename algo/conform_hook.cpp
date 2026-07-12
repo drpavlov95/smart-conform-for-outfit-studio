@@ -4537,6 +4537,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // regimes - the 50+ coupled branches of the loose fork are why each fix landed
     // on one side only. Categorical presets (skin-tight, belt, rigid, tubular) stay.
     // Escape hatches: DRAPE_MERGE_LOOSE=0 env, or loose_split.flag live.
+    // Captured BEFORE the merge overwrites `preset`: some fitted-path passes must
+    // treat an originally-LOOSE garment (yarl coat, vampire robe) differently from a
+    // true tight fitted garment (Blacksmith pencil skirt) even after both solve down
+    // the fitted path - notably the cleft-bridge PLUMB GUARD, which is right to
+    // hold a tight skirt plumb but wrong to inflate a loose coat's natural taper.
+    const bool wasOriginallyLoose = (NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED);
     {
         bool mergeLoose = EnvToggle("DRAPE_MERGE_LOOSE", true);
 #if !defined(DRAPE_HARNESS_BUILD)
@@ -11370,6 +11376,67 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         }
                         tgt.swap(nt);
                         ++ranIters;
+                    }
+                    // 2b) PLUMB GUARD (2026-07-11): below the cheek apex the body
+                    //     recedes (under-butt hollow -> thigh tapering back), and a
+                    //     constant-clearance offset FOLLOWS it inward - the user saw
+                    //     the mid/lower butt "still enter" while the top was fixed
+                    //     (measured: sculpt stays out ~10.2-10.5 there, our target
+                    //     tucked to ~9). The sculpt hangs the skirt near-PLUMB from
+                    //     the apex, not tracking the thigh. So per meridian (x bin),
+                    //     going DOWN from the outermost target, the outward level (y,
+                    //     back panel) may only fall by kPlumbTaper per z - it can't
+                    //     tuck in with the body. This is what turns the offset
+                    //     surface into a pencil-skirt fall. FRONT (y<0) is left alone.
+                    // PLUMB GUARD applies only to TRUE fitted garments (tight pencil
+                    // skirt). An originally-LOOSE coat merged onto the fitted path
+                    // (yarl, vampire) naturally tapers/hangs away from the body - the
+                    // plumb would inflate its butt ~2u past its own hand-sculpt
+                    // (measured: yarl butt surfDist vs sculpt 1.87 -> 1.95). The
+                    // bridge guard already stops the loose garments from tucking; they
+                    // do not need the plumb. FRONT (y<0) is always left alone.
+                    if (!wasOriginallyLoose)
+                    {
+                        const float kPlumbTaper  = EnvFloat("DRAPE_CLEFT_PLUMB", 0.04f);
+                        // The plumb hangs the skirt from the butt APEX. That only works
+                        // if the apex is a TIGHT butt conform (a real anchor). On a
+                        // loose-draping fitted coat (yarl Clothes) the column's top vert
+                        // is itself a bulge hanging ~4u off the body, not an anchor -
+                        // plumbing from it inflates the whole column ~2u past the coat's
+                        // own hand-sculpt. Gate per column: skip if the apex vert is not
+                        // tight (measured apex-gap: Blacksmith med 2.3 / yarl med 4.3 -
+                        // a clean split at 3.5). FRONT (y<0) is always left alone.
+                        const float kPlumbApexGap = EnvFloat("DRAPE_CLEFT_PLUMB_APEXGAP", 3.25f);
+                        std::unordered_map<int, std::vector<uint32_t>> col;
+                        for (size_t i = 0; i < n; ++i)
+                            if (fw[i] > 0.0f && finalVerts[i].y > 0.0f)
+                                col[(int)std::floor(baseVerts[i].x / 1.5f)].push_back((uint32_t)i);
+                        for (auto& kv : col) {
+                            auto& c = kv.second;
+                            if (c.size() < 3) continue;
+                            std::sort(c.begin(), c.end(), [&](uint32_t a, uint32_t b) {
+                                return finalVerts[a].z > finalVerts[b].z;   // top (high z) -> down
+                            });
+                            // Apex-tightness gate: the reference vert (top) must be a
+                            // tight conform, else this column is a loose hang - skip it.
+                            {
+                                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                                if (!BVHClosestPoint(*bodyBVH, finalVerts[c[0]], cp, nrm, d2) ||
+                                    std::sqrt(d2) > kPlumbApexGap)
+                                    continue;
+                            }
+                            // Reference the plumb from the CLOTH apex (the actual butt
+                            // bulge at the region top), not the feathered-low target
+                            // apex - the sculpt's lower fall hangs from the real butt.
+                            float maxY = finalVerts[c[0]].y, atZ = finalVerts[c[0]].z;
+                            for (size_t k = 1; k < c.size(); ++k) {
+                                uint32_t vi = c[k];
+                                float floorY = maxY - kPlumbTaper * (atZ - finalVerts[vi].z);
+                                if (tgt[vi].y < floorY) tgt[vi].y = floorY;
+                                float ref = std::max(finalVerts[vi].y, tgt[vi].y);
+                                if (ref > maxY) { maxY = ref; atZ = finalVerts[vi].z; }
+                            }
+                        }
                     }
                     // 3) blend verts toward the smoothed offset surface, capped.
                     for (size_t i = 0; i < n; ++i) {
