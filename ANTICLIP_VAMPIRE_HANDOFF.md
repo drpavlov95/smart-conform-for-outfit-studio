@@ -2,6 +2,12 @@
 
 Date: 2026-07-12
 
+> 2026-07-12 follow-up: the vanilla integrity fallback now preserves a guarded
+> no-contact hang correction and reruns body clearance instead of discarding it.
+> See `VAMPIRE_BODY_BUMP_HANDOFF.md` for the body/bump diagnosis, topology guards,
+> current measurements and deployment state.  The older byte-exact-vanilla
+> deployment section below is historical.
+
 ## User report and corrected classification
 
 At `RM_Heavy=100`, `vampire_robes_alt` shows large dark/reversed lower panels in

@@ -3988,6 +3988,944 @@ static bool TrianglesCrossNonCoplanar(
            SegmentIntersectsTriangle(b2, b0, a0, a1, a2);
 }
 
+static float EnvFloat(const char* name, float dflt);
+
+struct GuardedFieldStats {
+    int seedVerts = 0;
+    int movedVerts = 0;
+    int affectedFaces = 0;
+    int rejectedFace = 0;
+    int rejectedEdge = 0;
+    int rejectedCross = 0;
+    float acceptedAlpha = 0.0f;
+    float maxMove = 0.0f;
+};
+
+// Apply a coherent displacement field transactionally.  This is intentionally
+// stricter than the general cloth solver: it is used only after the integrity
+// ladder has selected a trusted baseline, so a cleanup may improve contact or
+// plumbness but may not buy that improvement with a new fold, collapsed face,
+// edge spike or non-adjacent panel crossing.
+static bool ApplyGuardedDisplacementField(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& restVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    std::vector<Vec3> field,
+    float maxMove,
+    GuardedFieldStats& stats)
+{
+    const size_t n = verts.size();
+    if (n == 0 || field.size() != n || tris.empty()) return false;
+    maxMove = std::max(0.01f, maxMove);
+
+    // One variable per exact seam group: average only signalled members, then
+    // apply that same delta to every twin so the cleanup cannot unzip a seam.
+    for (const auto& grp : exactSeamGroups) {
+        Vec3 avg{0.0f, 0.0f, 0.0f};
+        int cnt = 0;
+        for (uint32_t vi : grp) {
+            if (vi >= n || Len2(field[vi]) <= 1.0e-12f) continue;
+            avg = Add(avg, field[vi]);
+            ++cnt;
+        }
+        if (cnt == 0) continue;
+        avg = Scale(avg, 1.0f / (float)cnt);
+        for (uint32_t vi : grp) if (vi < n) field[vi] = avg;
+    }
+
+    std::vector<uint8_t> active(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        float len = Len(field[i]);
+        if (!std::isfinite(len) || len <= 1.0e-6f) {
+            field[i] = Vec3{0.0f, 0.0f, 0.0f};
+            continue;
+        }
+        if (len > maxMove) field[i] = Scale(field[i], maxMove / len);
+        active[i] = 1;
+        ++stats.seedVerts;
+        stats.maxMove = std::max(stats.maxMove, Len(field[i]));
+    }
+    if (stats.seedVerts == 0) return false;
+
+    std::vector<uint32_t> affectedTris;
+    std::vector<uint32_t> affectedEdges;
+    affectedTris.reserve(tris.size());
+    affectedEdges.reserve(edges.size());
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        if (active[t[0]] || active[t[1]] || active[t[2]])
+            affectedTris.push_back((uint32_t)ti);
+    }
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        if (e.a >= n || e.b >= n) continue;
+        if (active[e.a] || active[e.b]) affectedEdges.push_back((uint32_t)ei);
+    }
+    stats.affectedFaces = (int)affectedTris.size();
+
+    const std::vector<Vec3> entry = verts;
+    std::vector<Vec3> beforeNormals;
+    std::vector<float> beforeAreas;
+    beforeNormals.reserve(affectedTris.size());
+    beforeAreas.reserve(affectedTris.size());
+    for (uint32_t ti : affectedTris) {
+        const auto& t = tris[ti];
+        Vec3 normal = Cross(Sub(entry[t[1]], entry[t[0]]),
+                            Sub(entry[t[2]], entry[t[0]]));
+        beforeNormals.push_back(normal);
+        beforeAreas.push_back(Len(normal));
+    }
+    std::vector<float> beforeEdgeLen;
+    beforeEdgeLen.reserve(affectedEdges.size());
+    for (uint32_t ei : affectedEdges) {
+        const auto& e = edges[ei];
+        beforeEdgeLen.push_back(Len(Sub(entry[e.a], entry[e.b])));
+    }
+
+    std::unordered_set<uint64_t> beforeCrossings;
+    std::unordered_set<uint64_t> testedPairs;
+    for (uint32_t ti : affectedTris) {
+        for (size_t tj = 0; tj < tris.size(); ++tj) {
+            if (ti == tj) continue;
+            uint32_t lo = std::min(ti, (uint32_t)tj);
+            uint32_t hi = std::max(ti, (uint32_t)tj);
+            uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
+            if (!testedPairs.insert(key).second) continue;
+            if (TrianglesShareVertex(tris[ti], tris[tj])) continue;
+            if (TrianglesCrossNonCoplanar(entry, tris[ti], tris[tj]))
+                beforeCrossings.insert(key);
+        }
+    }
+
+    float alpha = 1.0f;
+    for (int attempt = 0; attempt < 12; ++attempt, alpha *= 0.5f) {
+        std::vector<Vec3> candidate = entry;
+        for (size_t i = 0; i < n; ++i)
+            if (active[i]) candidate[i] = Add(candidate[i], Scale(field[i], alpha));
+
+        bool facesOk = true;
+        for (size_t ai = 0; ai < affectedTris.size(); ++ai) {
+            const auto& t = tris[affectedTris[ai]];
+            Vec3 after = Cross(Sub(candidate[t[1]], candidate[t[0]]),
+                               Sub(candidate[t[2]], candidate[t[0]]));
+            float beforeArea = beforeAreas[ai];
+            float afterArea = Len(after);
+            float dot = (beforeArea > 1.0e-8f && afterArea > 1.0e-8f)
+                ? Dot(beforeNormals[ai], after) / (beforeArea * afterArea) : -1.0f;
+            float ratio = beforeArea > 1.0e-8f ? afterArea / beforeArea : 0.0f;
+            if (!std::isfinite(afterArea) || dot < 0.50f ||
+                ratio < 0.50f || ratio > 2.0f) {
+                facesOk = false;
+                break;
+            }
+        }
+        if (!facesOk) {
+            ++stats.rejectedFace;
+            continue;
+        }
+
+        bool edgesOk = true;
+        for (size_t ai = 0; ai < affectedEdges.size(); ++ai) {
+            const auto& e = edges[affectedEdges[ai]];
+            float beforeLen = beforeEdgeLen[ai];
+            float afterLen = Len(Sub(candidate[e.a], candidate[e.b]));
+            if (!std::isfinite(afterLen)) {
+                edgesOk = false;
+                break;
+            }
+            float rest = e.restLength;
+            if (rest <= 1.0e-6f && e.a < restVerts.size() && e.b < restVerts.size())
+                rest = Len(Sub(restVerts[e.a], restVerts[e.b]));
+            if (rest > 1.0e-6f) {
+                float beforeRatio = beforeLen / rest;
+                float afterRatio = afterLen / rest;
+                // Healthy edges stay in a compact authored band; an edge that
+                // entered already compressed/stretched may recover but may not
+                // get materially worse.  This avoids rejecting a coherent field
+                // merely because a very short baseline edge changes by >20%.
+                float minAllowed = beforeRatio < 0.75f
+                    ? beforeRatio * 0.90f : 0.75f;
+                float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+                if (afterRatio < minAllowed || afterRatio > maxAllowed) {
+                    edgesOk = false;
+                    break;
+                }
+            }
+        }
+        if (!edgesOk) {
+            ++stats.rejectedEdge;
+            continue;
+        }
+
+        bool crossingsOk = true;
+        testedPairs.clear();
+        for (uint32_t ti : affectedTris) {
+            for (size_t tj = 0; tj < tris.size(); ++tj) {
+                if (ti == tj) continue;
+                uint32_t lo = std::min(ti, (uint32_t)tj);
+                uint32_t hi = std::max(ti, (uint32_t)tj);
+                uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
+                if (!testedPairs.insert(key).second) continue;
+                if (TrianglesShareVertex(tris[ti], tris[tj])) continue;
+                if (TrianglesCrossNonCoplanar(candidate, tris[ti], tris[tj])) {
+                    // Counting alone is insufficient: a cleanup could remove
+                    // one hidden crossing and introduce a different visible
+                    // one while keeping the same total.  Trusted cleanup may
+                    // only retain pairs that already crossed at entry.
+                    if (!beforeCrossings.count(key)) {
+                        crossingsOk = false;
+                        break;
+                    }
+                }
+            }
+            if (!crossingsOk) break;
+        }
+        if (!crossingsOk) {
+            ++stats.rejectedCross;
+            continue;
+        }
+
+        verts.swap(candidate);
+        stats.acceptedAlpha = alpha;
+        stats.movedVerts = stats.seedVerts;
+        stats.maxMove *= alpha;
+        return true;
+    }
+    return false;
+}
+
+struct BodyOrderViolationStats {
+    int vertexCount = 0;
+    int sampleCount = 0;
+    float totalDepth = 0.0f;
+    float worstGap = 0.0f;
+};
+
+static BodyOrderViolationStats BuildAuthoredBodyOrderField(
+    const std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& baseBody,
+    const BodyBVH& currentBody,
+    float authoredMinGap,
+    float authoredMaxGap,
+    float clearance,
+    float maxSampleStep,
+    std::vector<Vec3>* outField)
+{
+    BodyOrderViolationStats stats;
+    const size_t n = verts.size();
+    std::vector<Vec3> accum(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<float> weight(n, 0.0f);
+
+    auto addConstraint = [&](const Vec3& basePoint, const Vec3& curPoint,
+                             const std::array<uint16_t, 3>* tri,
+                             const TriangleSample* bary, uint32_t vertex) {
+        float baseGap = 0.0f;
+        if (!BVHSignedGap(baseBody, basePoint, baseGap, nullptr) ||
+            baseGap < authoredMinGap || baseGap > authoredMaxGap)
+            return;
+        float curGap = 0.0f;
+        Vec3 nrm{0.0f, 0.0f, 1.0f};
+        if (!BVHSignedGap(currentBody, curPoint, curGap, &nrm) || curGap >= clearance)
+            return;
+        float depth = clearance - curGap;
+        stats.totalDepth += depth;
+        stats.worstGap = std::min(stats.worstGap, curGap);
+        if (tri && bary) {
+            ++stats.sampleCount;
+            const float denom = bary->a * bary->a + bary->b * bary->b + bary->c * bary->c;
+            const float step = std::min(depth * 0.36f, maxSampleStep) /
+                               std::max(denom, 1.0e-6f);
+            const float bw[3] = {bary->a, bary->b, bary->c};
+            for (int k = 0; k < 3; ++k) {
+                uint32_t vi = (*tri)[k];
+                if (vi >= n || bw[k] <= 0.0f) continue;
+                accum[vi] = Add(accum[vi], Scale(nrm, step * bw[k]));
+                weight[vi] += 1.0f;
+            }
+        } else if (vertex < n) {
+            ++stats.vertexCount;
+            float step = std::min(depth * 0.42f, maxSampleStep);
+            accum[vertex] = Add(accum[vertex], Scale(nrm, step));
+            weight[vertex] += 1.0f;
+        }
+    };
+
+    for (size_t i = 0; i < n; ++i)
+        addConstraint(baseVerts[i], verts[i], nullptr, nullptr, (uint32_t)i);
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        for (const TriangleSample& sample : kTriangleSamples) {
+            Vec3 bp = SampleTrianglePoint(baseVerts, t, sample);
+            Vec3 cp = SampleTrianglePoint(verts, t, sample);
+            addConstraint(bp, cp, &t, &sample, 0);
+        }
+    }
+
+    if (outField) {
+        outField->assign(n, Vec3{0.0f, 0.0f, 0.0f});
+        for (size_t i = 0; i < n; ++i)
+            if (weight[i] > 0.0f) (*outField)[i] = Scale(accum[i], 1.0f / weight[i]);
+    }
+    return stats;
+}
+
+// The full safe solver candidate is not publishable for the Vampire, but it
+// contains useful information about how a genuinely free panel should stop
+// copying the body's radial S-profile.  Recover only that radial component on
+// authored-far/currently-free vertices, starting from vanilla and accepting the
+// field through the trusted-baseline topology transaction.
+static int ApplyTrustedCandidateRadialRecovery(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& candidate,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& baseBody,
+    const BodyBVH& currentBody,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>& protectedVerts,
+    float centerX,
+    float centerY,
+    GuardedFieldStats& stats)
+{
+    const size_t n = verts.size();
+    if (candidate.size() != n || baseVerts.size() < n) return 0;
+    const float authMin = EnvFloat("DRAPE_TRUSTED_HYBRID_AUTH_GAP", 1.50f);
+    const float curMin = EnvFloat("DRAPE_TRUSTED_HYBRID_CURRENT_GAP", 1.80f);
+    const float strength = ClampRange(
+        EnvFloat("DRAPE_TRUSTED_HYBRID_STRENGTH", 0.50f), 0.0f, 1.0f);
+    const float maxMove = ClampRange(
+        EnvFloat("DRAPE_TRUSTED_HYBRID_MAX_MOVE", 1.00f), 0.05f, 2.0f);
+    const std::vector<Vec3> entry = verts;
+    std::vector<Vec3> request(n, Vec3{0.0f, 0.0f, 0.0f});
+    for (size_t i = 0; i < n; ++i) {
+        if (i < protectedVerts.size() && protectedVerts[i]) continue;
+        float authGap = 0.0f, curGap = 0.0f;
+        if (!BVHSignedGap(baseBody, baseVerts[i], authGap, nullptr) ||
+            !BVHSignedGap(currentBody, verts[i], curGap, nullptr) ||
+            authGap < authMin || curGap < curMin)
+            continue;
+        float dx = baseVerts[i].x - centerX;
+        float dy = baseVerts[i].y - centerY;
+        float radius = std::sqrt(dx * dx + dy * dy);
+        if (radius <= 1.0e-5f) continue;
+        float rx = dx / radius, ry = dy / radius;
+        float rawOutward = (verts[i].x - baseVerts[i].x) * rx +
+                            (verts[i].y - baseVerts[i].y) * ry;
+        if (rawOutward <= 0.0f) continue;
+        Vec3 safeDelta = Sub(candidate[i], verts[i]);
+        float radial = safeDelta.x * rx + safeDelta.y * ry;
+        float step = ClampRange(radial * strength, -maxMove, maxMove);
+        if (std::fabs(step) <= 1.0e-6f) continue;
+        request[i] = Vec3{rx * step, ry * step, 0.0f};
+    }
+
+    std::vector<uint8_t> grouped(n, 0);
+    std::vector<std::vector<uint32_t>> units;
+    units.reserve(exactSeamGroups.size() + n);
+    for (const auto& grp : exactSeamGroups) {
+        std::vector<uint32_t> unit;
+        bool anyProtected = false;
+        Vec3 sum{0.0f, 0.0f, 0.0f};
+        int cnt = 0;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            grouped[vi] = 1;
+            unit.push_back(vi);
+            anyProtected = anyProtected ||
+                (vi < protectedVerts.size() && protectedVerts[vi]);
+            sum = Add(sum, request[vi]);
+            ++cnt;
+        }
+        if (unit.empty()) continue;
+        Vec3 mean = (!anyProtected && cnt > 0)
+            ? Scale(sum, 1.0f / (float)cnt)
+            : Vec3{0.0f, 0.0f, 0.0f};
+        for (uint32_t vi : unit) request[vi] = mean;
+        units.push_back(std::move(unit));
+    }
+    for (size_t i = 0; i < n; ++i)
+        if (!grouped[i] && Len2(request[i]) > 1.0e-16f)
+            units.push_back(std::vector<uint32_t>{(uint32_t)i});
+    std::sort(units.begin(), units.end(), [&](const auto& a, const auto& b) {
+        float ma = 0.0f, mb = 0.0f;
+        for (uint32_t vi : a) ma = std::max(ma, Len2(request[vi]));
+        for (uint32_t vi : b) mb = std::max(mb, Len2(request[vi]));
+        if (ma != mb) return ma > mb;
+        return a.front() < b.front();
+    });
+
+    std::vector<std::vector<uint32_t>> incident(n);
+    for (size_t ti = 0; ti < tris.size(); ++ti)
+        for (uint16_t vi : tris[ti]) if (vi < n) incident[vi].push_back((uint32_t)ti);
+    std::vector<std::vector<uint32_t>> incidentEdges(n);
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        if (e.a >= n || e.b >= n) continue;
+        incidentEdges[e.a].push_back((uint32_t)ei);
+        incidentEdges[e.b].push_back((uint32_t)ei);
+    }
+
+    // Conservative swept-AABB broad phase for the per-unit crossing guard.
+    // Hybrid deltas are radial XY moves capped by maxMove, so two triangles
+    // whose entry AABBs are farther than 2*maxMove in X/Y (or disjoint in Z)
+    // cannot meet during this pass.  Building this once avoids rescanning every
+    // garment triangle for every seam unit and keeps Smart Conform interactive.
+    struct TrustedTriBounds { Vec3 lo; Vec3 hi; };
+    std::vector<TrustedTriBounds> triBounds(tris.size());
+    std::vector<uint8_t> potentiallyMovedFace(tris.size(), 0);
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        const Vec3& a = entry[t[0]];
+        const Vec3& b = entry[t[1]];
+        const Vec3& c = entry[t[2]];
+        triBounds[ti].lo = Vec3{std::min(a.x, std::min(b.x, c.x)),
+                                std::min(a.y, std::min(b.y, c.y)),
+                                std::min(a.z, std::min(b.z, c.z))};
+        triBounds[ti].hi = Vec3{std::max(a.x, std::max(b.x, c.x)),
+                                std::max(a.y, std::max(b.y, c.y)),
+                                std::max(a.z, std::max(b.z, c.z))};
+        potentiallyMovedFace[ti] =
+            (Len2(request[t[0]]) > 1.0e-16f ||
+             Len2(request[t[1]]) > 1.0e-16f ||
+             Len2(request[t[2]]) > 1.0e-16f) ? 1 : 0;
+    }
+    std::vector<std::vector<uint32_t>> crossingPartners(tris.size());
+    const float pairMarginXY = 2.0f * maxMove + 1.0e-4f;
+    const float pairMarginZ = 1.0e-4f;
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        if (!potentiallyMovedFace[ti]) continue;
+        const auto& a = triBounds[ti];
+        auto& partners = crossingPartners[ti];
+        for (size_t tj = 0; tj < tris.size(); ++tj) {
+            if (ti == tj || TrianglesShareVertex(tris[ti], tris[tj])) continue;
+            const auto& b = triBounds[tj];
+            if (a.hi.x + pairMarginXY < b.lo.x ||
+                b.hi.x + pairMarginXY < a.lo.x ||
+                a.hi.y + pairMarginXY < b.lo.y ||
+                b.hi.y + pairMarginXY < a.lo.y ||
+                a.hi.z + pairMarginZ < b.lo.z ||
+                b.hi.z + pairMarginZ < a.lo.z)
+                continue;
+            partners.push_back((uint32_t)tj);
+        }
+    }
+
+    float worstEdgeBefore = 0.0f;
+    for (const auto& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+        if (rest > 1.0e-6f)
+            worstEdgeBefore = std::max(worstEdgeBefore,
+                Len(Sub(entry[e.a], entry[e.b])) / rest);
+    }
+
+    for (const auto& unit : units) {
+        Vec3 target{0.0f, 0.0f, 0.0f};
+        for (uint32_t vi : unit) target = Add(target, request[vi]);
+        target = Scale(target, 1.0f / (float)unit.size());
+        if (Len2(target) <= 1.0e-16f) continue;
+        std::vector<uint32_t> faces;
+        std::unordered_set<uint32_t> faceSet;
+        std::vector<uint32_t> unitEdges;
+        std::unordered_set<uint32_t> edgeSet;
+        for (uint32_t vi : unit)
+            for (uint32_t ti : incident[vi])
+                if (faceSet.insert(ti).second) faces.push_back(ti);
+        for (uint32_t vi : unit)
+            for (uint32_t ei : incidentEdges[vi])
+                if (edgeSet.insert(ei).second) unitEdges.push_back(ei);
+        std::vector<Vec3> old;
+        old.reserve(unit.size());
+        for (uint32_t vi : unit) old.push_back(verts[vi]);
+
+        float lo = 0.0f, hi = 1.0f, best = 0.0f;
+        for (int search = 0; search < 10; ++search) {
+            float alpha = (search == 0) ? 1.0f : 0.5f * (lo + hi);
+            for (size_t k = 0; k < unit.size(); ++k) {
+                uint32_t vi = unit[k];
+                verts[vi] = Add(old[k], Scale(target, alpha));
+            }
+            bool valid = true;
+            for (uint32_t ti : faces) {
+                const auto& t = tris[ti];
+                Vec3 before = Cross(Sub(entry[t[1]], entry[t[0]]),
+                                    Sub(entry[t[2]], entry[t[0]]));
+                Vec3 after = Cross(Sub(verts[t[1]], verts[t[0]]),
+                                   Sub(verts[t[2]], verts[t[0]]));
+                float ba = Len(before), aa = Len(after);
+                float dot = ba > 1.0e-8f && aa > 1.0e-8f
+                    ? Dot(before, after) / (ba * aa) : -1.0f;
+                float area = ba > 1.0e-8f ? aa / ba : 0.0f;
+                if (!std::isfinite(aa) || dot < 0.25f || area < 0.25f || area > 4.0f) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                for (uint32_t ei : unitEdges) {
+                    const auto& e = edges[ei];
+                    float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+                    if (rest <= 1.0e-6f) continue;
+                    float beforeRatio = Len(Sub(entry[e.a], entry[e.b])) / rest;
+                    float afterRatio = Len(Sub(verts[e.a], verts[e.b])) / rest;
+                    float minAllowed = beforeRatio < 0.75f
+                        ? beforeRatio * 0.90f : 0.75f;
+                    float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+                    if (!std::isfinite(afterRatio) ||
+                        afterRatio < minAllowed - 1.0e-4f ||
+                        afterRatio > maxAllowed - 3.0e-4f) {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if (valid) {
+                // Do not let a no-contact radial correction create a new body
+                // penetration in the interior of a face.  The body is open, so
+                // constrain only authored-near samples whose entry sign is
+                // locally trustworthy; intentional far/hidden plates remain
+                // outside this guard.
+                for (uint32_t ti : faces) {
+                    if (ti >= tris.size()) continue;
+                    const auto& t = tris[ti];
+                    for (const TriangleSample& sample : kTriangleSamples) {
+                        Vec3 bp = SampleTrianglePoint(baseVerts, t, sample);
+                        Vec3 ep = SampleTrianglePoint(entry, t, sample);
+                        Vec3 cp = SampleTrianglePoint(verts, t, sample);
+                        float baseGap = 0.0f, entryGap = 0.0f, candidateGap = 0.0f;
+                        if (!BVHSignedGap(baseBody, bp, baseGap, nullptr) ||
+                            !BVHSignedGap(currentBody, ep, entryGap, nullptr) ||
+                            !BVHSignedGap(currentBody, cp, candidateGap, nullptr))
+                            continue;
+                        if (baseGap < 0.035f || baseGap > 1.50f ||
+                            entryGap > 1.50f)
+                            continue;
+                        float minGap = entryGap >= 0.0f
+                            ? 0.0f : entryGap - 0.01f;
+                        if (candidateGap < minGap) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (!valid) break;
+                }
+                if (!valid) ++stats.rejectedFace;
+            }
+            if (valid) {
+                // Enforce crossing-set inclusion per accepted unit.  A global
+                // count check can trade an old, hidden intersection for a new
+                // visible one.  Checking only faces moved by this unit is
+                // sufficient: all other triangles retain their positions.
+                std::unordered_set<uint64_t> testedPairs;
+                for (uint32_t ti : faces) {
+                    if (ti >= tris.size()) continue;
+                    for (uint32_t tj : crossingPartners[ti]) {
+                        if (ti == tj) continue;
+                        uint32_t lo = std::min(ti, tj);
+                        uint32_t hi = std::max(ti, tj);
+                        uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
+                        if (!testedPairs.insert(key).second ||
+                            TrianglesShareVertex(tris[ti], tris[tj]))
+                            continue;
+                        if (TrianglesCrossNonCoplanar(verts, tris[ti], tris[tj]) &&
+                            !TrianglesCrossNonCoplanar(entry, tris[ti], tris[tj])) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (!valid) break;
+                }
+                if (!valid) ++stats.rejectedCross;
+            }
+            if (valid) {
+                best = alpha;
+                lo = alpha;
+                if (alpha >= 1.0f) break;
+            } else {
+                hi = alpha;
+            }
+        }
+        for (size_t k = 0; k < unit.size(); ++k) {
+            uint32_t vi = unit[k];
+            verts[vi] = Add(old[k], Scale(target, best));
+            float moved = Len(target) * best;
+            if (moved > 1.0e-6f) {
+                ++stats.movedVerts;
+                stats.maxMove = std::max(stats.maxMove, moved);
+            }
+        }
+    }
+    stats.seedVerts = stats.movedVerts;
+    stats.acceptedAlpha = stats.movedVerts > 0 ? 1.0f : 0.0f;
+
+    float worstEdgeAfter = 0.0f;
+    bool localEdgesOk = true;
+    for (const auto& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+        if (rest > 1.0e-6f) {
+            float beforeRatio = Len(Sub(entry[e.a], entry[e.b])) / rest;
+            float afterRatio = Len(Sub(verts[e.a], verts[e.b])) / rest;
+            worstEdgeAfter = std::max(worstEdgeAfter,
+                afterRatio);
+            float minAllowed = beforeRatio < 0.75f
+                ? beforeRatio * 0.90f : 0.75f;
+            float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+            if (afterRatio < minAllowed - 1.0e-4f ||
+                afterRatio > maxAllowed - 3.0e-4f)
+                localEdgesOk = false;
+        }
+    }
+    if (!localEdgesOk || worstEdgeAfter > worstEdgeBefore + 1.0e-3f) {
+        verts = entry;
+        stats.rejectedEdge += (!localEdgesOk ||
+            worstEdgeAfter > worstEdgeBefore + 1.0e-3f) ? 1 : 0;
+        stats.movedVerts = 0;
+        stats.acceptedAlpha = 0.0f;
+        stats.maxMove = 0.0f;
+        return 0;
+    }
+    return stats.movedVerts;
+}
+
+// Narrow post-fallback version of the proven thigh-bump rule.  Unlike the full
+// panel pass it restores only the authored normal-curvature field: no radial
+// envelope, azimuth slide, pit chord, hem shaping or cleft bridge.  This is the
+// physically relevant part for cloth that no longer touches the body, and each
+// small round is accepted through the topology transaction above.
+static int ApplyTrustedAuthoredCurvatureCleanup(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& baseBody,
+    const BodyBVH& currentBody,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>& protectedVerts,
+    GuardedFieldStats& totals)
+{
+    const size_t n = verts.size();
+    if (n == 0 || edges.empty() || tris.empty()) return 0;
+    const float gapMin = EnvFloat("DRAPE_TRUSTED_CURVE_AUTH_GAP", 1.50f);
+    const float smoothK = ClampRange(
+        EnvFloat("DRAPE_TRUSTED_CURVE_STRENGTH", 0.20f), 0.0f, 0.5f);
+    const float maxStep = ClampRange(
+        EnvFloat("DRAPE_TRUSTED_CURVE_STEP", 0.22f), 0.02f, 0.5f);
+    const int rounds = std::max(1, std::min(8,
+        (int)EnvFloat("DRAPE_TRUSTED_CURVE_ROUNDS", 4.0f)));
+
+    std::vector<uint32_t> rep(n);
+    for (size_t i = 0; i < n; ++i) rep[i] = (uint32_t)i;
+    for (const auto& grp : exactSeamGroups) {
+        uint32_t root = (uint32_t)n;
+        for (uint32_t vi : grp) if (vi < n) { root = vi; break; }
+        if (root >= n) continue;
+        for (uint32_t vi : grp) if (vi < n) rep[vi] = root;
+    }
+
+    std::vector<float> wIn(n, 0.0f), wOut(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        if (i < protectedVerts.size() && protectedVerts[i]) continue;
+        float authGap = 0.0f, curGap = 0.0f;
+        if (!BVHSignedGap(baseBody, baseVerts[i], authGap, nullptr) ||
+            !BVHSignedGap(currentBody, verts[i], curGap, nullptr))
+            continue;
+        float wAuth = ClampRange((authGap - gapMin) / 1.0f, 0.0f, 1.0f);
+        if (wAuth <= 0.0f) continue;
+        float wFree = ClampRange((curGap - 1.8f) / 1.2f, 0.0f, 1.0f);
+        wOut[i] = wAuth;
+        wIn[i] = wAuth * wFree;
+    }
+
+    std::vector<Vec3> baseSum(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<Vec3> baseNormal(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<int> baseCount(n, 0);
+    std::vector<float> baseDist(n, 0.0f);
+    for (const auto& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        float dist = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+        baseSum[rep[e.a]] = Add(baseSum[rep[e.a]], baseVerts[e.b]);
+        baseSum[rep[e.b]] = Add(baseSum[rep[e.b]], baseVerts[e.a]);
+        baseDist[rep[e.a]] += dist;
+        baseDist[rep[e.b]] += dist;
+        ++baseCount[rep[e.a]];
+        ++baseCount[rep[e.b]];
+    }
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        Vec3 fn = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                        Sub(baseVerts[t[2]], baseVerts[t[0]]));
+        baseNormal[rep[t[0]]] = Add(baseNormal[rep[t[0]]], fn);
+        baseNormal[rep[t[1]]] = Add(baseNormal[rep[t[1]]], fn);
+        baseNormal[rep[t[2]]] = Add(baseNormal[rep[t[2]]], fn);
+    }
+    std::vector<float> c0(n, 0.0f), d0(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t r = rep[i];
+        if (baseCount[r] < 2) continue;
+        float nl = Len(baseNormal[r]);
+        if (nl <= 1.0e-6f) continue;
+        Vec3 lap = Sub(Scale(baseSum[r], 1.0f / (float)baseCount[r]), baseVerts[i]);
+        c0[i] = Dot(lap, Scale(baseNormal[r], 1.0f / nl));
+        d0[i] = baseDist[r] / (float)baseCount[r];
+    }
+
+    int moved = 0;
+    for (int round = 0; round < rounds; ++round) {
+        std::vector<Vec3> sum(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<Vec3> normal(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<int> count(n, 0);
+        std::vector<float> dist(n, 0.0f);
+        for (const auto& e : edges) {
+            if (e.a >= n || e.b >= n) continue;
+            float dl = Len(Sub(verts[e.a], verts[e.b]));
+            sum[rep[e.a]] = Add(sum[rep[e.a]], verts[e.b]);
+            sum[rep[e.b]] = Add(sum[rep[e.b]], verts[e.a]);
+            dist[rep[e.a]] += dl;
+            dist[rep[e.b]] += dl;
+            ++count[rep[e.a]];
+            ++count[rep[e.b]];
+        }
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            Vec3 fn = Cross(Sub(verts[t[1]], verts[t[0]]),
+                            Sub(verts[t[2]], verts[t[0]]));
+            normal[rep[t[0]]] = Add(normal[rep[t[0]]], fn);
+            normal[rep[t[1]]] = Add(normal[rep[t[1]]], fn);
+            normal[rep[t[2]]] = Add(normal[rep[t[2]]], fn);
+        }
+
+        std::vector<Vec3> field(n, Vec3{0.0f, 0.0f, 0.0f});
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t r = rep[i];
+            if ((wOut[i] <= 0.0f && wIn[i] <= 0.0f) || count[r] < 2) continue;
+            float nl = Len(normal[r]);
+            if (nl <= 1.0e-6f) continue;
+            Vec3 nrm = Scale(normal[r], 1.0f / nl);
+            Vec3 lap = Sub(Scale(sum[r], 1.0f / (float)count[r]), verts[i]);
+            float c = Dot(lap, nrm);
+            float scale = 1.0f;
+            if (d0[i] > 1.0e-6f)
+                scale = ClampRange((dist[r] / (float)count[r]) / d0[i], 0.5f, 3.0f);
+            float delta = (c - c0[i] * scale) * smoothK;
+            delta *= delta > 0.0f ? wOut[i] : wIn[i];
+            delta = ClampRange(delta, -maxStep, maxStep);
+            if (std::fabs(delta) > 1.0e-6f) field[i] = Scale(nrm, delta);
+        }
+
+        for (const auto& grp : exactSeamGroups) {
+            bool anyProtected = false;
+            for (uint32_t vi : grp)
+                if (vi < protectedVerts.size() && protectedVerts[vi]) {
+                    anyProtected = true;
+                    break;
+                }
+            if (anyProtected)
+                for (uint32_t vi : grp)
+                    if (vi < field.size()) field[vi] = Vec3{0.0f, 0.0f, 0.0f};
+        }
+
+        GuardedFieldStats gs;
+        if (!ApplyGuardedDisplacementField(
+                verts, baseVerts, edges, tris, exactSeamGroups,
+                field, maxStep, gs)) {
+            totals.rejectedFace += gs.rejectedFace;
+            totals.rejectedEdge += gs.rejectedEdge;
+            totals.rejectedCross += gs.rejectedCross;
+            break;
+        }
+        moved += gs.movedVerts;
+        totals.seedVerts += gs.seedVerts;
+        totals.movedVerts += gs.movedVerts;
+        totals.affectedFaces += gs.affectedFaces;
+        totals.rejectedFace += gs.rejectedFace;
+        totals.rejectedEdge += gs.rejectedEdge;
+        totals.rejectedCross += gs.rejectedCross;
+        totals.acceptedAlpha = gs.acceptedAlpha;
+        totals.maxMove = std::max(totals.maxMove, gs.maxMove);
+    }
+    return moved;
+}
+
+static int ApplyTrustedBodyOrderCleanup(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& baseBody,
+    const BodyBVH& currentBody,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>& protectedVerts,
+    BodyOrderViolationStats& beforeStats,
+    BodyOrderViolationStats& afterStats,
+    GuardedFieldStats& guardTotals)
+{
+    const float authMin = EnvFloat("DRAPE_TRUSTED_BODY_AUTH_MIN", 0.035f);
+    const float authMax = EnvFloat("DRAPE_TRUSTED_BODY_AUTH_MAX", 1000000.0f);
+    const float clearance = EnvFloat("DRAPE_TRUSTED_BODY_CLEARANCE", 0.025f);
+    const float sampleStep = EnvFloat("DRAPE_TRUSTED_BODY_SAMPLE_STEP", 0.105f);
+    const int cycles = std::max(1, std::min(8,
+        (int)EnvFloat("DRAPE_TRUSTED_BODY_CYCLES", 5.0f)));
+    const std::vector<Vec3> entry = verts;
+    beforeStats = BuildAuthoredBodyOrderField(
+        verts, baseVerts, tris, baseBody, currentBody,
+        authMin, authMax, clearance, sampleStep, nullptr);
+    BodyOrderViolationStats currentStats = beforeStats;
+    auto rawBodyState = [&](const std::vector<Vec3>& state) {
+        std::pair<int, float> out{0, 0.0f};
+        for (const Vec3& p : state) {
+            float gap = 0.0f;
+            if (!BVHSignedGap(currentBody, p, gap, nullptr)) continue;
+            if (gap < 0.0f) ++out.first;
+            out.second = std::min(out.second, gap);
+        }
+        return out;
+    };
+    auto worstAuthoredEdge = [&](const std::vector<Vec3>& state) {
+        float worst = 0.0f;
+        for (const auto& e : edges) {
+            if (e.a >= state.size() || e.b >= state.size()) continue;
+            float rest = e.restLength > 1.0e-6f ? e.restLength
+                : Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+            if (rest > 1.0e-6f)
+                worst = std::max(worst, Len(Sub(state[e.a], state[e.b])) / rest);
+        }
+        return worst;
+    };
+    int moved = 0;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        std::vector<Vec3> field;
+        currentStats = BuildAuthoredBodyOrderField(
+            verts, baseVerts, tris, baseBody, currentBody,
+            authMin, authMax, clearance, sampleStep, &field);
+        for (size_t i = 0; i < field.size() && i < protectedVerts.size(); ++i)
+            if (protectedVerts[i]) field[i] = Vec3{0.0f, 0.0f, 0.0f};
+
+        // Two Jacobi rounds spread contact impulses over the local cloth patch;
+        // positions are still accepted only through the topology transaction.
+        std::vector<std::vector<uint32_t>> adjacency(verts.size());
+        std::vector<float> spreadWeight(verts.size(), 0.0f);
+        std::vector<uint8_t> allowed(verts.size(), 0);
+        for (size_t i = 0; i < field.size(); ++i)
+            if (Len2(field[i]) > 1.0e-12f) spreadWeight[i] = 1.0f;
+        for (size_t i = 0; i < verts.size(); ++i) {
+            float baseGap = 0.0f, entryGap = 0.0f;
+            if (BVHSignedGap(baseBody, baseVerts[i], baseGap, nullptr) &&
+                BVHSignedGap(currentBody, verts[i], entryGap, nullptr) &&
+                baseGap >= -0.02f && entryGap > -0.20f)
+                allowed[i] = 1;
+        }
+        for (const auto& e : edges) {
+            if (e.a >= verts.size() || e.b >= verts.size()) continue;
+            adjacency[e.a].push_back(e.b);
+            adjacency[e.b].push_back(e.a);
+        }
+        for (int round = 0; round < 2; ++round) {
+            std::vector<Vec3> next = field;
+            std::vector<float> nextWeight = spreadWeight;
+            for (size_t i = 0; i < field.size(); ++i) {
+                if (!allowed[i] || adjacency[i].empty()) continue;
+                Vec3 avg{0.0f, 0.0f, 0.0f};
+                float avgWeight = 0.0f;
+                for (uint32_t j : adjacency[i]) {
+                    if (j >= field.size()) continue;
+                    avg = Add(avg, field[j]);
+                    avgWeight += spreadWeight[j];
+                }
+                float inv = 1.0f / (float)adjacency[i].size();
+                next[i] = Add(Scale(field[i], 0.68f), Scale(avg, 0.32f * inv));
+                nextWeight[i] = std::max(spreadWeight[i] * 0.86f,
+                                         avgWeight * inv * 0.45f);
+            }
+            field.swap(next);
+            spreadWeight.swap(nextWeight);
+        }
+        for (size_t i = 0; i < field.size(); ++i) {
+            if (!allowed[i]) field[i] = Vec3{0.0f, 0.0f, 0.0f};
+            float len = Len(field[i]);
+            if (len > 0.115f) field[i] = Scale(field[i], 0.115f / len);
+        }
+        for (const auto& grp : exactSeamGroups) {
+            bool anyProtected = false;
+            for (uint32_t vi : grp)
+                if (vi < protectedVerts.size() && protectedVerts[vi]) {
+                    anyProtected = true;
+                    break;
+                }
+            if (anyProtected)
+                for (uint32_t vi : grp)
+                    if (vi < field.size()) field[vi] = Vec3{0.0f, 0.0f, 0.0f};
+        }
+
+        const std::vector<Vec3> cycleEntry = verts;
+        const auto rawBefore = rawBodyState(cycleEntry);
+        const float edgeBefore = worstAuthoredEdge(cycleEntry);
+        GuardedFieldStats gs;
+        if (!ApplyGuardedDisplacementField(
+                verts, baseVerts, edges, tris, exactSeamGroups,
+                field, 0.115f, gs)) {
+            guardTotals.seedVerts += gs.seedVerts;
+            guardTotals.rejectedFace += gs.rejectedFace;
+            guardTotals.rejectedEdge += gs.rejectedEdge;
+            guardTotals.rejectedCross += gs.rejectedCross;
+            break;
+        }
+        BodyOrderViolationStats candidateStats = BuildAuthoredBodyOrderField(
+            verts, baseVerts, tris, baseBody, currentBody,
+            authMin, authMax, clearance, sampleStep, nullptr);
+        const auto rawAfter = rawBodyState(verts);
+        const float edgeAfter = worstAuthoredEdge(verts);
+        bool improves = candidateStats.sampleCount + candidateStats.vertexCount <
+                            currentStats.sampleCount + currentStats.vertexCount ||
+            (candidateStats.sampleCount + candidateStats.vertexCount ==
+                 currentStats.sampleCount + currentStats.vertexCount &&
+             candidateStats.totalDepth < currentStats.totalDepth - 1.0e-4f);
+        improves = improves && rawAfter.first <= rawBefore.first &&
+            rawAfter.second >= rawBefore.second - 1.0e-3f &&
+            candidateStats.totalDepth <= currentStats.totalDepth + 1.0e-4f &&
+            candidateStats.worstGap >= currentStats.worstGap - 1.0e-3f &&
+            edgeAfter <= edgeBefore + 1.0e-3f;
+        if (!improves) {
+            verts = cycleEntry;
+            break;
+        }
+        currentStats = candidateStats;
+        moved += gs.movedVerts;
+        guardTotals.seedVerts += gs.seedVerts;
+        guardTotals.movedVerts += gs.movedVerts;
+        guardTotals.affectedFaces += gs.affectedFaces;
+        guardTotals.rejectedFace += gs.rejectedFace;
+        guardTotals.rejectedEdge += gs.rejectedEdge;
+        guardTotals.rejectedCross += gs.rejectedCross;
+        guardTotals.acceptedAlpha = gs.acceptedAlpha;
+        guardTotals.maxMove = std::max(guardTotals.maxMove, gs.maxMove);
+    }
+    afterStats = BuildAuthoredBodyOrderField(
+        verts, baseVerts, tris, baseBody, currentBody,
+        authMin, authMax, clearance, sampleStep, nullptr);
+    if (afterStats.sampleCount + afterStats.vertexCount >=
+            beforeStats.sampleCount + beforeStats.vertexCount &&
+        afterStats.totalDepth >= beforeStats.totalDepth - 1.0e-4f) {
+        verts = entry;
+        afterStats = beforeStats;
+        return 0;
+    }
+    if (afterStats.totalDepth > beforeStats.totalDepth + 1.0e-4f ||
+        afterStats.worstGap < beforeStats.worstGap - 1.0e-3f) {
+        verts = entry;
+        afterStats = beforeStats;
+        return 0;
+    }
+    return moved;
+}
+
 static int ApplyPosteriorChordBridge(
     std::vector<Vec3>& verts,
     const std::vector<Vec3>& baseVerts,
@@ -13690,6 +14628,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // per garment: a 300-vert belt registering as the torso's "outer" must not
     // disqualify the whole 2316-vert torso from its waistband fix - only the verts
     // actually near an outer surface are skipped.
+    std::vector<Vec3> finalFloorIntegrityReference;
+    // Reusable after the integrity ladder selects vanilla as a trusted baseline:
+    // the former early return discarded this body separation entirely.
+    auto applyFinalBodyFloorPass = [&]() {
     if (bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_FINAL_FLOOR", true)) {
         const float kFinalFloorClear = 0.06f;
         const float kCoveredDist = EnvFloat("DRAPE_FINAL_FLOOR_COVER", 2.0f);
@@ -13705,7 +14647,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // panels. Keep the transactional O(movedFaces * allFaces) path scoped
         // until the full corpus and the user's visual gate prove general use.
         safeTopologyFloor = safeTopologyFloor &&
-            shapeName == "vampire_robes_alt" && tris && !tris->empty();
+            shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy" &&
+            tris && !tris->empty();
         auto floorable = [&](size_t i) -> bool {
             int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
             // Rigid plates keep their exact shape and placement (a translation was
@@ -13882,10 +14825,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     std::vector<float> beforeAreas;
                     beforeNormals.reserve(affectedTris.size());
                     beforeAreas.reserve(affectedTris.size());
+                    const std::vector<Vec3>& faceReference =
+                        finalFloorIntegrityReference.size() == n
+                            ? finalFloorIntegrityReference : finalVerts;
                     for (uint32_t ti : affectedTris) {
                         const auto& t = (*tris)[ti];
-                        Vec3 normal = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
-                                            Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                        Vec3 normal = Cross(Sub(faceReference[t[1]], faceReference[t[0]]),
+                                            Sub(faceReference[t[2]], faceReference[t[0]]));
                         beforeNormals.push_back(normal);
                         beforeAreas.push_back(Len(normal));
                     }
@@ -13895,7 +14841,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         const EdgeConstraint& e = useEdges[ei];
                         const float rest = Len(Sub(baseVerts[e.b], baseVerts[e.a]));
                         beforeEdgeRatios.push_back(rest > 1.0e-6f
-                            ? Len(Sub(finalVerts[e.b], finalVerts[e.a])) / rest
+                            ? Len(Sub(faceReference[e.b], faceReference[e.a])) / rest
                             : 1.0f);
                     }
 
@@ -13956,16 +14902,54 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             if (rest <= 1.0e-6f) continue;
                             const float ratio = Len(Sub(finalVerts[e.b], finalVerts[e.a])) / rest;
                             const float beforeRatio = beforeEdgeRatios[ai];
-                            const float minAllowed = beforeRatio < 0.25f
-                                ? beforeRatio * 0.95f : 0.25f;
-                            const float maxAllowed = std::max(4.0f, beforeRatio + 1.0e-3f);
-                            if (!std::isfinite(ratio) || ratio < minAllowed || ratio > maxAllowed) {
+                            const bool trustedBaseline =
+                                finalFloorIntegrityReference.size() == n;
+                            const float minAllowed = trustedBaseline
+                                ? (beforeRatio < 0.75f ? beforeRatio * 0.90f : 0.75f)
+                                : (beforeRatio < 0.25f ? beforeRatio * 0.95f : 0.25f);
+                            const float maxAllowed = trustedBaseline
+                                ? std::max(1.25f, beforeRatio + 0.02f)
+                                : std::max(4.0f, beforeRatio + 1.0e-3f);
+                            if (!std::isfinite(ratio) ||
+                                ratio < minAllowed - 1.0e-4f ||
+                                ratio > maxAllowed - 3.0e-4f) {
                                 edgesOk = false;
                                 break;
                             }
                         }
                         if (!edgesOk) {
                             ++rejectedEdge;
+                            for (size_t mi = 0; mi < members.size(); ++mi)
+                                finalVerts[members[mi]] = oldPositions[mi];
+                            continue;
+                        }
+
+                        bool bodyFacesOk = true;
+                        if (finalFloorIntegrityReference.size() == n &&
+                            g_refBodyBVH.valid) {
+                            for (uint32_t ti : affectedTris) {
+                                const auto& t = (*tris)[ti];
+                                for (const TriangleSample& sample : kTriangleSamples) {
+                                    Vec3 bp = SampleTrianglePoint(baseVerts, t, sample);
+                                    Vec3 rp = SampleTrianglePoint(faceReference, t, sample);
+                                    Vec3 cp = SampleTrianglePoint(finalVerts, t, sample);
+                                    float baseGap = 0.0f, refGap = 0.0f, curGap = 0.0f;
+                                    if (!BVHSignedGap(g_refBodyBVH, bp, baseGap, nullptr) ||
+                                        !BVHSignedGap(*bodyBVH, rp, refGap, nullptr) ||
+                                        !BVHSignedGap(*bodyBVH, cp, curGap, nullptr))
+                                        continue;
+                                    if (baseGap >= 0.035f && baseGap <= 1.50f &&
+                                        refGap >= 0.025f && refGap <= 1.50f &&
+                                        curGap < 0.025f) {
+                                        bodyFacesOk = false;
+                                        break;
+                                    }
+                                }
+                                if (!bodyFacesOk) break;
+                            }
+                        }
+                        if (!bodyFacesOk) {
+                            ++rejectedFace;
                             for (size_t mi = 0; mi < members.size(); ++mi)
                                 finalVerts[members[mi]] = oldPositions[mi];
                             continue;
@@ -14017,6 +15001,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  acceptedVerts, rejectedFace, rejectedEdge, rejectedCross, maxStep);
         }
     }
+    };
+    applyFinalBodyFloorPass();
 
     // Actual posterior bridge (-Y).  This runs on the shipped final surface and
     // keeps that entry mesh as the downstream collision proxy, so an opt-in
@@ -14222,6 +15208,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         antiClipIntegrityGuard = true;
 #endif
     if (antiClipIntegrityGuard && shapeName == "vampire_robes_alt" &&
+        sliderName == "RM_Heavy" &&
         tris && !tris->empty()) {
         std::vector<Vec3> vanillaVerts(n);
         for (size_t i = 0; i < n; ++i)
@@ -14254,18 +15241,176 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const int maxCollapsed = std::max(0,
             (int)EnvFloat("DRAPE_ANTICLIP_MAX_COLLAPSED", 2.0f));
         if (flippedFaces > maxFlips && collapsedFaces > maxCollapsed) {
-            outDiff = rawDiff;
-            stats.written = (int)outDiff.size();
-            if (outSolvedVerts) *outSolvedVerts = vanillaVerts;
-            if (outColliderVerts) *outColliderVerts = vanillaVerts;
-            HLog("detour: anti-clip-integrity FALLBACK shape='%s' flips=%d/%d collapsed=%d/%d -> vanilla",
+            const std::vector<Vec3> rejectedCandidate = finalVerts;
+            finalVerts = vanillaVerts;
+            // Any proxy captured by a rejected pass is rejected with it.  The
+            // next garment must collide against the trusted published surface,
+            // never against geometry the integrity ladder just discarded.
+            downstreamColliderProxy.clear();
+            HLog("detour: anti-clip-integrity BASELINE shape='%s' flips=%d/%d collapsed=%d/%d -> vanilla+guarded-cleanup",
                  shapeName.c_str(), flippedFaces, maxFlips,
                  collapsedFaces, maxCollapsed);
-            return true;
+
+            std::vector<uint8_t> cleanupProtected(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                int id = islandIdOut.empty() ? -1
+                    : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+                if (id >= 0 && id < (int)islandRigidOut.size() &&
+                    islandRigidOut[(size_t)id])
+                    cleanupProtected[i] = 1;
+            }
+
+            GuardedFieldStats hangGuard;
+            int hangMoved = 0;
+            BodyOrderViolationStats bodyBefore, bodyAfter;
+            GuardedFieldStats bodyGuard;
+            int bodyMoved = 0;
+            std::vector<Vec3> hangBaseline = finalVerts;
+            std::vector<Vec3> trustedCleanupBaseline = finalVerts;
+            if (g_refBodyBVH.valid && bodyBVH && bodyBVH->valid) {
+                GuardedFieldStats hybridGuard;
+                hangMoved = ApplyTrustedCandidateRadialRecovery(
+                    finalVerts, rejectedCandidate, baseVerts, useEdges, *tris,
+                    g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                    cleanupProtected, g_refCenterX, g_refCenterY, hybridGuard);
+                if (hangMoved > 0) hangGuard = hybridGuard;
+                // The curvature experiment is intentionally dark: without a
+                // spatial broad phase it is too expensive for an interactive
+                // conform and, on the Vampire capture, its strict transaction
+                // correctly produces no publishable movement.
+                if (hangMoved == 0 &&
+                    EnvToggle("DRAPE_TRUSTED_CURVATURE_FALLBACK", false))
+                    hangMoved = ApplyTrustedAuthoredCurvatureCleanup(
+                    finalVerts, baseVerts, useEdges, *tris,
+                    g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                    cleanupProtected, hangGuard);
+                hangBaseline = finalVerts;
+                // Both passes spend from one trusted-root topology budget;
+                // otherwise hybrid (+.02) followed by floor (+.02) can compose
+                // into a material local stretch that neither stage sees alone.
+                finalFloorIntegrityReference = vanillaVerts;
+                applyFinalBodyFloorPass();
+                int floorFlips = 0, floorCollapsed = 0;
+                int floorEdgeViolations = 0, floorBodyFaceViolations = 0;
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    Vec3 vn = Cross(Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]),
+                                    Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]));
+                    Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                    Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                    float va = Len(vn), fa = Len(fn);
+                    if (va <= 1.0e-8f) continue;
+                    if (fa <= 1.0e-8f || Dot(vn, fn) < 0.0f) ++floorFlips;
+                    if (fa < va * 0.10f) ++floorCollapsed;
+                }
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+                    if (rest <= 1.0e-6f) continue;
+                    float beforeRatio = Len(Sub(vanillaVerts[e.a], vanillaVerts[e.b])) / rest;
+                    float afterRatio = Len(Sub(finalVerts[e.a], finalVerts[e.b])) / rest;
+                    float minAllowed = beforeRatio < 0.75f
+                        ? beforeRatio * 0.90f : 0.75f;
+                    float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+                    if (!std::isfinite(afterRatio) ||
+                        afterRatio < minAllowed - 1.0e-4f ||
+                        afterRatio > maxAllowed + 1.0e-4f)
+                        ++floorEdgeViolations;
+                }
+                if (g_refBodyBVH.valid) {
+                    for (const auto& t : *tris) {
+                        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                        for (const TriangleSample& sample : kTriangleSamples) {
+                            Vec3 bp = SampleTrianglePoint(baseVerts, t, sample);
+                            Vec3 vp = SampleTrianglePoint(vanillaVerts, t, sample);
+                            Vec3 fp = SampleTrianglePoint(finalVerts, t, sample);
+                            float baseGap = 0.0f, vanillaGap = 0.0f, floorGap = 0.0f;
+                            if (!BVHSignedGap(g_refBodyBVH, bp, baseGap, nullptr) ||
+                                !BVHSignedGap(*bodyBVH, vp, vanillaGap, nullptr) ||
+                                !BVHSignedGap(*bodyBVH, fp, floorGap, nullptr))
+                                continue;
+                            if (baseGap >= 0.035f && baseGap <= 1.50f &&
+                                vanillaGap >= 0.025f && vanillaGap <= 1.50f &&
+                                floorGap < 0.025f)
+                                ++floorBodyFaceViolations;
+                        }
+                    }
+                }
+                if (floorFlips > 0 || floorCollapsed > 0 ||
+                    floorEdgeViolations > 0 || floorBodyFaceViolations > 0) {
+                    finalVerts = hangBaseline;
+                    HLog("detour: trusted-body-floor ROLLBACK shape='%s' flips=%d collapsed=%d edges=%d bodyFaces=%d",
+                         shapeName.c_str(), floorFlips, floorCollapsed,
+                         floorEdgeViolations, floorBodyFaceViolations);
+                }
+                trustedCleanupBaseline = finalVerts;
+                if (EnvToggle("DRAPE_TRUSTED_BODY_FACE", false))
+                    bodyMoved = ApplyTrustedBodyOrderCleanup(
+                        finalVerts, baseVerts, useEdges, *tris,
+                        g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                        cleanupProtected, bodyBefore, bodyAfter, bodyGuard);
+
+                // The experimental face-interior pass owns only its own delta.
+                // If the final audit rejects it, preserve a body-floor result
+                // that was already accepted rather than jumping back behind it.
+                if (bodyMoved > 0) {
+                    int bodyFlips = 0, bodyCollapsed = 0;
+                    for (const auto& t : *tris) {
+                        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                        Vec3 bn = Cross(Sub(trustedCleanupBaseline[t[1]], trustedCleanupBaseline[t[0]]),
+                                        Sub(trustedCleanupBaseline[t[2]], trustedCleanupBaseline[t[0]]));
+                        Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                        Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                        float ba = Len(bn), fa = Len(fn);
+                        if (ba <= 1.0e-8f) continue;
+                        if (fa <= 1.0e-8f || Dot(bn, fn) < 0.0f) ++bodyFlips;
+                        if (fa < ba * 0.10f) ++bodyCollapsed;
+                    }
+                    if (bodyFlips > 0 || bodyCollapsed > 0) {
+                        finalVerts = trustedCleanupBaseline;
+                        bodyMoved = 0;
+                        HLog("detour: trusted-body-face ROLLBACK shape='%s' flips=%d collapsed=%d; keeping body floor",
+                             shapeName.c_str(), bodyFlips, bodyCollapsed);
+                    }
+                }
+            }
+
+            int cleanupFlips = 0, cleanupCollapsed = 0;
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                Vec3 vn = Cross(Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]),
+                                Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]));
+                Vec3 cn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                float va = Len(vn), ca = Len(cn);
+                if (va <= 1.0e-8f) continue;
+                if (ca <= 1.0e-8f || Dot(vn, cn) < 0.0f) ++cleanupFlips;
+                if (ca < va * 0.10f) ++cleanupCollapsed;
+            }
+            if (cleanupFlips > 0 || cleanupCollapsed > 0) {
+                // This can only be reached by a later experimental cleanup;
+                // the hang/body-floor baseline has its own transactional audit.
+                // Do not restore the rejected full solver candidate.
+                finalVerts = trustedCleanupBaseline;
+                HLog("detour: trusted-body-cleanup ROLLBACK shape='%s' flips=%d collapsed=%d; keeping hang baseline",
+                     shapeName.c_str(), cleanupFlips, cleanupCollapsed);
+            } else {
+                HLog("detour: trusted-cleanup PASS shape='%s' hangMoved=%d hangAlpha=%.3f hangMax=%.3f hangReject=%d/%d/%d bodyMoved=%d bodyOrder=%d/%d->%d/%d depth=%.3f->%.3f bodyAlpha=%.3f bodyMax=%.3f bodyReject=%d/%d/%d",
+                     shapeName.c_str(), hangMoved, hangGuard.acceptedAlpha,
+                     hangGuard.maxMove, hangGuard.rejectedFace,
+                     hangGuard.rejectedEdge, hangGuard.rejectedCross, bodyMoved,
+                     bodyBefore.vertexCount, bodyBefore.sampleCount,
+                     bodyAfter.vertexCount, bodyAfter.sampleCount,
+                     bodyBefore.totalDepth, bodyAfter.totalDepth,
+                     bodyGuard.acceptedAlpha, bodyGuard.maxMove,
+                     bodyGuard.rejectedFace, bodyGuard.rejectedEdge,
+                     bodyGuard.rejectedCross);
+            }
+        } else {
+            HLog("detour: anti-clip-integrity PASS shape='%s' flips=%d/%d collapsed=%d/%d",
+                 shapeName.c_str(), flippedFaces, maxFlips,
+                 collapsedFaces, maxCollapsed);
         }
-        HLog("detour: anti-clip-integrity PASS shape='%s' flips=%d/%d collapsed=%d/%d",
-             shapeName.c_str(), flippedFaces, maxFlips,
-             collapsedFaces, maxCollapsed);
     }
 
     static constexpr float kWriteEps2 = 1.0e-10f;

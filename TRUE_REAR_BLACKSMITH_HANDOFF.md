@@ -138,7 +138,11 @@ OutfitStudio was closed during deployment. The final `RelWithDebInfo` DLL was
 copied to both configured Outfit Studio mod folders; build and both deployed
 copies have SHA-256:
 
-`EE6019BDD866CB47D323D6D5E2EC96CC77436EA83772357BAB6DF71C54F162E9`
+`D437984514D924D1332D43D02BEB7F3837524F0E10FD7F24744A8D1384170D95`
+
+This newer DLL includes the independently gated Vampire body/bump follow-up.
+The authoritative Blacksmith `142410` OBJ remains byte-identical to the
+previously approved result.
 
 Guaranteed rollback: remove the on flag, create `posterior_chord_off.flag`, then
 rerun Smart Conform from the vanilla/base mesh. The off flag wins over both the
