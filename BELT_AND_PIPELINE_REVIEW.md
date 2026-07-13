@@ -1399,3 +1399,100 @@ while AFK — especially in routing, the most-regressed area of the project. The
 airtight for the static case; the toggle lets the user A/B instantly (drop route_fitted.flag,
 restart OS) or set Fitted manually per-garment in the UI. Recommendation on the table: enable
 the reroute (or flip the default) if the static sculpt look is what they want in-game too.
+
+---
+
+## Part 24 — Future belt/strap behavior review (user-requested backlog, 2026-07-12)
+
+**Timing:** do this after the current Vampire anti-clipping/body-clearance visual gate is
+stable. It is a dedicated solver review, not a small tuning pass. Existing M1/M2 belt ARAP
+and rest-on behavior is the baseline to audit, not proof that every belt class is solved.
+
+### 24.1 Required taxonomy
+
+The review must classify both **ownership/topology** and **path/orientation**. A single
+`BELT` preset or a name match is not an adequate behavioral model.
+
+Ownership/topology axis:
+
+1. **Separate shape:** an independent belt/strap mesh. It may bind to a solved garment,
+   participate in inter-shape layer order, and use island-level ARAP/rigidity.
+2. **Built-in island:** belt geometry is part of the outfit shape but remains a disconnected
+   or clearly bounded island. It cannot rely on the inter-shape collider graph; its bind and
+   boundary relationship must be solved inside the parent garment.
+3. **Sculpted-in connected band:** belt detail is continuous with the dress/pants/armor
+   surface. It must follow the cloth while retaining local width, section and ornament
+   detail; treating the whole band as a free rigid belt would tear or crease its boundaries.
+
+Path/orientation axis:
+
+1. **Waist/circumferential:** approximately closed horizontal loop around the waist/hips.
+2. **Diagonal torso strap/bandolier:** open or partially closed oblique path across chest and
+   back. A radial waist cylinder is the wrong frame for this class.
+3. **Other strap paths:** partial waist straps, limb straps and multi-branch harnesses should
+   be explicit validation cases rather than silently forced into either rule above.
+
+The first test matrix therefore needs at least the four primary quadrants:
+separate-waist, separate-bandolier, built-in-waist and built-in-bandolier. Include a truly
+connected sculpted band in each orientation when captures are available.
+
+### 24.2 Failure modes to measure
+
+- **Twist/torsion:** local ribbon frame rotating incorrectly along the belt centerline,
+  including normal flips and a buckle facing the wrong direction.
+- **Width/thickness collapse:** cross-section flattened, pinched or inflated by conform.
+- **Shear and anisotropic stretch:** holes, studs, buckle and embossed motifs becoming
+  skewed even when global edge stretch looks acceptable.
+- **Support drift:** floating above, magnetized into, or sliding around the garment/body.
+- **Clipping and order inversion:** body through belt, belt through its supporting garment,
+  parent cloth through a built-in band, or crossed strap panels.
+- **Boundary damage:** a built-in region staying rigid while its cloth boundary tears,
+  tents or develops a hard crease.
+
+### 24.3 Geometry model to prototype
+
+1. Build a belt/strap descriptor containing a centerline, width direction, surface normal,
+   thickness direction, closed/open state, support relation and attachment/boundary vertices.
+   Use parallel-transported local frames so torsion is measured independently of body axes.
+2. Classify topology from shape ownership, connected components, material/partition evidence
+   and band geometry. Preserve a manual metadata/tag fallback for ambiguous modded outfits;
+   never make a destructive decision from the shape name alone.
+3. **Separate waist belt:** retain the current solved-garment rest-on bind, but audit it with
+   centerline twist and section constraints in addition to ARAP.
+4. **Separate bandolier:** bind to the local torso/upper-garment surface along its path and
+   preserve tangent, normal and width frames. Do not use the waist radial/cylindrical rule.
+5. **Built-in island:** solve a regional ARAP/shape constraint inside the parent garment and
+   blend it through explicit attachment rings; it must share the parent's motion without
+   inheriting its full cloth stretch.
+6. **Sculpted-in connected band:** use regional detail/strain preservation rather than a
+   rigid island transform. The parent cloth owns gross motion; the band owns local section
+   and motif preservation.
+7. Reuse authored layer order for body/support clearance. For built-in geometry, add a
+   same-shape regional order/self-contact check because the normal outer-collider graph cannot
+   see parent cloth versus its own belt region.
+
+### 24.4 Metrics and release gates
+
+Add belt-specific harness metrics rather than judging success from body-relative magnetism:
+
+- centerline length and curvature change;
+- accumulated twist and maximum twist per segment;
+- width/thickness retention p50/p95/max;
+- local shear and authored edge-ratio violations;
+- buckle/rigid-detail similarity residual;
+- support-gap error against the authored belt-to-garment field;
+- body, garment and same-shape face-sample penetrations;
+- new non-adjacent crossing pairs and exact-seam/attachment separation.
+
+Run base, intermediate and extreme slider values, plus continuity in both directions. A
+candidate ships only if it introduces no new crossing/order pair, no face flip/collapse, no
+attachment split and no material twist/section regression. Validate the four taxonomy
+quadrants visually with textured Outfit Studio captures before generalizing beyond an exact
+pilot allowlist.
+
+### 24.5 Immediate first step when this backlog is activated
+
+Collect/export named base, vanilla-conformed, current Smart-Conform and approved/manual-sculpt
+meshes for one representative of each primary quadrant, together with the supporting body and
+garment shapes. Diagnose which defects are inherited from vanilla versus introduced by Drape
+before changing M1/M2 or adding another belt-specific correction stack.
