@@ -95,21 +95,43 @@ removes absent/zero-mask keys, preserves weight 1 and scales other values.
 `CAPTURE_PUBLISH_VANILLA` exists as a replay/schema mode but is not currently
 emitted by a live call site.
 
-Self-tests cover StaticCloth merge, fallback mask and v4 round-trip. The current
-Lemoria captures are still v3; publication-aware live behavior has not been
-recaptured yet.
+Self-tests cover StaticCloth merge, fallback mask and v4 round-trip. A live v4
+Lemoria capture has now exercised the StaticCloth publication path end to end;
+the fallback-mask path remains covered headlessly but still needs a dedicated
+live fixture.
 
 ## Lemoria baseline
 
-Corrected captures are under
-`captures/universality/lemoria_rm_heavy` (ignored): 11 garments, `RM_Heavy`,
-reference `3BBB`, 13,651 body vertices and 26,412 body triangles. The project
-was closed without saving and `captures/enable_capture.flag` is absent.
+The original reference-correct v3 captures remain under
+`captures/universality/lemoria_rm_heavy` for historical A/B. The publication-
+aware baseline is now under
+`captures/universality/lemoria_rm_heavy_v4` (both ignored): 11 garments,
+`RM_Heavy`, reference `3BBB`, 13,651 body vertices and 26,412 body triangles.
+The project was closed without saving and `captures/enable_capture.flag` is
+absent.
 
 Do not use the older poisoned Lemoria run which selected `Armor1` as the body.
-Do not promote the current v3 captures to committed goldens: BeltDec's stored
-candidate can differ from the fallback actually published by the old live
-build.
+Do not promote the v3 captures to committed goldens: BeltDec's stored candidate
+can differ from the fallback actually published by the old live build. In the
+v4 run all 11 shapes recorded `publish='static'`; notably, guarded BeltDec is
+now accepted and its original capture replays with
+`expectedPublishMode=static`, zero expected diff mismatches and zero expected
+vertex error.
+
+Validation of the v4 directory:
+
+- sequential `--replay-dir`: 11 files, zero failures;
+- original individual captures: expected publication is StaticCloth and output
+  matches the live host exactly;
+- every capture was replayed to OBJ twice in fresh directories: 11/11 SHA-256
+  pairs are byte-identical;
+- no `REFERENCE MISMATCH`, capture failure or solver exception was logged.
+
+The ignored automation transcript is
+`tmp/universality/capture_lemoria_v4.ps1`. OutfitStudio 5.6.3 requires both
+`--project NAME OSP`. Because the target runs at the MO2 integrity level,
+native `Conforming...` and close-without-save buttons must also be clicked from
+an MO2-run PowerShell child; a lower-integrity shell receives access denied.
 
 ### Belt M1 transaction
 
@@ -182,18 +204,25 @@ materially without exceeding approximately `1.13` support stretch.
   publication merge/mask and v4 round-trip.
 - all 18 committed corpus shapes pass unchanged;
 - exact Savior/Satchel/Lemoria resolver matrix matches the expected results;
+- `drape_algo` and `drape_proxy` RelWithDebInfo build and deploy successfully;
+- build output and both configured deployment copies are byte-identical;
+- the 11-file live Lemoria v4 capture passes sequential, expected-output and
+  two-run determinism checks;
 - `git diff --check` is clean aside from normal CRLF conversion warnings.
 
-The previously documented deployed `drape-algo.dll` hash
-`A9927BEA...AC7DE0` predates v4 and the current transactions. It is stale. Do not
-claim the current source is deployed until a new full build, deploy and hash
-comparison are completed with Outfit Studio closed.
+Current deployed hashes (build output plus both MO2 destinations):
+
+```text
+drape-algo.dll F56EA6DDA64F0E0CE50E92AD4391675ED3113EA2CFEA8B1036E5BF4884EBB235
+version.dll    FAC922875A0AB9899E5CE8C04B9298E8A4F904E4F91FF57148E396848A5FF9C7
+```
 
 ## Universality queue
 
 Use this order, one capture directory per project and slider:
 
-1. `RLY_TEST_BDO Lemoria Armor`, `RM_Heavy`, 11 garments (recapture v4).
+1. `RLY_TEST_BDO Lemoria Armor`, `RM_Heavy`, 11 garments (v4 baseline complete;
+   use it as the modded regression case).
 2. `Rley 3BA Vanilla - Body - Archmage (Physics)`, `RM_Heavy`, 5 garments:
    `Bags`, `Cape`, `Pants`, `robes:0`, `robes:1`.
 3. `Rley 3BA Vanilla - Body - Thalmor Robe (No Physics)`, `RM_Heavy`, 6
@@ -217,7 +246,7 @@ build\algo\RelWithDebInfo\drape-harness.exe --self-test
 py -3 scripts\check_corpus.py
 
 build\algo\RelWithDebInfo\drape-harness.exe `
-  --replay-dir captures\universality\lemoria_rm_heavy
+  --replay-dir captures\universality\lemoria_rm_heavy_v4
 
 build\algo\RelWithDebInfo\drape-harness.exe `
   --resolve-project "Rley 3BA Vanilla - Body - Savior's Hide (Im Physics)" `
