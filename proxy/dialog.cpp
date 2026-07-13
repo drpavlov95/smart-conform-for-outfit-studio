@@ -5,7 +5,9 @@
 #include <array>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cctype>
 #include <cstdarg>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -691,6 +693,27 @@ static bool NameContains(const std::string& lowerName, const char* token) {
     return lowerName.find(token) != std::string::npos;
 }
 
+static bool NameContainsToken(const std::string& lowerName, const char* token) {
+    const size_t tokenLen = std::strlen(token);
+    size_t pos = lowerName.find(token);
+    while (pos != std::string::npos) {
+        const bool leftBoundary = pos == 0 ||
+            !std::isalnum((unsigned char)lowerName[pos - 1]);
+        const size_t end = pos + tokenLen;
+        const bool rightBoundary = end >= lowerName.size() ||
+            !std::isalnum((unsigned char)lowerName[end]);
+        if (leftBoundary && rightBoundary) return true;
+        pos = lowerName.find(token, pos + 1);
+    }
+    return false;
+}
+
+static bool NameEndsWith(const std::string& lowerName, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return lowerName.size() >= n &&
+           lowerName.compare(lowerName.size() - n, n, suffix) == 0;
+}
+
 static int GuessPresetForShapeUi(const std::string& shape) {
     std::string n = toLower(shape);
     if (NameContains(n, "belt") || NameContains(n, "waist") ||
@@ -705,13 +728,18 @@ static int GuessPresetForShapeUi(const std::string& shape) {
         NameContains(n, "robe") || NameContains(n, "tunic") ||
         NameContains(n, "fur") || NameContains(n, "cloak"))
         return DRAPE_PRESET_FITTED_CLOTH;   // merged cloth preset
-    if (NameContains(n, "pants") || NameContains(n, "sleeve") ||
-        NameContains(n, "glove") || NameContains(n, "boot") ||
-        NameContains(n, "arm") || NameContains(n, "leg"))
-        return DRAPE_PRESET_TUBULAR;
     if (NameContains(n, "pauldron") || NameContains(n, "shoulder") ||
         NameContains(n, "plate"))
         return DRAPE_PRESET_RIGID_ARMOR;
+    // "armor" contains "arm".  The old substring check silently routed
+    // generic Armor1/2/3 and ArmorShoulder meshes to Tubular in the dialog,
+    // overriding the core geometry classifier.  Only explicit limb tokens or
+    // suffixes are tubular; ambiguous armor remains Auto.
+    if (NameContains(n, "pants") || NameContains(n, "sleeve") ||
+        NameContains(n, "glove") || NameContains(n, "boot") ||
+        NameContainsToken(n, "arm") || NameContainsToken(n, "leg") ||
+        NameEndsWith(n, "arm") || NameEndsWith(n, "leg"))
+        return DRAPE_PRESET_TUBULAR;
     if (NameContains(n, "mail") || NameContains(n, "leather"))
         return DRAPE_PRESET_FLEXIBLE_ARMOR;
     if (NameContains(n, "cloth"))

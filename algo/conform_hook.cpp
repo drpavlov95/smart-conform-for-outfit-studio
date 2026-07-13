@@ -826,6 +826,27 @@ static bool NameHas(const std::string& lowerName, const char* token) {
     return lowerName.find(token) != std::string::npos;
 }
 
+static bool NameHasToken(const std::string& lowerName, const char* token) {
+    const size_t tokenLen = std::strlen(token);
+    size_t pos = lowerName.find(token);
+    while (pos != std::string::npos) {
+        const bool leftBoundary = pos == 0 ||
+            !std::isalnum((unsigned char)lowerName[pos - 1]);
+        const size_t end = pos + tokenLen;
+        const bool rightBoundary = end >= lowerName.size() ||
+            !std::isalnum((unsigned char)lowerName[end]);
+        if (leftBoundary && rightBoundary) return true;
+        pos = lowerName.find(token, pos + 1);
+    }
+    return false;
+}
+
+static bool NameEndsWith(const std::string& lowerName, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return lowerName.size() >= n &&
+           lowerName.compare(lowerName.size() - n, n, suffix) == 0;
+}
+
 static int GuessPresetFromShapeName(const std::string& shapeName) {
     std::string n = lower(shapeName);
     if (NameHas(n, "belt") || NameHas(n, "waist") ||
@@ -843,14 +864,19 @@ static int GuessPresetFromShapeName(const std::string& shapeName) {
         NameHas(n, "fur") || NameHas(n, "cloak"))
         return DRAPE_PRESET_LOOSE_DRAPED;
 
-    if (NameHas(n, "pants") || NameHas(n, "sleeve") ||
-        NameHas(n, "glove") || NameHas(n, "boot") ||
-        NameHas(n, "arm") || NameHas(n, "leg"))
-        return DRAPE_PRESET_TUBULAR;
-
     if (NameHas(n, "pauldron") || NameHas(n, "shoulder") ||
         NameHas(n, "plate"))
         return DRAPE_PRESET_RIGID_ARMOR;
+
+    // Do not substring-match "arm": every name containing "armor" used to
+    // become Tubular (e.g. Lemoria Armor1/2/3 and ArmorShoulder).  Recognize
+    // explicit limb words/suffixes while leaving ambiguous "Armor" shapes to
+    // geometry/manual classification.
+    if (NameHas(n, "pants") || NameHas(n, "sleeve") ||
+        NameHas(n, "glove") || NameHas(n, "boot") ||
+        NameHasToken(n, "arm") || NameHasToken(n, "leg") ||
+        NameEndsWith(n, "arm") || NameEndsWith(n, "leg"))
+        return DRAPE_PRESET_TUBULAR;
 
     if (NameHas(n, "mail") || NameHas(n, "leather"))
         return DRAPE_PRESET_FLEXIBLE_ARMOR;
@@ -1429,7 +1455,31 @@ struct ProjectNifRef {
     std::string dataFolder;
     std::string sourceFile;
     std::string firstShape;
+    std::string recognizedBodyShape;
 };
+
+static std::string NormalizeShapeIdentifier(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char ch : name)
+        if (std::isalnum(ch)) out.push_back((char)std::tolower(ch));
+    return out;
+}
+
+static int ReferenceBodyNameScore(const std::string& name) {
+    const std::string id = NormalizeShapeIdentifier(name);
+    static const std::unordered_set<std::string> exact = {
+        "3bbb", "3ba", "cbbe", "cbbe3ba", "cbbe3bbb",
+        "bhunp", "unp", "uunp", "tbd", "himbo", "sam", "sambody",
+        "baseshape", "basebody", "referencebody", "bodyreference",
+        "femalebody", "malebody", "body"
+    };
+    if (exact.count(id)) return 100;
+    if (id.find("baseshape") != std::string::npos ||
+        id.find("referencebody") != std::string::npos)
+        return 80;
+    return 0;
+}
 
 struct ProjectLoadInfo {
     fs::path loggedOspPath;
@@ -1512,7 +1562,8 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
         }
 
         std::ifstream f(e.path());
-        std::string line, dataFolder, sourceFile, firstShape;
+        std::string line, dataFolder, sourceFile, firstShape, bodyShape;
+        int bodyScore = 0;
         bool inThis = (lower(e.path().stem().string()) == projL);
         while (std::getline(f, line)) {
             auto sp = line.find("<SliderSet name=\"");
@@ -1523,6 +1574,19 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
             }
             if (!inThis) continue;
 
+            if (line.find("</SliderSet>") != std::string::npos) {
+                if (!dataFolder.empty() && !sourceFile.empty()) {
+                    out.bodySlideRoot = bodySlideRoot;
+                    out.ospPath = e.path();
+                    out.dataFolder = dataFolder;
+                    out.sourceFile = sourceFile;
+                    out.firstShape = firstShape;
+                    out.recognizedBodyShape = bodyShape;
+                    return true;
+                }
+                continue;
+            }
+
             auto getTag = [&](const char* o, const char* c)->std::string{
                 auto a = line.find(o); if (a == std::string::npos) return {};
                 a += strlen(o); auto b = line.find(c, a);
@@ -1531,25 +1595,30 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
             if (dataFolder.empty()) dataFolder = getTag("<DataFolder>","</DataFolder>");
             if (sourceFile.empty()) sourceFile = getTag("<SourceFile>","</SourceFile>");
 
-            if (firstShape.empty()) {
-                auto sh = line.find("<Shape");
-                if (sh != std::string::npos) {
-                    auto gt = line.find('>', sh);
-                    auto end = gt == std::string::npos ? std::string::npos : line.find("</Shape>", gt);
-                    if (gt != std::string::npos && end != std::string::npos)
-                        firstShape = trim(line.substr(gt + 1, end - gt - 1));
+            auto sh = line.find("<Shape");
+            if (sh != std::string::npos) {
+                auto gt = line.find('>', sh);
+                auto end = gt == std::string::npos ? std::string::npos : line.find("</Shape>", gt);
+                if (gt != std::string::npos && end != std::string::npos) {
+                    std::string shape = trim(line.substr(gt + 1, end - gt - 1));
+                    if (firstShape.empty()) firstShape = shape;
+                    const int score = ReferenceBodyNameScore(shape);
+                    if (score > bodyScore) {
+                        bodyScore = score;
+                        bodyShape = shape;
+                    }
                 }
             }
+        }
 
-            if (!dataFolder.empty() && !sourceFile.empty() &&
-                (!firstShape.empty() || line.find("</SliderSet>") != std::string::npos)) {
-                out.bodySlideRoot = bodySlideRoot;
-                out.ospPath = e.path();
-                out.dataFolder = dataFolder;
-                out.sourceFile = sourceFile;
-                out.firstShape = firstShape;
-                return true;
-            }
+        if (inThis && !dataFolder.empty() && !sourceFile.empty()) {
+            out.bodySlideRoot = bodySlideRoot;
+            out.ospPath = e.path();
+            out.dataFolder = dataFolder;
+            out.sourceFile = sourceFile;
+            out.firstShape = firstShape;
+            out.recognizedBodyShape = bodyShape;
+            return true;
         }
     }
 
@@ -1579,15 +1648,26 @@ static ResolvedProject ResolveProject(const std::string& proj) {
         for (const auto& root : roots) {
             if (!FindProjectInRoot(root, projL, ospFileFilterL, ref)) continue;
 
-            std::string referenceShape = !loadInfo.referenceShape.empty()
-                ? loadInfo.referenceShape
-                : ref.firstShape;
+            std::string referenceShape;
+            const char* referenceSource = nullptr;
+            if (!loadInfo.referenceShape.empty()) {
+                referenceShape = loadInfo.referenceShape;
+                referenceSource = "OutfitStudio-log";
+            } else if (!ref.recognizedBodyShape.empty()) {
+                referenceShape = ref.recognizedBodyShape;
+                referenceSource = "recognized-body-name";
+            } else {
+                referenceShape = ref.firstShape;
+                referenceSource = "first-shape-fallback";
+            }
 
             fs::path relShape = fs::path("ShapeData") / ref.dataFolder / ref.sourceFile;
             fs::path sameMod = ref.bodySlideRoot / relShape;
             if (fs::exists(sameMod)) {
                 HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
-                HLog("resolve: reference shape '%s'", referenceShape.c_str());
+                HLog("resolve: reference shape '%s' source='%s' first='%s' recognized='%s'",
+                     referenceShape.c_str(), referenceSource, ref.firstShape.c_str(),
+                     ref.recognizedBodyShape.c_str());
                 HLog("resolve: NIF found in same mod '%s'", sameMod.string().c_str());
                 return {sameMod.string(), referenceShape, ref.ospPath};
             }
@@ -1596,7 +1676,9 @@ static ResolvedProject ResolveProject(const std::string& proj) {
                 fs::path candidate = shapeRoot / relShape;
                 if (fs::exists(candidate)) {
                     HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
-                    HLog("resolve: reference shape '%s'", referenceShape.c_str());
+                    HLog("resolve: reference shape '%s' source='%s' first='%s' recognized='%s'",
+                         referenceShape.c_str(), referenceSource, ref.firstShape.c_str(),
+                         ref.recognizedBodyShape.c_str());
                     HLog("resolve: NIF found via VFS-style search '%s'", candidate.string().c_str());
                     return {candidate.string(), referenceShape, ref.ospPath};
                 }
@@ -16756,6 +16838,26 @@ static int RunShadowSelfTest() {
 }
 
 static int RunSelfTest() {
+    struct ClassifierCase { const char* name; int expected; };
+    const ClassifierCase classifierCases[] = {
+        {"00BDOR0008Armor1", DRAPE_PRESET_AUTO},
+        {"00BDOR0008ArmorShoulder", DRAPE_PRESET_RIGID_ARMOR},
+        {"00BDOR0008ArmorArm", DRAPE_PRESET_TUBULAR},
+        {"Armor_Leg", DRAPE_PRESET_TUBULAR},
+    };
+    for (const auto& tc : classifierCases) {
+        const int actual = GuessPresetFromShapeName(tc.name);
+        if (actual != tc.expected) {
+            std::cerr << "self-test: classifier FAIL shape='" << tc.name
+                      << "' expected=" << tc.expected << " actual=" << actual << "\n";
+            return 21;
+        }
+    }
+    if (ReferenceBodyNameScore("3BBB") <= ReferenceBodyNameScore("00BDOR0008Armor1")) {
+        std::cerr << "self-test: reference-body recognition FAIL\n";
+        return 22;
+    }
+
     fs::path path = fs::current_path() / "drape_harness_selftest.drcap";
     int writeCode = WriteSelfTestCapture(path);
     if (writeCode != 0)
@@ -16785,6 +16887,20 @@ int main(int argc, char** argv) {
         return RunSelfTest();
     if (HasArg(argc, argv, "--shadow-selftest"))
         return RunShadowSelfTest();
+    std::string resolveProject = ArgValue(argc, argv, "--resolve-project");
+    if (!resolveProject.empty()) {
+        g_bsDir = ArgValue(argc, argv, "--bodyslide-dir");
+        if (g_bsDir.empty()) {
+            std::cerr << "Error: --resolve-project requires --bodyslide-dir\n";
+            return 2;
+        }
+        ResolvedProject resolved = ResolveProject(resolveProject);
+        std::cout << "RESOLVE_PROJECT project=\"" << resolveProject
+                  << "\" reference=\"" << resolved.referenceShape
+                  << "\" nif=\"" << resolved.nifPath
+                  << "\" osp=\"" << resolved.ospPath.string() << "\"\n";
+        return resolved.nifPath.empty() || resolved.referenceShape.empty() ? 1 : 0;
+    }
     std::string writeSelf = ArgValue(argc, argv, "--write-self-test");
     if (!writeSelf.empty())
         return WriteSelfTestCapture(fs::path(writeSelf));
@@ -16827,6 +16943,7 @@ int main(int argc, char** argv) {
     std::cerr
         << "Usage:\n"
         << "  drape-harness --self-test\n"
+        << "  drape-harness --resolve-project <name> --bodyslide-dir <path>\n"
         << "  drape-harness --write-self-test <capture.drcap>\n"
         << "  drape-harness --replay <capture.drcap> [--result-obj out.obj] [--debug-ply out.ply]\n"
         << "  drape-harness --replay-dir <capture_dir>\n"
@@ -16995,12 +17112,26 @@ static void Detour_GenResult(
 
     const BodyShell* bodyShell = nullptr;
     const BodyBVH* bodyBVH = nullptr;
+    bool referenceGeometryCompatible = true;
     if (refDataName && !refDataName->empty() && !g_refVerts.empty()) {
         auto shellIt = g_bodyShellCache.find(*refDataName);
         if (shellIt == g_bodyShellCache.end()) {
             TargetDataDiffs refDiff;
             BodyShell shell;
-            if (HostCopySourceDiff(self, refDataName, refDiff) &&
+            const bool copiedReferenceDiff =
+                HostCopySourceDiff(self, refDataName, refDiff);
+            if (copiedReferenceDiff) {
+                uint16_t maxDiffVertex = 0;
+                for (const auto& kv : refDiff)
+                    maxDiffVertex = std::max(maxDiffVertex, kv.first);
+                if (!refDiff.empty() && (size_t)maxDiffVertex >= g_refVerts.size()) {
+                    referenceGeometryCompatible = false;
+                    HLog("detour: REFERENCE MISMATCH refData='%s' refVerts=%zu diffVerts=%zu maxDiffVertex=%u -> vanilla fail-closed",
+                         refDataName->c_str(), g_refVerts.size(), refDiff.size(),
+                         (unsigned)maxDiffVertex);
+                }
+            }
+            if (copiedReferenceDiff && referenceGeometryCompatible &&
                 BuildBodyShell(g_refVerts, refDiff, shell)) {
                 auto inserted = g_bodyShellCache.emplace(*refDataName, std::move(shell));
                 shellIt = inserted.first;
@@ -17030,6 +17161,14 @@ static void Detour_GenResult(
         if (bvhIt != g_bodyBVHCache.end() && bvhIt->second.valid)
             bodyBVH = &bvhIt->second;
     }
+
+    // A stale/unflushed OutfitStudio load log used to make the resolver pick
+    // the SliderSet's first garment as the body. Applying a 13k-vertex 3BBB
+    // morph to a 708-vertex armor plate poisoned weights, layer order and every
+    // downstream constraint. Preserve vanilla whenever the source diff proves
+    // that the cached reference topology is incompatible.
+    if (!referenceGeometryCompatible)
+        return;
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Static cloth pass (main path) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!presetMask.empty() && g_getRawResultDiff && g_setResultDiff) {
