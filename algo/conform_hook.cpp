@@ -1456,7 +1456,119 @@ struct ProjectNifRef {
     std::string sourceFile;
     std::string firstShape;
     std::string recognizedBodyShape;
+    std::vector<std::string> shapeNames;
 };
+
+// Decode the five predefined XML entities plus decimal/hexadecimal numeric
+// character references.  Invalid, unknown, overlong, surrogate, and non-XML
+// code points are preserved verbatim instead of being truncated or converted
+// to an unsafe byte sequence.
+static bool AppendXmlCodePointUtf8(std::string& out, uint32_t cp) {
+    const bool validXmlChar =
+        cp == 0x09u || cp == 0x0Au || cp == 0x0Du ||
+        (cp >= 0x20u && cp <= 0xD7FFu) ||
+        (cp >= 0xE000u && cp <= 0xFFFDu) ||
+        (cp >= 0x10000u && cp <= 0x10FFFFu);
+    if (!validXmlChar)
+        return false;
+
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+    return true;
+}
+
+static std::string DecodeXmlEntities(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size();) {
+        if (value[i] != '&') {
+            out.push_back(value[i++]);
+            continue;
+        }
+
+        const size_t semi = value.find(';', i + 1);
+        // The longest valid numeric entity is short.  Bounding the scan also
+        // avoids treating arbitrary text between '&' and a distant ';' as one.
+        if (semi == std::string::npos || semi - i > 16) {
+            out.push_back(value[i++]);
+            continue;
+        }
+
+        const std::string entity = value.substr(i + 1, semi - i - 1);
+        uint32_t cp = 0;
+        bool recognized = true;
+        if (entity == "amp") cp = '&';
+        else if (entity == "lt") cp = '<';
+        else if (entity == "gt") cp = '>';
+        else if (entity == "quot") cp = '"';
+        else if (entity == "apos") cp = '\'';
+        else if (!entity.empty() && entity[0] == '#') {
+            size_t digitStart = 1;
+            uint32_t base = 10;
+            if (digitStart < entity.size() &&
+                (entity[digitStart] == 'x' || entity[digitStart] == 'X')) {
+                base = 16;
+                ++digitStart;
+            }
+            if (digitStart >= entity.size()) {
+                recognized = false;
+            } else {
+                for (size_t d = digitStart; d < entity.size(); ++d) {
+                    const unsigned char ch = static_cast<unsigned char>(entity[d]);
+                    uint32_t digit = 0;
+                    if (ch >= '0' && ch <= '9') digit = ch - '0';
+                    else if (base == 16 && ch >= 'a' && ch <= 'f') digit = 10u + ch - 'a';
+                    else if (base == 16 && ch >= 'A' && ch <= 'F') digit = 10u + ch - 'A';
+                    else {
+                        recognized = false;
+                        break;
+                    }
+                    if (digit >= base || cp > (0x10FFFFu - digit) / base) {
+                        recognized = false;
+                        break;
+                    }
+                    cp = cp * base + digit;
+                }
+            }
+        } else {
+            recognized = false;
+        }
+
+        const size_t oldSize = out.size();
+        if (recognized && AppendXmlCodePointUtf8(out, cp)) {
+            i = semi + 1;
+        } else {
+            out.resize(oldSize);
+            out.push_back(value[i++]);
+        }
+    }
+    return out;
+}
+
+static std::string XmlAttrValue(const std::string& line, const char* attr) {
+    std::string needle = std::string(attr) + "=\"";
+    auto p = line.find(needle);
+    if (p == std::string::npos)
+        return {};
+    p += needle.size();
+    auto q = line.find('"', p);
+    return q == std::string::npos
+        ? std::string{}
+        : DecodeXmlEntities(line.substr(p, q - p));
+}
 
 static std::string NormalizeShapeIdentifier(const std::string& name) {
     std::string out;
@@ -1486,6 +1598,131 @@ struct ProjectLoadInfo {
     std::string referenceShape;
     bool matched = false;
 };
+
+static std::string MatchingProjectShape(const ProjectNifRef& ref,
+                                        const std::string& requested) {
+    const std::string requestedL = lower(trim(DecodeXmlEntities(requested)));
+    if (requestedL.empty())
+        return {};
+    for (const auto& shape : ref.shapeNames)
+        if (lower(trim(shape)) == requestedL)
+            return shape;
+    return {};
+}
+
+static bool LoggedOspMatchesProject(const ProjectLoadInfo& loadInfo,
+                                    const ProjectNifRef& ref) {
+    if (loadInfo.loggedOspPath.empty())
+        return true;
+    return lower(loadInfo.loggedOspPath.filename().string()) ==
+           lower(ref.ospPath.filename().string());
+}
+
+static std::string SelectProjectReference(const ProjectNifRef& ref,
+                                          const ProjectLoadInfo& loadInfo,
+                                          const char*& source) {
+    source = nullptr;
+    if (!loadInfo.referenceShape.empty() && LoggedOspMatchesProject(loadInfo, ref)) {
+        std::string logged = MatchingProjectShape(ref, loadInfo.referenceShape);
+        if (!logged.empty()) {
+            source = "OutfitStudio-log";
+            return logged;
+        }
+    }
+    if (!ref.recognizedBodyShape.empty()) {
+        source = "recognized-body-name";
+        return ref.recognizedBodyShape;
+    }
+    return {};
+}
+
+struct ReferenceGeometryInfo {
+    bool found = false;
+    bool bodyLike = false;
+    size_t vertexCount = 0;
+    size_t triangleCount = 0;
+    float spanX = 0.0f;
+    float spanY = 0.0f;
+    float spanZ = 0.0f;
+    float boundaryEdgeFraction = 1.0f;
+};
+
+static bool PlausibleFullBodyGeometry(size_t vertexCount, size_t triangleCount,
+                                      float spanX, float spanY, float spanZ,
+                                      float boundaryEdgeFraction) {
+    // Skyrim full-body references are substantial, human-height surfaces with
+    // only a small fraction of open boundary edges.  These deliberately broad
+    // thresholds admit low-poly/custom bodies while rejecting pouches, straps,
+    // buckles and other garment-only Outfit Studio base shapes.
+    return vertexCount >= 1500 && triangleCount >= 2500 &&
+           spanX >= 20.0f && spanY >= 10.0f && spanZ >= 70.0f &&
+           boundaryEdgeFraction <= 0.12f;
+}
+
+static ReferenceGeometryInfo InspectReferenceGeometry(const fs::path& nifPath,
+                                                       const std::string& shapeName) {
+    ReferenceGeometryInfo info;
+    NifFile nif;
+    if (nif.Load(nifPath.string()) != 0)
+        return info;
+
+    NiShape* selected = nullptr;
+    const std::string wanted = lower(trim(shapeName));
+    for (auto* shape : nif.GetShapes()) {
+        if (shape && lower(trim(shape->name.get())) == wanted) {
+            selected = shape;
+            break;
+        }
+    }
+    if (!selected)
+        return info;
+
+    std::vector<Vector3> verts;
+    nif.GetVertsForShape(selected, verts);
+    std::vector<Triangle> tris;
+    selected->GetTriangles(tris);
+    info.found = true;
+    info.vertexCount = verts.size();
+    info.triangleCount = tris.size();
+    if (verts.empty() || tris.empty())
+        return info;
+
+    float minX = verts[0].x, maxX = verts[0].x;
+    float minY = verts[0].y, maxY = verts[0].y;
+    float minZ = verts[0].z, maxZ = verts[0].z;
+    for (const auto& v : verts) {
+        minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
+        minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
+        minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
+    }
+    info.spanX = maxX - minX;
+    info.spanY = maxY - minY;
+    info.spanZ = maxZ - minZ;
+
+    std::unordered_map<uint32_t, uint32_t> edgeUse;
+    edgeUse.reserve(tris.size() * 3);
+    auto addEdge = [&](uint16_t a, uint16_t b) {
+        if (a >= verts.size() || b >= verts.size() || a == b)
+            return;
+        ++edgeUse[EdgeKey(a, b)];
+    };
+    for (const auto& t : tris) {
+        addEdge(t.p1, t.p2);
+        addEdge(t.p2, t.p3);
+        addEdge(t.p3, t.p1);
+    }
+    size_t boundaryEdges = 0;
+    for (const auto& edge : edgeUse)
+        if (edge.second == 1) ++boundaryEdges;
+    if (!edgeUse.empty())
+        info.boundaryEdgeFraction =
+            static_cast<float>(boundaryEdges) / static_cast<float>(edgeUse.size());
+
+    info.bodyLike = PlausibleFullBodyGeometry(
+        info.vertexCount, info.triangleCount,
+        info.spanX, info.spanY, info.spanZ, info.boundaryEdgeFraction);
+    return info;
+}
 
 static std::string ParseSingleQuotedAfter(const std::string& line, const char* marker) {
     auto p = line.find(marker);
@@ -1563,14 +1800,12 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
 
         std::ifstream f(e.path());
         std::string line, dataFolder, sourceFile, firstShape, bodyShape;
+        std::vector<std::string> shapeNames;
         int bodyScore = 0;
         bool inThis = (lower(e.path().stem().string()) == projL);
         while (std::getline(f, line)) {
-            auto sp = line.find("<SliderSet name=\"");
-            if (sp != std::string::npos) {
-                sp += 17; auto q = line.find('"', sp);
-                inThis = (q != std::string::npos) &&
-                         (lower(line.substr(sp, q - sp)) == projL);
+            if (line.find("<SliderSet") != std::string::npos) {
+                inThis = (lower(trim(XmlAttrValue(line, "name"))) == projL);
             }
             if (!inThis) continue;
 
@@ -1582,6 +1817,7 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
                     out.sourceFile = sourceFile;
                     out.firstShape = firstShape;
                     out.recognizedBodyShape = bodyShape;
+                    out.shapeNames = shapeNames;
                     return true;
                 }
                 continue;
@@ -1590,7 +1826,9 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
             auto getTag = [&](const char* o, const char* c)->std::string{
                 auto a = line.find(o); if (a == std::string::npos) return {};
                 a += strlen(o); auto b = line.find(c, a);
-                return b != std::string::npos ? line.substr(a, b - a) : std::string{};
+                return b != std::string::npos
+                    ? DecodeXmlEntities(line.substr(a, b - a))
+                    : std::string{};
             };
             if (dataFolder.empty()) dataFolder = getTag("<DataFolder>","</DataFolder>");
             if (sourceFile.empty()) sourceFile = getTag("<SourceFile>","</SourceFile>");
@@ -1600,7 +1838,9 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
                 auto gt = line.find('>', sh);
                 auto end = gt == std::string::npos ? std::string::npos : line.find("</Shape>", gt);
                 if (gt != std::string::npos && end != std::string::npos) {
-                    std::string shape = trim(line.substr(gt + 1, end - gt - 1));
+                    std::string shape = trim(DecodeXmlEntities(
+                        line.substr(gt + 1, end - gt - 1)));
+                    if (!shape.empty()) shapeNames.push_back(shape);
                     if (firstShape.empty()) firstShape = shape;
                     const int score = ReferenceBodyNameScore(shape);
                     if (score > bodyScore) {
@@ -1618,6 +1858,7 @@ static bool FindProjectInRoot(const fs::path& bodySlideRoot,
             out.sourceFile = sourceFile;
             out.firstShape = firstShape;
             out.recognizedBodyShape = bodyShape;
+            out.shapeNames = shapeNames;
             return true;
         }
     }
@@ -1629,12 +1870,15 @@ struct ResolvedProject {
     std::string nifPath;
     std::string referenceShape;
     fs::path ospPath;
+    std::string referenceSource;
+    std::string status;
 };
 
 // Resolve the open project's NIF path and the actual OutfitStudio reference
 // shape. The hook cannot see OutfitProject::baseShape directly, so it uses
-// Outfit Studio's own load log first and falls back to the SliderSet's first
-// shape if the log is unavailable.
+// Outfit Studio's own load log first (when it names a shape in the same OSP),
+// then a recognized body name.  With neither, fail closed: a garment must never
+// silently become the body/reference merely because it is the first listed shape.
 static ResolvedProject ResolveProject(const std::string& proj) {
     std::string projL = lower(proj);
     ProjectLoadInfo loadInfo = LatestProjectLoadInfo(proj);
@@ -1642,47 +1886,102 @@ static ResolvedProject ResolveProject(const std::string& proj) {
     auto roots = BodySlideSearchRoots();
     HLog("resolve: searching %zu BodySlide root(s) for '%s'",
          roots.size(), proj.c_str());
+    ResolvedProject bestFailure;
 
     auto tryResolve = [&](const std::string& ospFileFilterL) -> ResolvedProject {
         ProjectNifRef ref;
         for (const auto& root : roots) {
             if (!FindProjectInRoot(root, projL, ospFileFilterL, ref)) continue;
 
-            std::string referenceShape;
             const char* referenceSource = nullptr;
-            if (!loadInfo.referenceShape.empty()) {
-                referenceShape = loadInfo.referenceShape;
-                referenceSource = "OutfitStudio-log";
-            } else if (!ref.recognizedBodyShape.empty()) {
-                referenceShape = ref.recognizedBodyShape;
-                referenceSource = "recognized-body-name";
-            } else {
-                referenceShape = ref.firstShape;
-                referenceSource = "first-shape-fallback";
+            std::string referenceShape = SelectProjectReference(
+                ref, loadInfo, referenceSource);
+            if (referenceShape.empty()) {
+                const bool logOspMatch = LoggedOspMatchesProject(loadInfo, ref);
+                const bool logShapeMatch =
+                    !MatchingProjectShape(ref, loadInfo.referenceShape).empty();
+                HLog("resolve: project found in '%s' but rejected: no usable reference "
+                     "(first='%s' recognized='%s' logged='%s' logOspMatch=%d logShapeMatch=%d shapes=%zu)",
+                     ref.ospPath.string().c_str(), ref.firstShape.c_str(),
+                     ref.recognizedBodyShape.c_str(), loadInfo.referenceShape.c_str(),
+                     logOspMatch ? 1 : 0, logShapeMatch ? 1 : 0, ref.shapeNames.size());
+                if (bestFailure.ospPath.empty()) {
+                    bestFailure.ospPath = ref.ospPath;
+                    bestFailure.status = "no-usable-reference";
+                }
+                continue;
             }
 
             fs::path relShape = fs::path("ShapeData") / ref.dataFolder / ref.sourceFile;
-            fs::path sameMod = ref.bodySlideRoot / relShape;
-            if (fs::exists(sameMod)) {
+            auto finalizeCandidate = [&](const fs::path& nifPath,
+                                         const char* nifLocation) -> ResolvedProject {
+                // Outfit Studio's baseShape is authoritative for conform topology,
+                // but a bodyless project can legitimately report a pouch/strap as
+                // that baseShape.  Such a mesh is not a safe Drape body collider.
+                // Trust known body identifiers directly; require broad full-body
+                // geometry from an otherwise custom/unknown logged reference.
+                if (referenceSource &&
+                    std::strcmp(referenceSource, "OutfitStudio-log") == 0 &&
+                    ReferenceBodyNameScore(referenceShape) == 0) {
+                    ReferenceGeometryInfo geometry =
+                        InspectReferenceGeometry(nifPath, referenceShape);
+                    HLog("resolve: logged reference body-check shape='%s' found=%d bodyLike=%d "
+                         "verts=%zu tris=%zu span=(%.2f,%.2f,%.2f) boundary=%.4f",
+                         referenceShape.c_str(), geometry.found ? 1 : 0,
+                         geometry.bodyLike ? 1 : 0, geometry.vertexCount,
+                         geometry.triangleCount, geometry.spanX, geometry.spanY,
+                         geometry.spanZ, geometry.boundaryEdgeFraction);
+                    if (!geometry.bodyLike) {
+                        if (!ref.recognizedBodyShape.empty()) {
+                            HLog("resolve: rejected logged non-body reference '%s'; "
+                                 "using recognized body '%s'",
+                                 referenceShape.c_str(), ref.recognizedBodyShape.c_str());
+                            referenceShape = ref.recognizedBodyShape;
+                            referenceSource = "recognized-body-name";
+                        } else {
+                            HLog("resolve: project found in '%s' but rejected: logged "
+                                 "reference '%s' is not plausible full-body geometry",
+                                 ref.ospPath.string().c_str(), referenceShape.c_str());
+                            if (bestFailure.ospPath.empty()) {
+                                bestFailure.ospPath = ref.ospPath;
+                                bestFailure.status = "no-usable-reference";
+                            }
+                            return {};
+                        }
+                    }
+                }
+
                 HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
                 HLog("resolve: reference shape '%s' source='%s' first='%s' recognized='%s'",
                      referenceShape.c_str(), referenceSource, ref.firstShape.c_str(),
                      ref.recognizedBodyShape.c_str());
-                HLog("resolve: NIF found in same mod '%s'", sameMod.string().c_str());
-                return {sameMod.string(), referenceShape, ref.ospPath};
+                HLog("resolve: NIF found %s '%s'", nifLocation, nifPath.string().c_str());
+                return {nifPath.string(), referenceShape, ref.ospPath,
+                        referenceSource, "ok"};
+            };
+
+            fs::path sameMod = ref.bodySlideRoot / relShape;
+            if (fs::exists(sameMod)) {
+                ResolvedProject candidate = finalizeCandidate(sameMod, "in same mod");
+                if (!candidate.nifPath.empty())
+                    return candidate;
+                continue;
             }
 
+            bool foundViaVfs = false;
             for (const auto& shapeRoot : roots) {
                 fs::path candidate = shapeRoot / relShape;
                 if (fs::exists(candidate)) {
-                    HLog("resolve: project found in '%s'", ref.ospPath.string().c_str());
-                    HLog("resolve: reference shape '%s' source='%s' first='%s' recognized='%s'",
-                         referenceShape.c_str(), referenceSource, ref.firstShape.c_str(),
-                         ref.recognizedBodyShape.c_str());
-                    HLog("resolve: NIF found via VFS-style search '%s'", candidate.string().c_str());
-                    return {candidate.string(), referenceShape, ref.ospPath};
+                    foundViaVfs = true;
+                    ResolvedProject resolvedCandidate =
+                        finalizeCandidate(candidate, "via VFS-style search");
+                    if (!resolvedCandidate.nifPath.empty())
+                        return resolvedCandidate;
+                    break;
                 }
             }
+            if (foundViaVfs)
+                continue;
 
             HLog("resolve: project found in '%s' but NIF missing: ShapeData\\%s\\%s",
                  ref.ospPath.string().c_str(), ref.dataFolder.c_str(), ref.sourceFile.c_str());
@@ -1700,18 +1999,13 @@ static ResolvedProject ResolveProject(const std::string& proj) {
     if (!resolved.nifPath.empty())
         return resolved;
 
-    HLog("resolve: no SliderSet match for '%s'", proj.c_str());
-    return {};
-}
+    if (!bestFailure.ospPath.empty())
+        return bestFailure;
 
-static std::string XmlAttrValue(const std::string& line, const char* attr) {
-    std::string needle = std::string(attr) + "=\"";
-    auto p = line.find(needle);
-    if (p == std::string::npos)
-        return {};
-    p += needle.size();
-    auto q = line.find('"', p);
-    return q == std::string::npos ? std::string{} : line.substr(p, q - p);
+    HLog("resolve: no SliderSet match for '%s'", proj.c_str());
+    ResolvedProject noMatch;
+    noMatch.status = "no-slider-set-match";
+    return noMatch;
 }
 
 static std::vector<std::string> ParseSliderNamesFromOsp(const fs::path& ospPath,
@@ -4046,6 +4340,58 @@ static bool TrianglesShareVertex(
     return false;
 }
 
+static std::vector<uint32_t> BuildExactSeamRepresentatives(
+    size_t vertexCount,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups)
+{
+    std::vector<uint32_t> parent(vertexCount);
+    std::vector<uint8_t> rank(vertexCount, 0);
+    for (size_t i = 0; i < vertexCount; ++i) parent[i] = (uint32_t)i;
+    auto findRoot = [&](uint32_t x) {
+        uint32_t root = x;
+        while (parent[root] != root) root = parent[root];
+        while (parent[x] != x) {
+            uint32_t next = parent[x];
+            parent[x] = root;
+            x = next;
+        }
+        return root;
+    };
+    auto unite = [&](uint32_t a, uint32_t b) {
+        uint32_t ra = findRoot(a), rb = findRoot(b);
+        if (ra == rb) return;
+        if (rank[ra] < rank[rb]) std::swap(ra, rb);
+        parent[rb] = ra;
+        if (rank[ra] == rank[rb]) ++rank[ra];
+    };
+    for (const auto& grp : exactSeamGroups) {
+        uint32_t first = (uint32_t)vertexCount;
+        for (uint32_t vi : grp) {
+            if (vi >= vertexCount) continue;
+            if (first >= vertexCount) first = vi;
+            else unite(first, vi);
+        }
+    }
+    for (size_t i = 0; i < vertexCount; ++i)
+        parent[i] = findRoot((uint32_t)i);
+    return parent;
+}
+
+static bool TrianglesShareVertexOrExactSeam(
+    const std::array<uint16_t, 3>& a,
+    const std::array<uint16_t, 3>& b,
+    const std::vector<uint32_t>& seamRep)
+{
+    for (uint16_t av : a) {
+        if (av >= seamRep.size()) continue;
+        for (uint16_t bv : b) {
+            if (bv >= seamRep.size()) continue;
+            if (av == bv || seamRep[av] == seamRep[bv]) return true;
+        }
+    }
+    return false;
+}
+
 static bool TrianglesCrossNonCoplanar(
     const std::vector<Vec3>& verts,
     const std::array<uint16_t, 3>& ta,
@@ -4101,6 +4447,8 @@ static bool ApplyGuardedDisplacementField(
     const size_t n = verts.size();
     if (n == 0 || field.size() != n || tris.empty()) return false;
     maxMove = std::max(0.01f, maxMove);
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
 
     // One variable per exact seam group: average only signalled members, then
     // apply that same delta to every twin so the cleanup cannot unzip a seam.
@@ -4176,7 +4524,8 @@ static bool ApplyGuardedDisplacementField(
             uint32_t hi = std::max(ti, (uint32_t)tj);
             uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
             if (!testedPairs.insert(key).second) continue;
-            if (TrianglesShareVertex(tris[ti], tris[tj])) continue;
+            if (TrianglesShareVertexOrExactSeam(
+                    tris[ti], tris[tj], seamRep)) continue;
             if (TrianglesCrossNonCoplanar(entry, tris[ti], tris[tj]))
                 beforeCrossings.insert(key);
         }
@@ -4251,7 +4600,8 @@ static bool ApplyGuardedDisplacementField(
                 uint32_t hi = std::max(ti, (uint32_t)tj);
                 uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
                 if (!testedPairs.insert(key).second) continue;
-                if (TrianglesShareVertex(tris[ti], tris[tj])) continue;
+                if (TrianglesShareVertexOrExactSeam(
+                        tris[ti], tris[tj], seamRep)) continue;
                 if (TrianglesCrossNonCoplanar(candidate, tris[ti], tris[tj])) {
                     // Counting alone is insufficient: a cleanup could remove
                     // one hidden crossing and introduce a different visible
@@ -4277,6 +4627,277 @@ static bool ApplyGuardedDisplacementField(
         return true;
     }
     return false;
+}
+
+struct ComponentPassGuardStats {
+    int components = 0;
+    int rolledComponents = 0;
+    int rolledVerts = 0;
+    int rejectedEdge = 0;
+    int rejectedFace = 0;
+    int rejectedSeam = 0;
+    int rejectedBody = 0;
+    int rejectedLayer = 0;
+    int rejectedCross = 0;
+    int crossingRounds = 0;
+    bool conservativeRollback = false;
+    float worstEdgeBefore = 0.0f;
+    float worstEdgeCandidate = 0.0f;
+    float worstEdgeAfter = 0.0f;
+};
+
+// Pass-local integrity transaction for meshes made of many disconnected material
+// islands (belt ornaments are the first caller).  A late whole-mesh fallback loses
+// every useful island when one tiny decoration explodes; this instead commits only
+// connected components which preserve the trusted pass entry.  Exact-seam twins are
+// unioned with their material components, so rollback can never unzip a seam.
+//
+// The allowed edge/face bands mirror the proven trusted Vampire cleanup.  Body and
+// non-adjacent crossing SETS may only stay equal or improve.  Crossing rollback is
+// iterated because restoring one island to entry can expose a new mixed-state pair
+// against another still-moved island.  If that small fixpoint does not converge, all
+// moved components are conservatively restored to entry.
+static int GuardPassByMaterialComponent(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& entry,
+    const std::vector<Vec3>& restVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const BodyBVH* body,
+    ComponentPassGuardStats& stats)
+{
+    const size_t n = verts.size();
+    if (n == 0 || entry.size() != n || restVerts.size() < n || tris.empty())
+        return 0;
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
+
+    std::vector<uint32_t> parent(n);
+    std::vector<uint8_t> rank(n, 0);
+    for (size_t i = 0; i < n; ++i) parent[i] = (uint32_t)i;
+    auto findRoot = [&](uint32_t x) {
+        uint32_t r = x;
+        while (parent[r] != r) r = parent[r];
+        while (parent[x] != x) {
+            uint32_t next = parent[x];
+            parent[x] = r;
+            x = next;
+        }
+        return r;
+    };
+    auto unite = [&](uint32_t a, uint32_t b) {
+        uint32_t ra = findRoot(a), rb = findRoot(b);
+        if (ra == rb) return;
+        if (rank[ra] < rank[rb]) std::swap(ra, rb);
+        parent[rb] = ra;
+        if (rank[ra] == rank[rb]) ++rank[ra];
+    };
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        unite(t[0], t[1]);
+        unite(t[1], t[2]);
+    }
+    for (const auto& grp : exactSeamGroups) {
+        uint32_t first = (uint32_t)n;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            if (first >= n) first = vi;
+            else unite(first, vi);
+        }
+    }
+    std::vector<uint32_t> rootOf(n);
+    std::unordered_set<uint32_t> roots;
+    for (size_t i = 0; i < n; ++i) {
+        rootOf[i] = findRoot((uint32_t)i);
+        roots.insert(rootOf[i]);
+    }
+    stats.components = (int)roots.size();
+
+    // Normalize the proposal's DELTA, not its absolute position, across exact
+    // seam twins.  This preserves any tiny spread already present in the trusted
+    // entry while preventing this pass from introducing a new zipper opening.
+    for (const auto& grp : exactSeamGroups) {
+        Vec3 meanDelta{0.0f, 0.0f, 0.0f};
+        int count = 0;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            meanDelta = Add(meanDelta, Sub(verts[vi], entry[vi]));
+            ++count;
+        }
+        if (count < 2) continue;
+        meanDelta = Scale(meanDelta, 1.0f / (float)count);
+        for (uint32_t vi : grp)
+            if (vi < n) verts[vi] = Add(entry[vi], meanDelta);
+    }
+
+    std::vector<uint8_t> unsafe(n, 0);
+    std::vector<uint8_t> movedRoot(n, 0);
+    auto markRoot = [&](uint32_t r) -> bool {
+        r = findRoot(r);
+        if (unsafe[r]) return false;
+        unsafe[r] = 1;
+        return true;
+    };
+    for (size_t i = 0; i < n; ++i)
+        if (Len2(Sub(verts[i], entry[i])) > 1.0e-10f)
+            movedRoot[rootOf[i]] = 1;
+
+    for (const auto& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        float rest = e.restLength;
+        if (rest <= 1.0e-6f)
+            rest = Len(Sub(restVerts[e.a], restVerts[e.b]));
+        if (rest <= 1.0e-6f) continue;
+        const float beforeRatio = Len(Sub(entry[e.a], entry[e.b])) / rest;
+        const float candidateRatio = Len(Sub(verts[e.a], verts[e.b])) / rest;
+        stats.worstEdgeBefore = std::max(stats.worstEdgeBefore, beforeRatio);
+        stats.worstEdgeCandidate = std::max(stats.worstEdgeCandidate, candidateRatio);
+        const float minAllowed = beforeRatio < 0.75f
+            ? beforeRatio * 0.90f : 0.75f;
+        const float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+        if (!std::isfinite(candidateRatio) ||
+            candidateRatio < minAllowed - 1.0e-4f ||
+            candidateRatio > maxAllowed + 1.0e-4f) {
+            markRoot(rootOf[e.a]);
+            markRoot(rootOf[e.b]);
+            ++stats.rejectedEdge;
+        }
+    }
+
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        const Vec3 before = Cross(Sub(entry[t[1]], entry[t[0]]),
+                                  Sub(entry[t[2]], entry[t[0]]));
+        const Vec3 after = Cross(Sub(verts[t[1]], verts[t[0]]),
+                                 Sub(verts[t[2]], verts[t[0]]));
+        const float beforeArea = Len(before);
+        const float afterArea = Len(after);
+        const float dot = beforeArea > 1.0e-8f && afterArea > 1.0e-8f
+            ? Dot(before, after) / (beforeArea * afterArea) : -1.0f;
+        const float areaRatio = beforeArea > 1.0e-8f
+            ? afterArea / beforeArea : 0.0f;
+        if (!std::isfinite(afterArea) || dot < 0.25f ||
+            areaRatio < 0.25f || areaRatio > 4.0f) {
+            markRoot(rootOf[t[0]]);
+            ++stats.rejectedFace;
+        }
+    }
+
+    for (const auto& grp : exactSeamGroups) {
+        if (grp.size() < 2) continue;
+        float beforeWorst = 0.0f, afterWorst = 0.0f;
+        for (size_t a = 0; a < grp.size(); ++a) {
+            if (grp[a] >= n) continue;
+            for (size_t b = a + 1; b < grp.size(); ++b) {
+                if (grp[b] >= n) continue;
+                beforeWorst = std::max(beforeWorst,
+                    Len(Sub(entry[grp[a]], entry[grp[b]])));
+                afterWorst = std::max(afterWorst,
+                    Len(Sub(verts[grp[a]], verts[grp[b]])));
+            }
+        }
+        if (afterWorst > std::max(0.003f, beforeWorst + 0.001f)) {
+            for (uint32_t vi : grp) if (vi < n) markRoot(rootOf[vi]);
+            ++stats.rejectedSeam;
+        }
+    }
+
+    if (body && body->valid) {
+        for (size_t i = 0; i < n; ++i) {
+            float beforeGap = 0.0f, afterGap = 0.0f;
+            if (!BVHSignedGap(*body, entry[i], beforeGap, nullptr) ||
+                !BVHSignedGap(*body, verts[i], afterGap, nullptr))
+                continue;
+            const bool newPenetration = beforeGap >= 0.0f && afterGap < -0.001f;
+            const bool deeperPenetration = beforeGap < 0.0f && afterGap < beforeGap - 0.01f;
+            if (newPenetration || deeperPenetration) {
+                markRoot(rootOf[i]);
+                ++stats.rejectedBody;
+            }
+        }
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            bool rejected = false;
+            for (const TriangleSample& sample : kTriangleSamples) {
+                const Vec3 beforePoint = SampleTrianglePoint(entry, t, sample);
+                const Vec3 afterPoint = SampleTrianglePoint(verts, t, sample);
+                float beforeGap = 0.0f, afterGap = 0.0f;
+                if (!BVHSignedGap(*body, beforePoint, beforeGap, nullptr) ||
+                    !BVHSignedGap(*body, afterPoint, afterGap, nullptr))
+                    continue;
+                const bool newPenetration =
+                    beforeGap >= 0.0f && afterGap < -0.001f;
+                const bool deeperPenetration =
+                    beforeGap < 0.0f && afterGap < beforeGap - 0.01f;
+                if (newPenetration || deeperPenetration) {
+                    markRoot(rootOf[t[0]]);
+                    ++stats.rejectedBody;
+                    rejected = true;
+                    break;
+                }
+            }
+            if (rejected) continue;
+        }
+    }
+
+    auto rollbackMarked = [&]() {
+        for (size_t i = 0; i < n; ++i)
+            if (unsafe[rootOf[i]]) verts[i] = entry[i];
+    };
+    rollbackMarked();
+
+    bool crossingsStable = false;
+    static constexpr int kMaxCrossingRounds = 8;
+    for (int round = 0; round < kMaxCrossingRounds; ++round) {
+        int newRoots = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            const auto& a = tris[ti];
+            if (a[0] >= n || a[1] >= n || a[2] >= n) continue;
+            for (size_t tj = ti + 1; tj < tris.size(); ++tj) {
+                const auto& b = tris[tj];
+                if (b[0] >= n || b[1] >= n || b[2] >= n ||
+                    TrianglesShareVertexOrExactSeam(a, b, seamRep))
+                    continue;
+                if (!TrianglesCrossNonCoplanar(verts, a, b) ||
+                    TrianglesCrossNonCoplanar(entry, a, b))
+                    continue;
+                newRoots += markRoot(rootOf[a[0]]) ? 1 : 0;
+                newRoots += markRoot(rootOf[b[0]]) ? 1 : 0;
+                ++stats.rejectedCross;
+            }
+        }
+        stats.crossingRounds = round + 1;
+        if (newRoots == 0) {
+            crossingsStable = true;
+            break;
+        }
+        rollbackMarked();
+    }
+    if (!crossingsStable) {
+        stats.conservativeRollback = true;
+        for (uint32_t root : roots)
+            if (movedRoot[root]) unsafe[root] = 1;
+        rollbackMarked();
+    }
+
+    std::unordered_set<uint32_t> rolledRoots;
+    for (uint32_t root : roots)
+        if (unsafe[root] && movedRoot[root]) rolledRoots.insert(root);
+    stats.rolledComponents = (int)rolledRoots.size();
+    for (size_t i = 0; i < n; ++i)
+        if (rolledRoots.count(rootOf[i])) ++stats.rolledVerts;
+
+    for (const auto& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        float rest = e.restLength;
+        if (rest <= 1.0e-6f)
+            rest = Len(Sub(restVerts[e.a], restVerts[e.b]));
+        if (rest > 1.0e-6f)
+            stats.worstEdgeAfter = std::max(stats.worstEdgeAfter,
+                Len(Sub(verts[e.a], verts[e.b])) / rest);
+    }
+    return stats.rolledVerts;
 }
 
 struct BodyOrderViolationStats {
@@ -6238,6 +6859,267 @@ struct OuterCollider {
     const BodyBVH& Current() const { return currentRef ? *currentRef : current; }
 };
 
+struct PassBlendGuardStats {
+    int attempts = 0;
+    int seedVerts = 0;
+    int movedVerts = 0;
+    int rejectedFace = 0;
+    int rejectedEdge = 0;
+    int rejectedCross = 0;
+    int rejectedSupport = 0;
+    int rejectedBody = 0;
+    int rejectedLayer = 0;
+    float proposalMaxMove = 0.0f;
+    float acceptedAlpha = 0.0f;
+};
+
+// Preserve as much of a visual finisher as the trusted pass entry permits.
+// ApplyGuardedDisplacementField finds a topology-safe global alpha; this wrapper
+// then checks the two constraints that helper deliberately does not know about:
+// the morphed body and the already classified inner/outer garment surfaces.  If
+// either relationship gets worse, retry at half the effective alpha.  Because
+// every retry starts from entry, a failed visual cleanup cannot accumulate damage.
+//
+// Layer semantics are intentionally pass-local and monotonic.  Relative to an
+// OUTER collider this mesh may not move farther along the collider's outward
+// signed-gap direction; relative to an INNER collider it may not move inward.
+// Only nearby surfaces are audited, avoiding irrelevant constraints between
+// disconnected outfit pieces.  Vertex and face samples catch clips hidden by a
+// coarse garment tessellation.
+static bool GuardPassByGlobalBlend(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& entry,
+    const std::vector<Vec3>& restVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<float>& supportRestLen,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const BodyBVH* body,
+    const std::vector<OuterCollider>* outerColliders,
+    const std::vector<OuterCollider>* innerColliders,
+    PassBlendGuardStats& stats)
+{
+    const size_t n = verts.size();
+    if (n == 0 || entry.size() != n || restVerts.size() < n || tris.empty())
+        return false;
+
+    std::vector<Vec3> fullField(n, Vec3{0.0f, 0.0f, 0.0f});
+    for (size_t i = 0; i < n; ++i) {
+        fullField[i] = Sub(verts[i], entry[i]);
+        const float len = Len(fullField[i]);
+        if (!std::isfinite(len)) {
+            verts = entry;
+            return false;
+        }
+    }
+    // Match ApplyGuardedDisplacementField's seam semantics before deriving the
+    // active audit set.  Otherwise a zero-delta twin which receives the group's
+    // delta inside that helper would escape the body/layer face audit here.
+    for (const auto& grp : exactSeamGroups) {
+        Vec3 avg{0.0f, 0.0f, 0.0f};
+        int count = 0;
+        for (uint32_t vi : grp) {
+            if (vi >= n || Len2(fullField[vi]) <= 1.0e-12f) continue;
+            avg = Add(avg, fullField[vi]);
+            ++count;
+        }
+        if (count == 0) continue;
+        avg = Scale(avg, 1.0f / (float)count);
+        for (uint32_t vi : grp) if (vi < n) fullField[vi] = avg;
+    }
+
+    std::vector<uint8_t> active(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        const float len = Len(fullField[i]);
+        if (len > 1.0e-6f) {
+            active[i] = 1;
+            ++stats.seedVerts;
+            stats.proposalMaxMove = std::max(stats.proposalMaxMove, len);
+        }
+    }
+    if (stats.seedVerts == 0) return false;
+
+    std::vector<uint32_t> affectedTris;
+    std::vector<uint32_t> affectedEdges;
+    affectedTris.reserve(tris.size());
+    affectedEdges.reserve(edges.size());
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        if (active[t[0]] || active[t[1]] || active[t[2]])
+            affectedTris.push_back((uint32_t)ti);
+    }
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        if (e.a >= n || e.b >= n) continue;
+        if (active[e.a] || active[e.b]) affectedEdges.push_back((uint32_t)ei);
+    }
+
+    auto supportNoWorse = [&](const std::vector<Vec3>& candidate) -> bool {
+        for (uint32_t ei : affectedEdges) {
+            const auto& e = edges[ei];
+            float supportRest = ei < supportRestLen.size()
+                ? supportRestLen[ei] : e.restLength;
+            if (supportRest <= 1.0e-6f) continue;
+            const float beforeRatio =
+                Len(Sub(entry[e.a], entry[e.b])) / supportRest;
+            const float afterRatio =
+                Len(Sub(candidate[e.a], candidate[e.b])) / supportRest;
+            const float minAllowed = beforeRatio < 0.75f
+                ? beforeRatio * 0.90f : 0.75f;
+            const float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+            if (!std::isfinite(afterRatio) ||
+                afterRatio < minAllowed - 1.0e-4f ||
+                afterRatio > maxAllowed + 1.0e-4f)
+                return false;
+        }
+        return true;
+    };
+
+    auto bodyNoWorse = [&](const std::vector<Vec3>& candidate) -> bool {
+        if (!body || !body->valid) return true;
+        auto worsened = [&](const Vec3& before, const Vec3& after) {
+            float beforeGap = 0.0f, afterGap = 0.0f;
+            if (!BVHSignedGap(*body, before, beforeGap, nullptr) ||
+                !BVHSignedGap(*body, after, afterGap, nullptr))
+                return false;
+            const bool newPenetration =
+                beforeGap >= 0.0f && afterGap < -0.001f;
+            const bool deeperPenetration =
+                beforeGap < 0.0f && afterGap < beforeGap - 0.01f;
+            return newPenetration || deeperPenetration;
+        };
+        for (size_t i = 0; i < n; ++i)
+            if (active[i] && worsened(entry[i], candidate[i])) return false;
+        for (uint32_t ti : affectedTris) {
+            const auto& t = tris[ti];
+            for (const TriangleSample& sample : kTriangleSamples)
+                if (worsened(SampleTrianglePoint(entry, t, sample),
+                             SampleTrianglePoint(candidate, t, sample)))
+                    return false;
+        }
+        return true;
+    };
+
+    static constexpr float kLayerNear = 4.25f;
+    static constexpr float kLayerMargin = 0.02f;
+    static constexpr float kLayerViolationEps = 0.002f;
+    const bool guardLayers =
+        EnvToggle("DRAPE_FINISHER_BLEND_LAYER_GUARD", true);
+    auto layerNoWorse = [&](const std::vector<Vec3>& candidate) -> bool {
+        if (!guardLayers) return true;
+        auto worsensAgainst = [&](const BodyBVH& surface,
+                                  const Vec3& before,
+                                  const Vec3& after,
+                                  bool surfaceIsOuter) {
+            if (!surface.valid) return false;
+            float beforeGap = 0.0f, afterGap = 0.0f;
+            if (!BVHSignedGap(surface, before, beforeGap, nullptr) ||
+                !BVHSignedGap(surface, after, afterGap, nullptr))
+                return false;
+            if (std::min(std::fabs(beforeGap), std::fabs(afterGap)) > kLayerNear)
+                return false;
+            const float beforeViolation = surfaceIsOuter
+                ? std::max(0.0f, beforeGap + kLayerMargin)
+                : std::max(0.0f, kLayerMargin - beforeGap);
+            const float afterViolation = surfaceIsOuter
+                ? std::max(0.0f, afterGap + kLayerMargin)
+                : std::max(0.0f, kLayerMargin - afterGap);
+            return afterViolation > beforeViolation + kLayerViolationEps;
+        };
+        auto checkSet = [&](const std::vector<OuterCollider>* colliders,
+                            bool surfaceIsOuter) {
+            if (!colliders) return true;
+            for (const OuterCollider& collider : *colliders) {
+                const BodyBVH& surface = collider.Current();
+                if (!surface.valid) continue;
+                for (size_t i = 0; i < n; ++i)
+                    if (active[i] && worsensAgainst(
+                            surface, entry[i], candidate[i], surfaceIsOuter))
+                        return false;
+                for (uint32_t ti : affectedTris) {
+                    const auto& t = tris[ti];
+                    for (const TriangleSample& sample : kTriangleSamples)
+                        if (worsensAgainst(
+                                surface,
+                                SampleTrianglePoint(entry, t, sample),
+                                SampleTrianglePoint(candidate, t, sample),
+                                surfaceIsOuter))
+                            return false;
+                }
+            }
+            return true;
+        };
+        return checkSet(outerColliders, true) &&
+               checkSet(innerColliders, false);
+    };
+
+    float trialScale = 1.0f;
+    static constexpr int kMaxAttempts = 10;
+    for (int attempt = 0; attempt < kMaxAttempts && trialScale >= 1.0f / 4096.0f;
+         ++attempt) {
+        ++stats.attempts;
+        verts = entry;
+        std::vector<Vec3> trialField = fullField;
+        for (Vec3& delta : trialField) delta = Scale(delta, trialScale);
+
+        GuardedFieldStats topo;
+        if (!ApplyGuardedDisplacementField(
+                verts, restVerts, edges, tris, exactSeamGroups,
+                std::move(trialField),
+                std::max(0.01f, stats.proposalMaxMove * trialScale), topo)) {
+            stats.rejectedFace += topo.rejectedFace;
+            stats.rejectedEdge += topo.rejectedEdge;
+            stats.rejectedCross += topo.rejectedCross;
+            verts = entry;
+            return false;
+        }
+        stats.rejectedFace += topo.rejectedFace;
+        stats.rejectedEdge += topo.rejectedEdge;
+        stats.rejectedCross += topo.rejectedCross;
+        const float effectiveAlpha = trialScale * topo.acceptedAlpha;
+
+        if (!supportNoWorse(verts)) {
+            ++stats.rejectedSupport;
+            trialScale = effectiveAlpha * 0.5f;
+            continue;
+        }
+        if (!bodyNoWorse(verts)) {
+            ++stats.rejectedBody;
+            trialScale = effectiveAlpha * 0.5f;
+            continue;
+        }
+        if (!layerNoWorse(verts)) {
+            ++stats.rejectedLayer;
+            trialScale = effectiveAlpha * 0.5f;
+            continue;
+        }
+
+        stats.acceptedAlpha = effectiveAlpha;
+        stats.movedVerts = topo.movedVerts;
+        return true;
+    }
+
+    verts = entry;
+    return false;
+}
+
+enum CapturePublishMode : uint8_t {
+    CAPTURE_PUBLISH_UNKNOWN       = 0,
+    CAPTURE_PUBLISH_STATIC_CLOTH  = 1,
+    CAPTURE_PUBLISH_FALLBACK_MASK = 2,
+    CAPTURE_PUBLISH_VANILLA       = 3,
+};
+
+static const char* CapturePublishModeName(uint8_t mode) {
+    switch (mode) {
+    case CAPTURE_PUBLISH_STATIC_CLOTH:  return "static";
+    case CAPTURE_PUBLISH_FALLBACK_MASK: return "fallback-mask";
+    case CAPTURE_PUBLISH_VANILLA:       return "vanilla";
+    default:                            return "unknown";
+    }
+}
+
 struct SolverCapture {
     std::string shapeName;
     std::string sliderName;
@@ -6269,6 +7151,13 @@ struct SolverCapture {
     bool expectedPassOk = false;
     TargetDataDiffs expectedDiff;
     std::vector<Vec3> expectedSolvedVerts;
+    // v4: the candidate above is useful for solver diagnostics, but the host may
+    // reject it and publish ZeroVertDiff instead.  publicationAware is explicit
+    // (rather than inferred from the file version) because ReplayCaptureDir
+    // rewrites legacy captures through the newest writer.
+    bool publicationAware = false;
+    uint8_t expectedPublishMode = CAPTURE_PUBLISH_UNKNOWN;
+    TargetDataDiffs expectedPublishedDiff;
 };
 
 static fs::path CaptureFlagPath() {
@@ -6505,6 +7394,42 @@ static void ReadDiff(CaptureReader& r, TargetDataDiffs& d) {
     }
 }
 
+// Outfit Studio 5.6.3's SetResultDiff updates only the supplied keys; it does
+// not clear the vanilla result first.  This is therefore the visual result the
+// host publishes after a successful static-cloth write.
+static TargetDataDiffs MergePublishedStaticDiff(const TargetDataDiffs& rawDiff,
+                                                const TargetDataDiffs& solvedDiff) {
+    TargetDataDiffs published = rawDiff;
+    for (const auto& kv : solvedDiff)
+        published[kv.first] = kv.second;
+    return published;
+}
+
+// Exact DiffDataSets::ZeroVertDiff semantics from the targeted Outfit Studio
+// 5.6.3 build: a missing/zero mask entry erases the diff, one preserves it and
+// every other value scales it.  Mask-only keys never create a new diff.
+static TargetDataDiffs ApplyFallbackMaskToDiff(
+    const TargetDataDiffs& rawDiff,
+    const std::unordered_map<uint16_t, float>& mask) {
+    TargetDataDiffs published;
+    published.reserve(rawDiff.size());
+    for (const auto& kv : rawDiff) {
+        float weight = 0.0f;
+        auto it = mask.find(kv.first);
+        if (it != mask.end()) weight = it->second;
+        if (weight == 0.0f) continue;
+        if (weight == 1.0f) {
+            published[kv.first] = kv.second;
+        } else {
+            published[kv.first] = Vector3(
+                kv.second.x * weight,
+                kv.second.y * weight,
+                kv.second.z * weight);
+        }
+    }
+    return published;
+}
+
 static void WriteCollider(CaptureWriter& w, const OuterCollider& oc) {
     w.str(oc.name);
     w.pod(oc.preset);
@@ -6531,7 +7456,7 @@ static bool WriteSolverCapture(const fs::path& path, const SolverCapture& c) {
     CaptureWriter w(path);
     if (!w.ok) return false;
     const uint32_t magic = 0x43505244u; // DRPC
-    const uint32_t version = 3;
+    const uint32_t version = 4;
     w.pod(magic);
     w.pod(version);
     w.str(c.shapeName);
@@ -6567,6 +7492,10 @@ static bool WriteSolverCapture(const fs::path& path, const SolverCapture& c) {
         WriteDiff(w, c.expectedDiff);
         w.vec(c.expectedSolvedVerts, [&](const Vec3& v) { WriteVec3(w, v); });
     }
+    w.pod(c.publicationAware);
+    w.pod(c.expectedPublishMode);
+    if (c.publicationAware && c.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN)
+        WriteDiff(w, c.expectedPublishedDiff);
     return w.ok;
 }
 
@@ -6576,7 +7505,7 @@ static bool ReadSolverCapture(const fs::path& path, SolverCapture& c) {
     uint32_t magic = 0, version = 0;
     r.pod(magic);
     r.pod(version);
-    if (!r.ok || magic != 0x43505244u || (version < 1 || version > 3)) return false;
+    if (!r.ok || magic != 0x43505244u || (version < 1 || version > 4)) return false;
     r.str(c.shapeName);
     r.str(c.sliderName);
     r.str(c.projectKey);
@@ -6615,6 +7544,16 @@ static bool ReadSolverCapture(const fs::path& path, SolverCapture& c) {
         r.pod(c.expectedPassOk);
         ReadDiff(r, c.expectedDiff);
         r.vec(c.expectedSolvedVerts, [&](Vec3& v) { ReadVec3(r, v); });
+    }
+    c.publicationAware = false;
+    c.expectedPublishMode = CAPTURE_PUBLISH_UNKNOWN;
+    c.expectedPublishedDiff.clear();
+    if (version >= 4) {
+        r.pod(c.publicationAware);
+        r.pod(c.expectedPublishMode);
+        if (c.expectedPublishMode > CAPTURE_PUBLISH_VANILLA) return false;
+        if (c.publicationAware && c.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN)
+            ReadDiff(r, c.expectedPublishedDiff);
     }
     return r.ok;
 }
@@ -6676,15 +7615,13 @@ static fs::path CaptureOutputDir() {
 }
 
 static void MaybeWriteSolverCapture(SolverCapture capture,
-                                    bool passOk,
-                                    const TargetDataDiffs& solvedDiff,
-                                    const std::vector<Vec3>& solvedVerts) {
+                                    uint8_t publishMode,
+                                    const TargetDataDiffs& publishedDiff) {
     if (!EnvFlagEnabled("DRAPE_CAPTURE"))
         return;
-    capture.hasExpected = true;
-    capture.expectedPassOk = passOk;
-    capture.expectedDiff = solvedDiff;
-    capture.expectedSolvedVerts = solvedVerts;
+    capture.publicationAware = true;
+    capture.expectedPublishMode = publishMode;
+    capture.expectedPublishedDiff = publishedDiff;
 
     fs::path dir = CaptureOutputDir();
     std::error_code ec;
@@ -6706,9 +7643,10 @@ static void MaybeWriteSolverCapture(SolverCapture capture,
         "__" + ts + ".drcap";
     fs::path path = dir / name;
     if (WriteSolverCapture(path, capture)) {
-        HLog("capture: wrote '%s' verts=%zu raw=%zu solved=%zu outers=%zu inners=%zu",
+        HLog("capture: wrote '%s' verts=%zu raw=%zu candidate=%zu publish='%s' published=%zu outers=%zu inners=%zu",
              path.string().c_str(), capture.baseVerts.size(), capture.rawDiff.size(),
-             solvedDiff.size(), capture.outerColliders.size(), capture.innerColliders.size());
+             capture.expectedDiff.size(), CapturePublishModeName(publishMode),
+             publishedDiff.size(), capture.outerColliders.size(), capture.innerColliders.size());
     } else {
         HLog("capture: failed to write '%s'", path.string().c_str());
     }
@@ -12540,6 +13478,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // No uniform target anywhere => magnetism is structurally impossible.
     if (kBeltArap && NormalizePreset(preset) == DRAPE_PRESET_BELT &&
         tris && !tris->empty() && n > 0 && n <= 0xFFFF) {
+        const std::vector<Vec3> beltPassEntry = finalVerts;
         const BodyBVH* supBase = nullptr;
         const BodyBVH* supCur  = nullptr;
         std::string supName = "body";
@@ -12713,6 +13652,30 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 HLog("belt M1 ARAP: support='%s' verts=%zu handles=%zu comps=%zu bodyFloored=%d authoredOffsetMean=%.3f",
                      supName.c_str(), n, hIdx.size(), roots.size(), floored,
                      offCnt > 0 ? (float)(offSum / offCnt) : 0.0f);
+                // Preserve the two already-approved corpus belts (4 and 7 raw
+                // islands) while promoting the guard automatically for the
+                // fragmented topology that falsified ARAP in Lemoria (10/34/133
+                // islands).  The env toggle remains a full A/B override.
+                const bool fragmentedBelt = roots.size() >= 8;
+                if (EnvToggle("DRAPE_BELT_COMPONENT_GUARD", fragmentedBelt)) {
+                    ComponentPassGuardStats guard;
+                    GuardPassByMaterialComponent(
+                        finalVerts, beltPassEntry, baseVerts, useEdges, *tris,
+                        exactSeamGroups,
+                        bodyBVH && bodyBVH->valid ? bodyBVH : nullptr,
+                        guard);
+                    HLog("belt M1 transaction: shape='%s' comps=%d rolled=%d verts=%d "
+                         "reject(edge/face/seam/body/layer/cross)=%d/%d/%d/%d/%d/%d rounds=%d "
+                         "conservative=%d edge=%.3f->%.3f->%.3f",
+                         shapeName.c_str(), guard.components, guard.rolledComponents,
+                         guard.rolledVerts,
+                         guard.rejectedEdge, guard.rejectedFace, guard.rejectedSeam,
+                         guard.rejectedBody, guard.rejectedLayer, guard.rejectedCross,
+                         guard.crossingRounds,
+                         guard.conservativeRollback ? 1 : 0,
+                         guard.worstEdgeBefore, guard.worstEdgeCandidate,
+                         guard.worstEdgeAfter);
+                }
             } else {
                 HLog("belt M1 ARAP: SolveArap FAILED (support='%s' handles=%zu) - keeping pipeline result",
                      supName.c_str(), hIdx.size());
@@ -12776,6 +13739,70 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), kIters, capped, pushed);
     }
 
+    // The fitted visual finishers historically ran after the final structural
+    // checkpoint. Lemoria demonstrated that they can turn a ~1.12x trusted
+    // skirt into 3-6x support stretch. Keep each pass independently
+    // transactional so a bad hem cannot discard a useful panel correction.
+    // This remains an A/B gate until the known fitted corpus and renders approve
+    // the component-level recovery.
+    const bool fittedFinisherComponentGuard =
+        EnvToggle("DRAPE_FINISHER_COMPONENT_GUARD",
+                  EnvToggle("DRAPE_FITTED_FINISHER_GUARD", false)) &&
+        tris && !tris->empty() && !useEdges.empty();
+    const bool fittedFinisherBlendGuard =
+        EnvToggle("DRAPE_FINISHER_BLEND_GUARD", false) &&
+        tris && !tris->empty() && !useEdges.empty();
+    const bool fittedFinisherGuard =
+        fittedFinisherComponentGuard || fittedFinisherBlendGuard;
+    auto guardFittedFinisher = [&](const std::vector<Vec3>& entry,
+                                   const char* passName) {
+        if (!fittedFinisherGuard || entry.size() != finalVerts.size()) return;
+        bool moved = false;
+        for (size_t i = 0; i < entry.size(); ++i)
+            if (Len2(Sub(entry[i], finalVerts[i])) > 1.0e-10f) {
+                moved = true;
+                break;
+            }
+        if (!moved) return;
+        if (fittedFinisherBlendGuard) {
+            PassBlendGuardStats guard;
+            const bool accepted = GuardPassByGlobalBlend(
+                finalVerts, entry, baseVerts, useEdges, supportRestLen, *tris,
+                exactSeamGroups,
+                bodyBVH && bodyBVH->valid ? bodyBVH : nullptr,
+                outerColliders, innerColliders, guard);
+            HLog("detour: finisher blend transaction shape='%s' pass='%s' "
+                 "accepted=%d attempts=%d seed=%d moved=%d alpha=%.6f "
+                 "maxMove=%.4f reject(face/edge/cross/support/body/layer)="
+                 "%d/%d/%d/%d/%d/%d",
+                 shapeName.c_str(), passName, accepted ? 1 : 0,
+                 guard.attempts, guard.seedVerts, guard.movedVerts,
+                 guard.acceptedAlpha, guard.proposalMaxMove,
+                 guard.rejectedFace, guard.rejectedEdge,
+                 guard.rejectedCross, guard.rejectedSupport,
+                 guard.rejectedBody,
+                 guard.rejectedLayer);
+        } else {
+            ComponentPassGuardStats guard;
+            GuardPassByMaterialComponent(
+                finalVerts, entry, baseVerts, useEdges, *tris,
+                exactSeamGroups,
+                bodyBVH && bodyBVH->valid ? bodyBVH : nullptr, guard);
+            HLog("detour: finisher component transaction shape='%s' pass='%s' "
+                 "comps=%d rolled=%d verts=%d "
+                 "reject(edge/face/seam/body/cross)=%d/%d/%d/%d/%d "
+                 "rounds=%d conservative=%d edge=%.3f->%.3f->%.3f",
+                 shapeName.c_str(), passName, guard.components,
+                 guard.rolledComponents, guard.rolledVerts,
+                 guard.rejectedEdge, guard.rejectedFace, guard.rejectedSeam,
+                 guard.rejectedBody, guard.rejectedCross,
+                 guard.crossingRounds,
+                 guard.conservativeRollback ? 1 : 0,
+                 guard.worstEdgeBefore, guard.worstEdgeCandidate,
+                 guard.worstEdgeAfter);
+        }
+    };
+
     // â”€â”€ Hanging-panel flatten (thigh-bump fix, 2026-07-03; kPanelFlatten / DRAPE_PANELS) â”€â”€
     // ROOT CAUSE (measured, captures/Fur+Blacksmith): a garment authored HANGING off the
     // base body (per-vert authored gap grows where the body recedes, e.g. an apron over
@@ -12791,6 +13818,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // No body-position target anywhere => cannot introduce magnetism; only removes local
     // curvature => cannot balloon fitted regions (their authored gap is small => excluded).
     // Rigid islands and the belt are excluded. OFF by default until eyeballed (DRAPE_PANELS=1).
+    const std::vector<Vec3> panelPassEntry = fittedFinisherGuard
+        ? finalVerts : std::vector<Vec3>{};
     bool panelsOn = kPanelFlatten || EnvToggleOn("DRAPE_PANELS");
 #if !defined(DRAPE_HARNESS_BUILD)
     // Live-only file gate (MO2 can't set env vars): drop/delete panels_on.flag to A/B in
@@ -13407,6 +14436,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    if (!panelPassEntry.empty())
+        guardFittedFinisher(panelPassEntry, "panel-flatten");
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ FITTED-HBRIDGE (cofrinho spec: FITTED bridges the glute cleft) Ã¢â€â‚¬Ã¢â€â‚¬
     // The user's material semantics: FITTED = tensioned cloth, so where a hanging
     // panel spans a lateral BODY concavity (the butt cleft) it forms a smooth chord
@@ -13438,6 +14470,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // three hard-learned protections: canonical exactSeamGroups weld each round
     // (front-seam twin ladder!), body floor on touched verts, seam-aware support
     // cap at the end. DRAPE_CLEFT_BRIDGE=0 or cleft_bridge_off.flag disables.
+    const std::vector<Vec3> cleftPassEntry = fittedFinisherGuard
+        ? finalVerts : std::vector<Vec3>{};
     {
         bool cleftOn = EnvToggle("DRAPE_CLEFT_BRIDGE", true);
         bool cleftTrueRear = EnvToggle("DRAPE_CLEFT_TRUE_REAR", false);
@@ -13769,6 +14803,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    if (!cleftPassEntry.empty())
+        guardFittedFinisher(cleftPassEntry, "cleft-bridge");
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ HEM / HANGING-CLOTH DISPLACEMENT SMOOTHING (2026-07-11, user item #3) Ã¢â€â‚¬Ã¢â€â‚¬
     // Far-from-body cloth (dress hems, robe skirts) inherits the body's morph detail
     // through the vanilla conform's proximity propagation, producing subtle bumps and
@@ -13782,6 +14819,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // them coincident -> ladder 0). Prototyped in python first (vampire robe visibly
     // smoother, structure preserved). FITTED_CLOTH (merged Cloth) only.
     // DRAPE_HEM_SMOOTH=0 or hem_smooth_off.flag disables.
+    const std::vector<Vec3> hemPassEntry = fittedFinisherGuard
+        ? finalVerts : std::vector<Vec3>{};
     {
         bool hemOn = EnvToggle("DRAPE_HEM_SMOOTH", true);
 #if !defined(DRAPE_HARNESS_BUILD)
@@ -13855,6 +14894,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
     }
+
+    if (!hemPassEntry.empty())
+        guardFittedFinisher(hemPassEntry, "hem-smooth");
 
     if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
         fittedHBridge &&
@@ -15723,6 +16765,33 @@ static std::vector<Vec3> SolvedVertsFromDiff(const std::vector<Vec3>& baseVerts,
     return out;
 }
 
+static void MeasureExpectedOutput(const TargetDataDiffs& solvedDiff,
+                                  const std::vector<Vec3>& solvedVerts,
+                                  const TargetDataDiffs& expectedDiff,
+                                  const std::vector<Vec3>& expectedVerts,
+                                  HarnessMetrics& metrics) {
+    const size_t vn = std::min(solvedVerts.size(), expectedVerts.size());
+    for (size_t i = 0; i < vn; ++i)
+        metrics.maxExpectedVertError = std::max(
+            metrics.maxExpectedVertError,
+            Len(Sub(solvedVerts[i], expectedVerts[i])));
+
+    std::vector<uint16_t> keys;
+    keys.reserve(solvedDiff.size() + expectedDiff.size());
+    for (const auto& kv : solvedDiff) keys.push_back(kv.first);
+    for (const auto& kv : expectedDiff) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    for (uint16_t k : keys) {
+        Vec3 actual = DiffAt(solvedDiff, k);
+        Vec3 expected = DiffAt(expectedDiff, k);
+        float error = Len(Sub(actual, expected));
+        metrics.maxExpectedDiffError = std::max(metrics.maxExpectedDiffError, error);
+        if (error > 1.0e-4f)
+            ++metrics.expectedDiffMismatches;
+    }
+}
+
 static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
                                             const TargetDataDiffs& solvedDiff,
                                             const std::vector<Vec3>& solvedVerts) {
@@ -16066,29 +17135,9 @@ static HarnessMetrics ComputeHarnessMetrics(const SolverCapture& cap,
         }
     }
 
-    if (cap.hasExpected && !cap.expectedSolvedVerts.empty()) {
-        size_t vn = std::min(n, cap.expectedSolvedVerts.size());
-        for (size_t i = 0; i < vn; ++i)
-            m.maxExpectedVertError = std::max(m.maxExpectedVertError,
-                                             Len(Sub(solvedVerts[i], cap.expectedSolvedVerts[i])));
-    }
-
-    if (cap.hasExpected) {
-        std::vector<uint16_t> keys;
-        keys.reserve(solvedDiff.size() + cap.expectedDiff.size());
-        for (const auto& kv : solvedDiff) keys.push_back(kv.first);
-        for (const auto& kv : cap.expectedDiff) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-        for (uint16_t k : keys) {
-            Vec3 a = DiffAt(solvedDiff, k);
-            Vec3 b = DiffAt(cap.expectedDiff, k);
-            float err = Len(Sub(a, b));
-            m.maxExpectedDiffError = std::max(m.maxExpectedDiffError, err);
-            if (err > 1.0e-4f)
-                ++m.expectedDiffMismatches;
-        }
-    }
+    if (cap.hasExpected)
+        MeasureExpectedOutput(solvedDiff, solvedVerts, cap.expectedDiff,
+                              cap.expectedSolvedVerts, m);
 
     return m;
 }
@@ -16142,6 +17191,7 @@ static bool WriteFloatCsv(const fs::path& path,
 struct ReplayOutcome {
     int code = 0;
     bool passOk = false;
+    uint8_t publishMode = CAPTURE_PUBLISH_UNKNOWN;
     SolverCapture capture;
     TargetDataDiffs solvedDiff;
     std::vector<Vec3> solvedVerts;
@@ -16286,7 +17336,50 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     if (out.solvedVerts.empty() && out.passOk)
         out.solvedVerts = SolvedVertsFromDiff(cap.baseVerts, out.solvedDiff);
 
+    // Legacy captures intentionally preserve their historical candidate-only
+    // replay.  Publication-aware captures mirror the live degradation ladder:
+    // validate the candidate, then expose either SetResultDiff's merged result
+    // or ZeroVertDiff's masked vanilla result to metrics, OBJ and sequencing.
+    if (cap.publicationAware) {
+        bool publishStatic = out.passOk;
+        if (publishStatic) {
+            SolveValidation validation = ValidateSolveOutput(
+                cap.baseVerts, out.solvedVerts,
+                cap.edges.empty() ? nullptr : &cap.edges);
+            publishStatic = validation.ok;
+        }
+        if (publishStatic) {
+            out.publishMode = CAPTURE_PUBLISH_STATIC_CLOTH;
+            out.solvedDiff = MergePublishedStaticDiff(cap.rawDiff, out.solvedDiff);
+        } else if (!cap.presetMask.empty()) {
+            out.publishMode = CAPTURE_PUBLISH_FALLBACK_MASK;
+            out.solvedDiff = ApplyFallbackMaskToDiff(cap.rawDiff, cap.presetMask);
+            // A rejected live candidate is never cached as a downstream proxy.
+            out.colliderVerts.clear();
+        } else {
+            out.publishMode = CAPTURE_PUBLISH_VANILLA;
+            out.solvedDiff = cap.rawDiff;
+            out.colliderVerts.clear();
+        }
+        out.solvedVerts = SolvedVertsFromDiff(cap.baseVerts, out.solvedDiff);
+    }
+
     out.metrics = ComputeHarnessMetrics(cap, out.solvedDiff, out.solvedVerts);
+    std::vector<Vec3> expectedPublishedVerts;
+    if (cap.publicationAware) {
+        // Candidate expected fields remain serialized for low-level diagnosis,
+        // but publication-aware equality is against what the user actually saw.
+        out.metrics.maxExpectedVertError = 0.0f;
+        out.metrics.maxExpectedDiffError = 0.0f;
+        out.metrics.expectedDiffMismatches = 0;
+        if (cap.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN) {
+            expectedPublishedVerts = SolvedVertsFromDiff(
+                cap.baseVerts, cap.expectedPublishedDiff);
+            MeasureExpectedOutput(out.solvedDiff, out.solvedVerts,
+                                  cap.expectedPublishedDiff,
+                                  expectedPublishedVerts, out.metrics);
+        }
+    }
 
     if (!opts.inputObj.empty()) {
         std::vector<Vec3> inputVerts = SolvedVertsFromDiff(cap.baseVerts, cap.rawDiff);
@@ -16321,8 +17414,13 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         std::cerr << "Error: failed to write base OBJ: " << opts.baseObj.string() << "\n";
     }
 
-    if (!opts.expectedObj.empty() && cap.hasExpected && !cap.expectedSolvedVerts.empty() &&
-        !WriteResultObj(opts.expectedObj, cap.expectedSolvedVerts, cap.tris)) {
+    const std::vector<Vec3>* expectedObjVerts = nullptr;
+    if (cap.publicationAware && cap.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN)
+        expectedObjVerts = &expectedPublishedVerts;
+    else if (cap.hasExpected && !cap.expectedSolvedVerts.empty())
+        expectedObjVerts = &cap.expectedSolvedVerts;
+    if (!opts.expectedObj.empty() && expectedObjVerts &&
+        !WriteResultObj(opts.expectedObj, *expectedObjVerts, cap.tris)) {
         std::cerr << "Error: failed to write expected OBJ: " << opts.expectedObj.string() << "\n";
     }
 
@@ -16340,6 +17438,10 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                   << " preset=\"" << PresetName(cap.preset) << "\""
                   << " pass=" << (out.passOk ? 1 : 0)
                   << " expectedPass=" << (cap.hasExpected ? (cap.expectedPassOk ? 1 : 0) : -1)
+                  << (cap.publicationAware ? " publishMode=" : "")
+                  << (cap.publicationAware ? CapturePublishModeName(out.publishMode) : "")
+                  << (cap.publicationAware ? " expectedPublishMode=" : "")
+                  << (cap.publicationAware ? CapturePublishModeName(cap.expectedPublishMode) : "")
                   << " raw=" << cap.rawDiff.size()
                   << " outers=" << cap.outerColliders.size()
                   << " written=" << out.solvedDiff.size()
@@ -16425,8 +17527,16 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         std::cout << "\n";
     }
 
-    if (cap.hasExpected && out.passOk != cap.expectedPassOk) out.code = 3;
-    else if (cap.hasExpected && (out.metrics.maxExpectedDiffError > 1.0e-4f || out.metrics.expectedDiffMismatches > 0)) out.code = 4;
+    if (cap.publicationAware && cap.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN &&
+        out.publishMode != cap.expectedPublishMode) out.code = 3;
+    else if (cap.publicationAware && cap.expectedPublishMode != CAPTURE_PUBLISH_UNKNOWN &&
+             (out.metrics.maxExpectedDiffError > 1.0e-4f ||
+              out.metrics.expectedDiffMismatches > 0)) out.code = 4;
+    else if (!cap.publicationAware && cap.hasExpected &&
+             out.passOk != cap.expectedPassOk) out.code = 3;
+    else if (!cap.publicationAware && cap.hasExpected &&
+             (out.metrics.maxExpectedDiffError > 1.0e-4f ||
+              out.metrics.expectedDiffMismatches > 0)) out.code = 4;
     else if (out.metrics.nanCount > 0) out.code = 5;
     return out;
 }
@@ -16687,6 +17797,8 @@ static int ReplayCaptureDir(const fs::path& dir) {
         cap.hasExpected = false;
         cap.expectedDiff.clear();
         cap.expectedSolvedVerts.clear();
+        cap.expectedPublishMode = CAPTURE_PUBLISH_UNKNOWN;
+        cap.expectedPublishedDiff.clear();
 
         fs::path replayPath = seqDir / f.filename();
         if (!WriteSolverCapture(replayPath, cap)) {
@@ -16697,7 +17809,10 @@ static int ReplayCaptureDir(const fs::path& dir) {
 
         ReplayOutcome out = RunReplayCapture(replayPath, ReplayOptions{});
         if (out.code != 0) ++failures;
-        if (out.passOk && !out.solvedVerts.empty()) {
+        const bool hasPublishedSurface = cap.publicationAware
+            ? out.publishMode != CAPTURE_PUBLISH_UNKNOWN
+            : out.passOk;
+        if (hasPublishedSurface && !out.solvedVerts.empty()) {
             ReplayedShape rs;
             rs.preset = out.capture.preset;
             rs.baseVerts = out.capture.baseVerts;
@@ -16752,6 +17867,16 @@ static SolverCapture MakeSelfTestCapture() {
     cap.hasExpected = true;
     cap.expectedDiff = solved;
     cap.expectedSolvedVerts = solvedVerts;
+    SolveValidation validation = ValidateSolveOutput(
+        cap.baseVerts, solvedVerts, &cap.edges);
+    cap.publicationAware = true;
+    if (cap.expectedPassOk && validation.ok) {
+        cap.expectedPublishMode = CAPTURE_PUBLISH_STATIC_CLOTH;
+        cap.expectedPublishedDiff = MergePublishedStaticDiff(cap.rawDiff, solved);
+    } else {
+        cap.expectedPublishMode = CAPTURE_PUBLISH_FALLBACK_MASK;
+        cap.expectedPublishedDiff = ApplyFallbackMaskToDiff(cap.rawDiff, cap.presetMask);
+    }
     return cap;
 }
 
@@ -16838,6 +17963,103 @@ static int RunShadowSelfTest() {
 }
 
 static int RunSelfTest() {
+    {
+        const std::string encoded =
+            "Savior&apos;s &amp; &lt;tag&gt; &quot;x&quot; &#39; &#x1F642;";
+        const std::string expected =
+            std::string("Savior's & <tag> \"x\" ' ") + "\xF0\x9F\x99\x82";
+        if (DecodeXmlEntities(encoded) != expected ||
+            XmlAttrValue("<SliderSet name=\"Savior&apos;s Hide\">", "name") !=
+                "Savior's Hide") {
+            std::cerr << "self-test: XML entity decoding FAIL\n";
+            return 26;
+        }
+
+        const std::string invalid =
+            "&bogus; &#; &#x; &#xD800; &#1114112; &#x110000; &#0; &unterminated";
+        if (DecodeXmlEntities(invalid) != invalid) {
+            std::cerr << "self-test: invalid XML entity preservation FAIL\n";
+            return 27;
+        }
+    }
+
+    {
+        ProjectNifRef wayward;
+        wayward.ospPath = "Wayward Satchel.osp";
+        wayward.firstShape = "Wayward Satchel";
+        wayward.shapeNames = {"Wayward Satchel", "Buckle"};
+        ProjectLoadInfo noLog;
+        const char* source = nullptr;
+        if (!SelectProjectReference(wayward, noLog, source).empty() || source) {
+            std::cerr << "self-test: garment-only reference fail-closed FAIL\n";
+            return 28;
+        }
+
+        ProjectNifRef withBody = wayward;
+        withBody.ospPath = "Savior.osp";
+        withBody.recognizedBodyShape = "3BBB";
+        withBody.shapeNames.push_back("3BBB");
+        ProjectLoadInfo validLog;
+        validLog.loggedOspPath = "C:/mods/SliderSets/Savior.osp";
+        validLog.referenceShape = "Wayward Satchel";
+        std::string selected = SelectProjectReference(withBody, validLog, source);
+        if (selected != "Wayward Satchel" || !source ||
+            std::string(source) != "OutfitStudio-log") {
+            std::cerr << "self-test: valid OutfitStudio reference precedence FAIL\n";
+            return 29;
+        }
+
+        validLog.referenceShape = "Stale Missing Shape";
+        selected = SelectProjectReference(withBody, validLog, source);
+        if (selected != "3BBB" || !source ||
+            std::string(source) != "recognized-body-name") {
+            std::cerr << "self-test: invalid log reference fallback FAIL\n";
+            return 30;
+        }
+
+        if (!PlausibleFullBodyGeometry(3500, 6800, 42.0f, 24.0f, 118.0f, 0.02f) ||
+            PlausibleFullBodyGeometry(900, 1700, 28.0f, 18.0f, 24.0f, 0.01f) ||
+            PlausibleFullBodyGeometry(2400, 4600, 8.0f, 4.0f, 96.0f, 0.03f)) {
+            std::cerr << "self-test: body-reference geometry gate FAIL\n";
+            return 31;
+        }
+    }
+
+    // Publication helpers are deliberately tested independently of the cloth
+    // solver so a serialization/host-semantics regression has a tiny failure.
+    {
+        TargetDataDiffs raw;
+        raw[0] = Vector3(1.0f, 2.0f, 3.0f);
+        raw[1] = Vector3(4.0f, 5.0f, 6.0f);
+        raw[2] = Vector3(8.0f, 4.0f, 2.0f);
+        raw[3] = Vector3(7.0f, 8.0f, 9.0f);
+        std::unordered_map<uint16_t, float> mask;
+        mask[1] = 0.0f;
+        mask[2] = 0.25f;
+        mask[3] = 1.0f;
+        mask[4] = 1.0f;
+        TargetDataDiffs fallback = ApplyFallbackMaskToDiff(raw, mask);
+        if (fallback.size() != 2 || fallback.count(0) || fallback.count(1) ||
+            fallback.count(4) ||
+            Len(Sub(DiffAt(fallback, 2), Vec3{2.0f, 1.0f, 0.5f})) > 1.0e-6f ||
+            Len(Sub(DiffAt(fallback, 3), Vec3{7.0f, 8.0f, 9.0f})) > 1.0e-6f) {
+            std::cerr << "self-test: fallback publication semantics FAIL\n";
+            return 23;
+        }
+
+        TargetDataDiffs candidate;
+        candidate[1] = Vector3(-1.0f, -2.0f, -3.0f);
+        candidate[4] = Vector3(10.0f, 11.0f, 12.0f);
+        TargetDataDiffs merged = MergePublishedStaticDiff(raw, candidate);
+        if (merged.size() != 5 ||
+            Len(Sub(DiffAt(merged, 0), Vec3{1.0f, 2.0f, 3.0f})) > 1.0e-6f ||
+            Len(Sub(DiffAt(merged, 1), Vec3{-1.0f, -2.0f, -3.0f})) > 1.0e-6f ||
+            Len(Sub(DiffAt(merged, 4), Vec3{10.0f, 11.0f, 12.0f})) > 1.0e-6f) {
+            std::cerr << "self-test: static publication merge semantics FAIL\n";
+            return 24;
+        }
+    }
+
     struct ClassifierCase { const char* name; int expected; };
     const ClassifierCase classifierCases[] = {
         {"00BDOR0008Armor1", DRAPE_PRESET_AUTO},
@@ -16862,6 +18084,15 @@ static int RunSelfTest() {
     int writeCode = WriteSelfTestCapture(path);
     if (writeCode != 0)
         return writeCode;
+    SolverCapture roundTrip;
+    if (!ReadSolverCapture(path, roundTrip) || !roundTrip.publicationAware ||
+        roundTrip.expectedPublishMode == CAPTURE_PUBLISH_UNKNOWN ||
+        roundTrip.expectedPublishedDiff.empty()) {
+        std::cerr << "self-test: v4 publication round-trip FAIL\n";
+        std::error_code ec;
+        fs::remove(path, ec);
+        return 25;
+    }
     ReplayOptions opts;
     int code = ReplaySolverCapture(path, opts);
     std::error_code ec;
@@ -16898,7 +18129,9 @@ int main(int argc, char** argv) {
         std::cout << "RESOLVE_PROJECT project=\"" << resolveProject
                   << "\" reference=\"" << resolved.referenceShape
                   << "\" nif=\"" << resolved.nifPath
-                  << "\" osp=\"" << resolved.ospPath.string() << "\"\n";
+                  << "\" osp=\"" << resolved.ospPath.string()
+                  << "\" source=\"" << resolved.referenceSource
+                  << "\" status=\"" << resolved.status << "\"\n";
         return resolved.nifPath.empty() || resolved.referenceShape.empty() ? 1 : 0;
     }
     std::string writeSelf = ArgValue(argc, argv, "--write-self-test");
@@ -17171,6 +18404,9 @@ static void Detour_GenResult(
         return;
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Static cloth pass (main path) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    const bool captureThis = EnvFlagEnabled("DRAPE_CAPTURE");
+    bool capturePrepared = false;
+    SolverCapture solverCapture;
     if (!presetMask.empty() && g_getRawResultDiff && g_setResultDiff) {
         TargetDataDiffs rawDiff;
         if (HostGetRawResultDiff(self, shapeName, sliderName, rawDiff)) {
@@ -17340,8 +18576,6 @@ static void Detour_GenResult(
 
             std::vector<Vec3> solvedVerts;
             std::vector<Vec3> colliderVerts;
-            const bool captureThis = EnvFlagEnabled("DRAPE_CAPTURE");
-            SolverCapture solverCapture;
             if (captureThis) {
                 solverCapture = MakeSolverCapture(*shapeName, *sliderName, preset,
                                                   vertsIt->second, profiles, edges, tris,
@@ -17359,8 +18593,13 @@ static void Detour_GenResult(
                                                &solvedVerts,
                                                &colliderVerts,
                                                solvedDiff, stats);
-            if (captureThis)
-                MaybeWriteSolverCapture(std::move(solverCapture), passOk, solvedDiff, solvedVerts);
+            if (captureThis) {
+                solverCapture.hasExpected = true;
+                solverCapture.expectedPassOk = passOk;
+                solverCapture.expectedDiff = solvedDiff;
+                solverCapture.expectedSolvedVerts = solvedVerts;
+                capturePrepared = true;
+            }
             // U2 degradation ladder, top rung: even a "successful" solve (no crash,
             // passOk=true) gets sanity-checked before it's allowed to overwrite the
             // vanilla result already sitting in the host. Any failure here means we
@@ -17393,6 +18632,16 @@ static void Detour_GenResult(
                         if (tris && !tris->empty())
                             BuildBodyBVH(sm.verts, *tris, sm.bvh);
                         g_solvedShapes[*sliderName][*shapeName] = std::move(sm);
+                    }
+                    if (capturePrepared) {
+                        TargetDataDiffs publishedDiff;
+                        if (!HostGetRawResultDiff(self, shapeName, sliderName, publishedDiff))
+                            publishedDiff = MergePublishedStaticDiff(
+                                solverCapture.rawDiff, solverCapture.expectedDiff);
+                        MaybeWriteSolverCapture(std::move(solverCapture),
+                                                CAPTURE_PUBLISH_STATIC_CLOTH,
+                                                publishedDiff);
+                        capturePrepared = false;
                     }
                     // Log EVERY slider (no deduplication) so we can verify the write path.
                     size_t edgeCount = edges ? edges->size() : 0;
@@ -17459,6 +18708,16 @@ static void Detour_GenResult(
                  presetMask.size(), avgMask);
         }
         g_diffZeroVert(resultDiffData, &setName, shapeName, nullptr, &presetMask);
+        if (capturePrepared) {
+            TargetDataDiffs publishedDiff;
+            if (!HostGetRawResultDiff(self, shapeName, sliderName, publishedDiff))
+                publishedDiff = ApplyFallbackMaskToDiff(
+                    solverCapture.rawDiff, solverCapture.presetMask);
+            MaybeWriteSolverCapture(std::move(solverCapture),
+                                    CAPTURE_PUBLISH_FALLBACK_MASK,
+                                    publishedDiff);
+            capturePrepared = false;
+        }
     }
 }
 

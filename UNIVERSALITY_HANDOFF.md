@@ -1,133 +1,237 @@
 # Smart Conform universality handoff
 
-Updated: 2026-07-12
+Updated: 2026-07-13 (America/Sao_Paulo)
 
 ## Objective
 
-Expand Smart Conform beyond the current small 3BA/RM_Heavy regression corpus,
-prioritizing visually plausible free-hanging cloth while preserving authored
-topology, seams, rigid pieces, layer order and the already approved Blacksmith
-and Vampire behavior.  The first modded stress project is
-`RLY_TEST_BDO Lemoria Armor`; vanilla projects follow after its baseline is
-captured.
+Make Smart Conform behave plausibly across modded and vanilla Skyrim outfits,
+with special attention to free-hanging cloth, body/garment anti-clipping,
+layer order, belts, seams and disconnected rigid decorations. Preserve the
+Blacksmith and Vampire results already approved by the user.
 
-## Frozen starting point
+Branch: `wip/codex-anticlip-harness`. The latest commit on that branch is the
+authoritative checkpoint; use `git log -1 --oneline` rather than copying a hash
+from this document.
 
-- Branch: `wip/codex-anticlip-harness`
-- Starting commit for this pass: `04e9a53`
-- Approved live anti-clipping/body-floor implementation: `71e3c5b`
-- Active release flags: `anticlip_safe_floor_on.flag` and
-  `posterior_chord_on.flag`
-- The only unrelated tracked worktree change is the user's newline change in
-  `corpus/golden/fur_blacksmith_rm_heavy.json`.  Do not stage or overwrite it.
+The only unrelated tracked worktree change is the user's EOF/newline change in
+`corpus/golden/fur_blacksmith_rm_heavy.json`. Never stage, overwrite or restore
+that file.
 
-## Coverage audit
+## User-confirmed Blacksmith reference
 
-The committed corpus is a regression gate, not a universality claim.  It has
-18 shapes from five female 3BA outfits and only exercises `RM_Heavy`.  It has no
-committed modded armor, male body, bandolier, skin-tight garment, flexible
-armor, non-manifold stress case or rigid accessory.  Most loose captures also
-come from two Yarl projects, so raw capture count greatly overstates coverage.
+The correct post-Smart-Conform export is:
 
-Detailed inventories are ignored working artifacts:
+```text
+E:\SkyrimDev\Drape\tmp\BlackSmithTorso_smart-conformed RM_Heavy slider.obj
+SHA-256 3AB75C9F5636E528C4F421ABB70CA19C115F9E924356E5C634CB5EF7A1DBB2C9
+2316 vertices / 3979 faces
+```
+
+Do not substitute `latestblacksmithtorsopostsmartconform.obj` or the older
+hand-edit/sculpt exports. This confusion previously caused several incorrect
+mesh diagnoses.
+
+## Coverage reality
+
+The committed corpus is a regression gate, not a universality claim. It has 18
+RM_Heavy garment captures from five female 3BA outfits. It does not yet cover a
+male body, bodyless accessory project, transverse bandolier, skin-tight outfit,
+non-manifold stress case or enough rigid armor.
+
+Ignored inventories and analyses:
 
 - `tmp/universality/UNIVERSALITY_MATRIX.md`
 - `tmp/universality/LEMORIA_INVENTORY.md`
+- `tmp/universality/REALISM_AUDIT.md`
+- `tmp/universality/LEMORIA_AB.md`
 - `tmp/universality/lemoria_snapshot/`
 
-Recommended next projects after Lemoria are Wayward Satchel/Armor, Ebony Mail
-and Archmage robes.  Belts and transverse straps have a separate design backlog
-in `BELT_AND_PIPELINE_REVIEW.md`, Part 24.
+The realism audit supports the user's body-imprint hypothesis. On authored-far,
+currently-free cloth, local cloth displacement still correlates with local body
+morph detail. Broad non-plumb lean is a separate low-frequency support/tension
+problem; it should not be tuned with the same smoothing knob.
 
-## Lemoria baseline diagnosis
+## Resolver and classifier corrections
 
-`RLY_TEST_BDO Lemoria Armor` is structurally valid: 12 shapes, 173 sliders and
-951 OSD datasets.  Its NIF and OSD live under the MO2 overwrite BodySlide tree.
-The actual reference shape is `3BBB`, but the previous Drape run used the first
-SliderSet shape, `00BDOR0008Armor1`, as the body.  That plate has only 708
-vertices while the `3BBB` RM_Heavy diff addresses a 13,651-vertex body.  Drape
-then classified the real body as a loose garment and built invalid body,
-layering and cloth constraints.  That old visual/output baseline must not be
-used to tune solver parameters.
+The project resolver now:
 
-The race occurs because Outfit Studio can invoke the hook before `Log_OS.txt`
-has flushed its `Loading reference shape '3BBB'` line.  The OSP itself contains
-the correct `3BBB` shape, but it is the last shape rather than the first.
+1. decodes XML named and numeric entities, so an Outfit Studio title containing
+   `Savior's` matches an OSP containing `Savior&apos;s`;
+2. validates a logged reference against the same OSP and its shape list;
+3. prefers a recognized body name such as `3BBB` when no valid logged reference
+   is available;
+4. has no first-shape garment fallback;
+5. accepts an unknown logged reference only if its NIF geometry is broadly
+   full-body-like (substantial closed human-height surface).
 
-## Production corrections in the current worktree
-
-### Robust project reference resolution
-
-`algo/conform_hook.cpp` now scans the entire matching SliderSet and recognizes
-well-known body reference names.  Resolution precedence is:
-
-1. reference reported by Outfit Studio's own load log;
-2. recognized body name in the matching SliderSet;
-3. legacy first-shape fallback.
-
-The selected source, first shape and recognized body are logged.  A new harness
-command provides headless verification:
+This prevents a bodyless project from silently treating a pouch as the body.
+Verified results:
 
 ```text
-drape-harness --resolve-project <name> --bodyslide-dir <path>
+Savior's Hide (Im Physics) -> reference=3BBB, status=ok
+Rley Wayward Ranger - Satchel -> reference="", status=no-usable-reference
+RLY_TEST_BDO Lemoria Armor -> reference=3BBB, status=ok
 ```
 
-The live hook also fails closed to vanilla conform when a source reference diff
-contains a vertex index outside the cached reference mesh.  This protects
-unknown naming schemes and stale projects from the same poisoned partial solve.
+The core and UI classifier also no longer find the token `arm` inside the word
+`armor`. Shoulder/pauldron/plate are handled before limb tokens; generic
+`Armor1/2/3` remains Auto.
 
-### `arm` versus `armor` classifier bug
+## Publication-aware capture v4
 
-Both the core classifier and Smart Conform dialog previously searched for the
-substring `arm`, which is present in every English `armor` name.  Generic
-`Armor1/2/3` and even shoulder plates were consequently routed to Tubular.  The
-core and UI now put shoulder/pauldron/plate first and recognize arm/leg only as
-explicit tokens or suffixes.  Ambiguous generic armor remains Auto so geometry
-or the user can classify it.
+`algo/conform_hook.cpp` implements append-only `.drcap` v4 publication state:
 
-## Validation completed
+- solver candidate remains available for diagnosis;
+- `publicationAware` explicitly distinguishes new captures from rewritten
+  legacy captures;
+- `expectedPublishMode` records StaticCloth or fallback-mask publication;
+- `expectedPublishedDiff` materializes what Outfit Studio receives;
+- metrics, OBJ output and sequential colliders use the published result for v4;
+- v1-v3 reader behavior remains legacy-compatible.
 
-- `drape_harness` RelWithDebInfo build succeeds.
-- Harness self-test includes the armor/arm classifier cases and passes.
-- Headless resolution selects `3BBB` for both RLY Lemoria and Blacksmith.
-- All 18 committed corpus goldens pass unchanged.
-- `drape_algo` and `drape_proxy` RelWithDebInfo builds succeed.
-- Current builds were deployed to both configured MO2 mod folders with Outfit
-  Studio closed.  Build output and both deployed copies are byte-identical:
-  - `drape-algo.dll` SHA-256
-    `A9927BEA9C5C686B001C7E7D90925595D3B681D4BD29BB56FB397779EFAC7DE0`
-  - `version.dll` SHA-256
-    `FAC922875A0AB9899E5CE8C04B9298E8A4F904E4F91FF57148E396848A5FF9C7`
+The Outfit Studio 5.6.3 semantics are reproduced exactly: `SetResultDiff`
+overwrites supplied keys while retaining omitted raw keys; `ZeroVertDiff`
+removes absent/zero-mask keys, preserves weight 1 and scales other values.
+`CAPTURE_PUBLISH_VANILLA` exists as a replay/schema mode but is not currently
+emitted by a live call site.
 
-## Capture state and immediate continuation
+Self-tests cover StaticCloth merge, fallback mask and v4 round-trip. The current
+Lemoria captures are still v3; publication-aware live behavior has not been
+recaptured yet.
 
-There was no existing valid Lemoria `.drcap`.  A temporary ignored capture gate
-exists at `captures/enable_capture.flag`, and the intended capture directory is
-`captures/universality/lemoria_rm_heavy`.  Remove the gate immediately after the
-live capture so normal user sessions do not create captures.
+## Lemoria baseline
 
-The first attempt to start Outfit Studio with `ModOrganizer.exe -p ... -r ...`
-opened another MO2 process instead of the configured executable.  Do not tune
-the solver from the old Lemoria run.  The safe continuation is:
+Corrected captures are under
+`captures/universality/lemoria_rm_heavy` (ignored): 11 garments, `RM_Heavy`,
+reference `3BBB`, 13,651 body vertices and 26,412 body triangles. The project
+was closed without saving and `captures/enable_capture.flag` is absent.
 
-1. launch the registered `OutfitStudio x64` through the active portable MO2
-   instance/profile so the VFS sees the RLY overwrite project;
-2. ensure `DRAPE_CAPTURE_DIR` points to the dedicated Lemoria directory in the
-   launched process;
-3. open `RLY_TEST_BDO Lemoria Armor`, run Smart Conform with only `RM_Heavy`,
-   and do not save the project;
-4. verify the debug log says reference `3BBB`, not `Armor1`;
-5. expect captures for garment shapes only; replay twice, compare hashes and
-   generate topology/penetration/stretch summaries and renders;
-6. remove `captures/enable_capture.flag` before any normal launch.
+Do not use the older poisoned Lemoria run which selected `Armor1` as the body.
+Do not promote the current v3 captures to committed goldens: BeltDec's stored
+candidate can differ from the fallback actually published by the old live
+build.
 
-Only after this corrected baseline should a general cloth-realism change be
-promoted.  Candidate changes must improve at least one new archetype and remain
-dark or unchanged on the 18-shape corpus plus the authoritative Blacksmith and
-Vampire replays.
+### Belt M1 transaction
+
+Lemoria exposed that belt ARAP runs after structural guards and can reintroduce
+severe damage. The current pass-local transaction snapshots immediately before
+ARAP; the proposal includes ARAP, thin-strap fallback and body floor. It builds
+material components, unites exact-seam twins and either accepts or restores a
+whole material component.
+
+Implemented gates: authored edge band, face orientation/area, exact-seam split,
+body vertex and triangle samples, and non-adjacent crossing-set. The crossing
+audit is now exact-seam-aware so triangles adjacent through duplicated UV/seam
+vertices are not false positives. There is no inter-layer collider gate in the
+belt component transaction; do not claim one.
+
+`DRAPE_BELT_COMPONENT_GUARD` is an override. Its automatic default is enabled
+only for belts with at least eight disconnected components, which keeps the
+approved Blacksmith/Yarl belts unchanged while covering Lemoria BeltA/B/BeltDec.
+
+Measured Lemoria result:
+
+| Mesh | Components rolled | Old -> guarded worst authored edge | Other result |
+|---|---:|---:|---|
+| BeltA | 28 / 34 | `6.30 -> 6.30` | the inherited worst edge predates ARAP; support peak `2.05 -> 1.12` |
+| BeltB | 10 / 10 | `4.40 -> 2.43` | roughness `1.218 -> .891` |
+| BeltDec | 68 / 133 | `21.46 -> 3.22` | magnetism count `268 -> 4`; candidate becomes globally publishable |
+
+## Finisher transaction research (not promoted)
+
+Panel flatten, cleft bridge and hem smoothing run after the last structural
+checkpoint. On Lemoria they turn trusted support stretch near `1.12` into
+`3.09` (SkirtA) and `6.06` (SkirtB), reintroducing topology/layer debt while
+improving roughness.
+
+Two experimental gates exist and are OFF by default:
+
+- `DRAPE_FINISHER_COMPONENT_GUARD=1`: whole material-component rollback using
+  edge/face/seam/body/crossing gates. It has no layer gate and is too coarse for
+  a one-component skirt.
+- `DRAPE_FINISHER_BLEND_GUARD=1`: applies the largest global alpha accepted by
+  authored/support edges, faces, seam-aware crossing-set and body audits. It
+  also contains an experimental direct signed-gap layer gate; set
+  `DRAPE_FINISHER_BLEND_LAYER_GUARD=0` for topology-only diagnosis because open
+  garment colliders cause nearest-face discontinuities.
+
+With the layer gate disabled, accepted alphas are still visually small:
+
+| Mesh/pass | Accepted alpha |
+|---|---:|
+| SkirtA panel / cleft / hem | `.03125 / .007812 / .007812` |
+| SkirtB panel / cleft / hem | `.001953 / .015625 / .000977` |
+
+Final A/B remains close to all-finishers-off:
+
+| Mesh | support stretch | roughness | sequential layer residual vertex/face |
+|---|---:|---:|---:|
+| SkirtA | `1.132` | `.786` | single replay `48 / 283` |
+| SkirtB | `1.137` | `.385` | single replay `385 / 2684` |
+
+Therefore neither finisher guard should be enabled in a release yet. The next
+research step is a pass-local support-edge proposal repair: exact-seam groups as
+one delta DOF, entry-relative edge bands, under-relaxed projection, body floor
+per cycle, followed by the complete alpha audit. It must improve roughness
+materially without exceeding approximately `1.13` support stretch.
+
+## Validated checks at this handoff
+
+- `drape_harness` RelWithDebInfo builds.
+- `--self-test` passes, including XML decode, fail-closed reference policy,
+  publication merge/mask and v4 round-trip.
+- all 18 committed corpus shapes pass unchanged;
+- exact Savior/Satchel/Lemoria resolver matrix matches the expected results;
+- `git diff --check` is clean aside from normal CRLF conversion warnings.
+
+The previously documented deployed `drape-algo.dll` hash
+`A9927BEA...AC7DE0` predates v4 and the current transactions. It is stale. Do not
+claim the current source is deployed until a new full build, deploy and hash
+comparison are completed with Outfit Studio closed.
+
+## Universality queue
+
+Use this order, one capture directory per project and slider:
+
+1. `RLY_TEST_BDO Lemoria Armor`, `RM_Heavy`, 11 garments (recapture v4).
+2. `Rley 3BA Vanilla - Body - Archmage (Physics)`, `RM_Heavy`, 5 garments:
+   `Bags`, `Cape`, `Pants`, `robes:0`, `robes:1`.
+3. `Rley 3BA Vanilla - Body - Thalmor Robe (No Physics)`, `RM_Heavy`, 6
+   garments including `LongSkirt`, `ThalmorRobesF`, buckle/collar and pants.
+4. `Rley 3BA Vanilla - Body - Ebony Mail`, `RM_Heavy`, 10 garments: rigid
+   multi-layer cuirass, two belts, two cloths and leg armor.
+5. `Rley Wayward Ranger - Armor`, `Chubby Refit` (no RM_Heavy), 12 garments:
+   corset/belts, laces, breastplate, straps and several layers.
+6. `Rley Wayward Ranger - Satchel`: negative fail-closed resolver test only
+   until the SliderSet has a body reference; do not run Smart Conform normally.
+
+Then test `Ancient Nord (Im Physics)` for chain skirt, straps, fur and plates.
+The longer-term belt/bandolier design backlog remains in
+`BELT_AND_PIPELINE_REVIEW.md`, Part 24.
+
+## Reproduction commands
+
+```powershell
+cmake --build build --config RelWithDebInfo --target drape_harness
+build\algo\RelWithDebInfo\drape-harness.exe --self-test
+py -3 scripts\check_corpus.py
+
+build\algo\RelWithDebInfo\drape-harness.exe `
+  --replay-dir captures\universality\lemoria_rm_heavy
+
+build\algo\RelWithDebInfo\drape-harness.exe `
+  --resolve-project "Rley 3BA Vanilla - Body - Savior's Hide (Im Physics)" `
+  --bodyslide-dir "E:\Wabbajack\InstallPacks\mods\Rley Mods - Vanilla Refits\CalienteTools\BodySlide"
+```
+
+For live capture, create `captures/enable_capture.flag` only immediately before
+launching Outfit Studio through MO2, remove it immediately after Smart Conform,
+close the project without saving, and verify the new files replay as v4 with an
+explicit `publishMode`.
 
 ## Commit discipline
 
-Commit the resolver/classifier checkpoint separately from later solver tuning.
-Never include `corpus/golden/fur_blacksmith_rm_heavy.json`.  Push each validated
-checkpoint to `origin/wip/codex-anticlip-harness` and keep this file updated.
+- Stage only intentional source/docs; exclude the user's Blacksmith golden.
+- Keep experimental finisher gates dark until both metrics and renders pass.
+- Push every validated checkpoint to
+  `origin/wip/codex-anticlip-harness`.
