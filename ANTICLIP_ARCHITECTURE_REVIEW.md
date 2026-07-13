@@ -3,6 +3,11 @@
 Date: 2026-06-08
 Status: IMPLEMENTATION IN PROGRESS.
 
+> 2026-07-12 update: the first topology-safe Vampire pilot and the revised
+> local authored-order design are documented in
+> `ANTICLIP_VAMPIRE_HANDOFF.md`. The legacy tuck/collapse/suppress family below
+> remains disabled and must not be re-enabled.
+
 ## 0. Why everything tried so far failed
 
 A full day of attempts. Every one was a **post-solve correction** that moved the

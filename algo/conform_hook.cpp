@@ -3747,6 +3747,1210 @@ static void ApplyHangingChainPass(
     }
 }
 
+// Experimental contact/tension-seeded plumb constraint (2026-07-12).
+// Unlike the legacy hanging-chain projection, support does not travel through
+// every connected edge. A vertex near the body is a seed; support propagates
+// downward only through edges currently longer than their authored rest length.
+// The path weight is the weakest fractional extension encountered, so slack
+// cloth cannot transmit a rigid radial silhouette. The pass is deterministic
+// and outward-only. DRAPE_TENSION_PLUMB=0 / tension_plumb_off.flag disables.
+static int ApplyTensionSeededGraphPlumb(
+    std::vector<Vec3>& verts,
+    const std::vector<float>& drapeEl,
+    const std::vector<EdgeConstraint>& edges,
+    const BodyBVH& body,
+    float seedGap,
+    float totalStrength,
+    float returnRate,
+    int rounds,
+    bool tensionGate)
+{
+    const size_t n = verts.size();
+    if (!body.valid || n == 0 || edges.empty() || rounds <= 0 || totalStrength <= 0.0f)
+        return 0;
+
+    struct Link { uint32_t v = 0; float rest = 0.0f; };
+    std::vector<std::vector<Link>> adj(n);
+    for (const EdgeConstraint& e : edges) {
+        if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+        adj[e.a].push_back(Link{e.b, e.restLength});
+        adj[e.b].push_back(Link{e.a, e.restLength});
+    }
+    for (auto& links : adj)
+        std::sort(links.begin(), links.end(), [](const Link& a, const Link& b) {
+            return a.v < b.v;
+        });
+
+    std::vector<uint8_t> seed(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+        float gap = 0.0f;
+        if (BVHSignedGap(body, verts[i], gap, nullptr) && gap <= seedGap)
+            seed[i] = 1;
+    }
+
+    std::vector<uint32_t> order;
+    order.reserve(n);
+    for (size_t i = 0; i < n && i <= 0xFFFF; ++i)
+        if (i < drapeEl.size() && drapeEl[i] >= 0.20f)
+            order.push_back((uint32_t)i);
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        if (verts[a].z != verts[b].z) return verts[a].z > verts[b].z;
+        return a < b;
+    });
+
+    totalStrength = ClampRange(totalStrength, 0.0f, 0.999999f);
+    const float iterationStrength =
+        1.0f - std::pow(1.0f - totalStrength, 1.0f / (float)rounds);
+    returnRate = std::max(0.0f, returnRate);
+    int moved = 0;
+
+    for (int round = 0; round < rounds; ++round) {
+        std::vector<float> support(n, 0.0f);
+        for (size_t i = 0; i < n; ++i) if (seed[i]) support[i] = 1.0f;
+        std::vector<float> radius(n, 0.0f);
+        for (size_t i = 0; i < n; ++i)
+            radius[i] = RadialRadius(verts[i]);
+
+        for (uint32_t i : order) {
+            float curR = radius[i];
+            if (curR <= 1.0e-6f) continue;
+            float targetR = curR;
+            float targetSupport = support[i];
+            float propagated = support[i];
+            for (const Link& link : adj[i]) {
+                uint32_t j = link.v;
+                float dz = verts[j].z - verts[i].z;
+                if (dz <= 1.0e-4f || support[j] <= 0.0f) continue;
+                float carried = support[j];
+                if (tensionGate) {
+                    float len = Len(Sub(verts[j], verts[i]));
+                    if (len <= link.rest) continue;  // slack/compressed edges carry no tension
+                    float edgeTension = ClampRange(1.0f - link.rest / len, 0.0f, 1.0f);
+                    carried = std::min(carried, edgeTension);
+                }
+                propagated = std::max(propagated, carried);
+                float candidate = radius[j] - returnRate * dz;
+                if (candidate > targetR) {
+                    targetR = candidate;
+                    targetSupport = carried;
+                }
+            }
+            support[i] = std::max(support[i], propagated);
+            if (targetSupport <= 0.0f || targetR <= curR + 1.0e-5f) continue;
+            float step = (targetR - curR) * iterationStrength * targetSupport;
+            float dx = (verts[i].x - g_refCenterX) / curR;
+            float dy = (verts[i].y - g_refCenterY) / curR;
+            float newR = curR + step;
+            verts[i].x = g_refCenterX + dx * newR;
+            verts[i].y = g_refCenterY + dy * newR;
+            radius[i] = newR;
+            ++moved;
+        }
+    }
+    return moved;
+}
+
+// True-posterior (-Y) chord bridge.  The Outfit Studio/Skyrim torso convention
+// is front=+Y, rear=-Y; older cleft experiments accidentally used the opposite
+// half.  This pass samples the live cloth itself at two posterior lobe anchors
+// and imposes only the missing unilateral chord between them.  It never pulls
+// cloth toward the body and never changes X/Z.
+struct PosteriorChordStats {
+    int decisionVerts = 0;
+    int movedVerts = 0;
+    bool reverted = false;
+    float maxMove = 0.0f;
+    float minMovedGap = 1.0e30f;
+};
+
+static bool SurfaceYMinAtXZ(
+    const std::vector<Vec3>& verts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    float x,
+    float z,
+    float& outY)
+{
+    bool found = false;
+    float best = 1.0e30f;
+    constexpr float kInsideEps = 1.0e-5f;
+    for (const auto& t : tris) {
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size())
+            continue;
+        const Vec3& a = verts[t[0]];
+        const Vec3& b = verts[t[1]];
+        const Vec3& c = verts[t[2]];
+        const double ax = (double)b.x - (double)a.x;
+        const double az = (double)b.z - (double)a.z;
+        const double bx = (double)c.x - (double)a.x;
+        const double bz = (double)c.z - (double)a.z;
+        const double det = ax * bz - az * bx;
+        if (std::fabs(det) <= 1.0e-12) continue;
+        const double dx = (double)x - (double)a.x;
+        const double dz = (double)z - (double)a.z;
+        const double u = (dx * bz - dz * bx) / det;
+        const double v = (ax * dz - az * dx) / det;
+        const double w = 1.0 - u - v;
+        if (u < -kInsideEps || v < -kInsideEps || w < -kInsideEps) continue;
+        const float y = (float)(w * (double)a.y + u * (double)b.y + v * (double)c.y);
+        if (!std::isfinite(y)) continue;
+        best = std::min(best, y);
+        found = true;
+    }
+    if (found) outY = best;
+    return found;
+}
+
+// Conservative non-adjacent triangle crossing test used by the transactional
+// final body floor.  It deliberately ignores coplanar overlap: the garment has
+// many authored stacked plates, so treating every coplanar contact as a new
+// collision would freeze legitimate motion.  The dangerous floor regression
+// is a non-coplanar face crossing introduced while a vertex is pushed out of
+// the body, which this catches deterministically.
+static bool SegmentIntersectsTriangle(
+    const Vec3& p0,
+    const Vec3& p1,
+    const Vec3& a,
+    const Vec3& b,
+    const Vec3& c)
+{
+    constexpr float kEps = 1.0e-6f;
+    const Vec3 dir = Sub(p1, p0);
+    const Vec3 e1 = Sub(b, a);
+    const Vec3 e2 = Sub(c, a);
+    const Vec3 h = Cross(dir, e2);
+    const float det = Dot(e1, h);
+    if (!std::isfinite(det) || std::fabs(det) <= kEps) return false;
+    const float invDet = 1.0f / det;
+    const Vec3 s = Sub(p0, a);
+    const float u = invDet * Dot(s, h);
+    if (u < -kEps || u > 1.0f + kEps) return false;
+    const Vec3 q = Cross(s, e1);
+    const float v = invDet * Dot(dir, q);
+    if (v < -kEps || u + v > 1.0f + kEps) return false;
+    const float t = invDet * Dot(e2, q);
+    return t >= -kEps && t <= 1.0f + kEps;
+}
+
+static bool TriangleAabbsOverlap(
+    const Vec3& a0, const Vec3& a1, const Vec3& a2,
+    const Vec3& b0, const Vec3& b1, const Vec3& b2)
+{
+    constexpr float kEps = 1.0e-5f;
+    const float aminX = std::min(a0.x, std::min(a1.x, a2.x));
+    const float aminY = std::min(a0.y, std::min(a1.y, a2.y));
+    const float aminZ = std::min(a0.z, std::min(a1.z, a2.z));
+    const float amaxX = std::max(a0.x, std::max(a1.x, a2.x));
+    const float amaxY = std::max(a0.y, std::max(a1.y, a2.y));
+    const float amaxZ = std::max(a0.z, std::max(a1.z, a2.z));
+    const float bminX = std::min(b0.x, std::min(b1.x, b2.x));
+    const float bminY = std::min(b0.y, std::min(b1.y, b2.y));
+    const float bminZ = std::min(b0.z, std::min(b1.z, b2.z));
+    const float bmaxX = std::max(b0.x, std::max(b1.x, b2.x));
+    const float bmaxY = std::max(b0.y, std::max(b1.y, b2.y));
+    const float bmaxZ = std::max(b0.z, std::max(b1.z, b2.z));
+    return !(amaxX < bminX - kEps || bmaxX < aminX - kEps ||
+             amaxY < bminY - kEps || bmaxY < aminY - kEps ||
+             amaxZ < bminZ - kEps || bmaxZ < aminZ - kEps);
+}
+
+static bool TrianglesShareVertex(
+    const std::array<uint16_t, 3>& a,
+    const std::array<uint16_t, 3>& b)
+{
+    for (uint16_t av : a)
+        for (uint16_t bv : b)
+            if (av == bv) return true;
+    return false;
+}
+
+static bool TrianglesCrossNonCoplanar(
+    const std::vector<Vec3>& verts,
+    const std::array<uint16_t, 3>& ta,
+    const std::array<uint16_t, 3>& tb)
+{
+    const size_t n = verts.size();
+    if (ta[0] >= n || ta[1] >= n || ta[2] >= n ||
+        tb[0] >= n || tb[1] >= n || tb[2] >= n)
+        return false;
+    const Vec3& a0 = verts[ta[0]];
+    const Vec3& a1 = verts[ta[1]];
+    const Vec3& a2 = verts[ta[2]];
+    const Vec3& b0 = verts[tb[0]];
+    const Vec3& b1 = verts[tb[1]];
+    const Vec3& b2 = verts[tb[2]];
+    if (!TriangleAabbsOverlap(a0, a1, a2, b0, b1, b2)) return false;
+    return SegmentIntersectsTriangle(a0, a1, b0, b1, b2) ||
+           SegmentIntersectsTriangle(a1, a2, b0, b1, b2) ||
+           SegmentIntersectsTriangle(a2, a0, b0, b1, b2) ||
+           SegmentIntersectsTriangle(b0, b1, a0, a1, a2) ||
+           SegmentIntersectsTriangle(b1, b2, a0, a1, a2) ||
+           SegmentIntersectsTriangle(b2, b0, a0, a1, a2);
+}
+
+static int ApplyPosteriorChordBridge(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& body,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>* protectedVerts,
+    float anchorMinX,
+    float anchorMaxX,
+    float anchorStep,
+    float allowedSag,
+    float sagFractionStart,
+    float sagFractionEnd,
+    float horizontalPower,
+    float bodyDipMin,
+    float clothDipMin,
+    float posteriorDepthMin,
+    float zFractionLo,
+    float zFractionHi,
+    float maxMove,
+    int maxDecisionVerts,
+    float minAreaRatio,
+    float minEdgeRatio,
+    float minBodyGap,
+    PosteriorChordStats& stats)
+{
+    const size_t n = verts.size();
+    if (!body.valid || n == 0 || baseVerts.size() < n || tris.empty() ||
+        !std::isfinite(anchorMinX) || !std::isfinite(anchorMaxX) ||
+        !std::isfinite(anchorStep) || !std::isfinite(maxMove) ||
+        !std::isfinite(allowedSag) || !std::isfinite(sagFractionStart) ||
+        !std::isfinite(sagFractionEnd) || !std::isfinite(horizontalPower) ||
+        !std::isfinite(bodyDipMin) || !std::isfinite(clothDipMin) ||
+        !std::isfinite(posteriorDepthMin) || !std::isfinite(zFractionLo) ||
+        !std::isfinite(zFractionHi) || !std::isfinite(minAreaRatio) ||
+        !std::isfinite(minEdgeRatio) || !std::isfinite(minBodyGap) ||
+        anchorMinX <= 0.0f || anchorMaxX < anchorMinX || anchorStep <= 0.0f ||
+        maxMove <= 0.0f)
+        return 0;
+    const float sampleIntervals = (anchorMaxX - anchorMinX) / anchorStep;
+    if (!std::isfinite(sampleIntervals) || sampleIntervals > 255.0f) return 0;
+    const int anchorSampleCount = (int)std::floor(sampleIntervals + 1.0e-4f) + 1;
+
+    float bzMin = 1.0e30f, bzMax = -1.0e30f;
+    for (const Vec3& p : body.verts) {
+        bzMin = std::min(bzMin, p.z);
+        bzMax = std::max(bzMax, p.z);
+    }
+    if (!(bzMax > bzMin)) return 0;
+    zFractionLo = ClampRange(zFractionLo, 0.0f, 1.0f);
+    zFractionHi = ClampRange(zFractionHi, zFractionLo, 1.0f);
+    const float zLo = bzMin + zFractionLo * (bzMax - bzMin);
+    const float zHi = bzMin + zFractionHi * (bzMax - bzMin);
+    sagFractionStart = ClampRange(sagFractionStart, zFractionLo, zFractionHi);
+    sagFractionEnd = ClampRange(sagFractionEnd, sagFractionStart, zFractionHi);
+    const float sagZStart = bzMin + sagFractionStart * (bzMax - bzMin);
+    const float sagZEnd = bzMin + sagFractionEnd * (bzMax - bzMin);
+    const float broadXLeft = g_refCenterX - anchorMaxX;
+    const float broadXRight = g_refCenterX + anchorMaxX;
+    const std::vector<Vec3> entry = verts;
+    std::vector<Vec3> proposal = entry;
+    std::vector<uint8_t> active(n, 0);
+
+    allowedSag = std::max(0.0f, allowedSag);
+    bodyDipMin = std::max(0.0f, bodyDipMin);
+    clothDipMin = std::max(0.0f, clothDipMin);
+    posteriorDepthMin = std::max(0.0f, posteriorDepthMin);
+    horizontalPower = std::max(0.25f, horizontalPower);
+    maxDecisionVerts = std::max(1, maxDecisionVerts);
+
+    // Fail cheaply on a dense/unexpected panel before doing the dynamic lobe
+    // surface scans. The validated live garment has only 32 decision vertices.
+    int broadCandidates = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (protectedVerts && i < protectedVerts->size() && (*protectedVerts)[i])
+            continue;
+        const Vec3& p = entry[i];
+        if (g_refCenterY - p.y >= posteriorDepthMin && p.z >= zLo && p.z <= zHi &&
+            p.x >= broadXLeft && p.x <= broadXRight)
+            ++broadCandidates;
+    }
+    if (broadCandidates > maxDecisionVerts * 4) return 0;
+
+    // Follow the garment's two posterior lobes at every authored Z row.  Fixed
+    // X anchors left a small lower dent because the lobe width changes through
+    // the seat.  Cache by the exact input float bits: duplicated seam vertices
+    // and vertices on the same row then share identical samples and decisions.
+    struct DynamicSamples {
+        bool valid = false;
+        float xLeft = 0.0f, xRight = 0.0f;
+        float clothLeft = 0.0f, clothRight = 0.0f, clothCenter = 0.0f;
+        float bodyLeft = 0.0f, bodyRight = 0.0f, bodyCenter = 0.0f;
+    };
+    std::unordered_map<uint32_t, DynamicSamples> samplesByZ;
+    samplesByZ.reserve((size_t)std::min(broadCandidates, maxDecisionVerts));
+
+    auto samplesAtZ = [&](float z) -> const DynamicSamples& {
+        uint32_t zKey = 0;
+        static_assert(sizeof(zKey) == sizeof(z), "float cache key size mismatch");
+        std::memcpy(&zKey, &z, sizeof(zKey));
+        auto inserted = samplesByZ.emplace(zKey, DynamicSamples{});
+        DynamicSamples& s = inserted.first->second;
+        if (!inserted.second) return s;
+
+        bool foundLeft = false, foundRight = false;
+        float bestLeft = 1.0e30f, bestRight = 1.0e30f;
+        for (int sample = 0; sample < anchorSampleCount; ++sample) {
+            const float sampleX = anchorMinX + (float)sample * anchorStep;
+            float y = 0.0f;
+            const float xl = g_refCenterX - sampleX;
+            if (SurfaceYMinAtXZ(entry, tris, xl, z, y) &&
+                (!foundLeft || y < bestLeft)) {
+                foundLeft = true;
+                bestLeft = y;
+                s.xLeft = xl;
+            }
+            const float xr = g_refCenterX + sampleX;
+            if (SurfaceYMinAtXZ(entry, tris, xr, z, y) &&
+                (!foundRight || y < bestRight)) {
+                foundRight = true;
+                bestRight = y;
+                s.xRight = xr;
+            }
+        }
+        if (!foundLeft || !foundRight || !(s.xRight > s.xLeft)) return s;
+        s.clothLeft = bestLeft;
+        s.clothRight = bestRight;
+        if (!SurfaceYMinAtXZ(entry, tris, g_refCenterX, z, s.clothCenter) ||
+            !SurfaceYMinAtXZ(body.verts, body.tris, s.xLeft, z, s.bodyLeft) ||
+            !SurfaceYMinAtXZ(body.verts, body.tris, s.xRight, z, s.bodyRight) ||
+            !SurfaceYMinAtXZ(body.verts, body.tris, g_refCenterX, z, s.bodyCenter))
+            return s;
+        s.valid = true;
+        return s;
+    };
+
+    for (size_t i = 0; i < n; ++i) {
+        if (protectedVerts && i < protectedVerts->size() && (*protectedVerts)[i])
+            continue;
+        const Vec3& p = entry[i];
+        const float posteriorDepth = g_refCenterY - p.y;
+        if (posteriorDepth < posteriorDepthMin || p.z < zLo || p.z > zHi ||
+            p.x < broadXLeft || p.x > broadXRight)
+            continue;
+
+        const DynamicSamples& s = samplesAtZ(p.z);
+        if (!s.valid || p.x < s.xLeft || p.x > s.xRight) continue;
+
+        const float bodyDip = s.bodyCenter - std::max(s.bodyLeft, s.bodyRight);
+        const float clothDip = s.clothCenter - 0.5f * (s.clothLeft + s.clothRight);
+        if (bodyDip < bodyDipMin || clothDip < clothDipMin) continue;
+        ++stats.decisionVerts;
+        if (stats.decisionVerts > maxDecisionVerts) return 0;
+
+        const float u = ClampRange((p.x - s.xLeft) / (s.xRight - s.xLeft), 0.0f, 1.0f);
+        const float q = ClampRange(4.0f * u * (1.0f - u), 0.0f, 1.0f);
+        float verticalWeight = p.z >= sagZEnd ? 1.0f : 0.0f;
+        if (sagZEnd > sagZStart + 1.0e-6f && p.z > sagZStart && p.z < sagZEnd) {
+            const float t = ClampRange((p.z - sagZStart) / (sagZEnd - sagZStart),
+                                       0.0f, 1.0f);
+            verticalWeight = t * t * (3.0f - 2.0f * t);
+        }
+        const float chordY = s.clothLeft + (s.clothRight - s.clothLeft) * u;
+        const float targetY = chordY + allowedSag * verticalWeight *
+            std::pow(q, horizontalPower);
+        const float move = p.y - targetY; // positive means farther posterior is needed
+        if (move <= 1.0e-5f) continue;
+        proposal[i].y = p.y - std::min(move, maxMove);
+        active[i] = 1;
+    }
+    if (stats.decisionVerts < 3) return 0;
+
+    // A duplicate seam is one material point. Protection and movement are group
+    // properties, and the weld changes only Y so authored X/Z stay exact.
+    for (const auto& grp : exactSeamGroups) {
+        bool anyProtected = false, anyActive = false;
+        float minY = 1.0e30f;
+        int count = 0;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            if (protectedVerts && vi < protectedVerts->size() && (*protectedVerts)[vi])
+                anyProtected = true;
+            if (active[vi]) anyActive = true;
+            minY = std::min(minY, proposal[vi].y);
+            ++count;
+        }
+        if (anyProtected) {
+            for (uint32_t vi : grp) {
+                if (vi >= n) continue;
+                proposal[vi] = entry[vi];
+                active[vi] = 0;
+            }
+            continue;
+        }
+        if (!anyActive || count < 2) continue;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            // Negative Y is posterior. Use the most-posterior proposal so the
+            // seam weld can never undo the pass's one-sided contract.
+            proposal[vi].y = minY;
+            active[vi] = 1;
+        }
+    }
+
+    int moved = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const float len = Len(Sub(proposal[i], entry[i]));
+        if (len <= 1.0e-5f) { active[i] = 0; continue; }
+        if (!std::isfinite(len) || len > maxMove + 1.0e-4f) {
+            stats.reverted = true;
+            return 0;
+        }
+        float gap = 0.0f, entryGap = 0.0f;
+        if (!BVHSignedGap(body, proposal[i], gap, nullptr) || gap < minBodyGap ||
+            (BVHSignedGap(body, entry[i], entryGap, nullptr) &&
+             gap < entryGap - 1.0e-3f)) {
+            stats.reverted = true;
+            return 0;
+        }
+        stats.minMovedGap = std::min(stats.minMovedGap, gap);
+        stats.maxMove = std::max(stats.maxMove, len);
+        ++moved;
+    }
+    if (moved < 3) return 0;
+
+    minAreaRatio = ClampRange(minAreaRatio, 0.1f, 1.0f);
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        if (!active[t[0]] && !active[t[1]] && !active[t[2]]) continue;
+        Vec3 before = Cross(Sub(entry[t[1]], entry[t[0]]),
+                            Sub(entry[t[2]], entry[t[0]]));
+        Vec3 after = Cross(Sub(proposal[t[1]], proposal[t[0]]),
+                           Sub(proposal[t[2]], proposal[t[0]]));
+        const float beforeArea2 = Len(before);
+        const float afterArea2 = Len(after);
+        const float orientation = (beforeArea2 > 1.0e-9f && afterArea2 > 1.0e-9f)
+            ? Dot(before, after) / (beforeArea2 * afterArea2)
+            : -1.0f;
+        if (!std::isfinite(afterArea2) || afterArea2 < minAreaRatio * beforeArea2 ||
+            orientation <= 0.5f) {
+            stats.reverted = true;
+            return 0;
+        }
+    }
+
+    minEdgeRatio = ClampRange(minEdgeRatio, 0.1f, 1.0f);
+    for (const EdgeConstraint& e : edges) {
+        if (e.a >= n || e.b >= n || (!active[e.a] && !active[e.b])) continue;
+        const float rest = Len(Sub(baseVerts[e.b], baseVerts[e.a]));
+        if (rest <= 1.0e-6f) continue;
+        const float entryRatio = Len(Sub(entry[e.b], entry[e.a])) / rest;
+        const float ratio = Len(Sub(proposal[e.b], proposal[e.a])) / rest;
+        // Some authored/final edges enter this local pass already compressed
+        // below the nominal floor.  Give only those pre-compressed edges a 1.5%
+        // local tolerance; edges entering above the floor retain the absolute
+        // limit.  This prevents an unrelated pre-existing state from rejecting
+        // the whole bridge without turning the safety floor down globally.
+        const float minAllowed = entryRatio < minEdgeRatio
+            ? entryRatio * 0.985f
+            : minEdgeRatio;
+        const float maxAllowed = std::max(2.5f, entryRatio + 1.0e-3f);
+        if (!std::isfinite(ratio) || ratio < minAllowed || ratio > maxAllowed) {
+            stats.reverted = true;
+            return 0;
+        }
+    }
+
+    verts.swap(proposal);
+    stats.movedVerts = moved;
+    return moved;
+}
+
+// Experimental authored-compression/tangential repair (2026-07-12).
+//
+// The live BlackSmithTorso OBJ disproved the old "missing outward clearance"
+// diagnosis.  The cloth already spans the body cleft with positive clearance;
+// its visible star is a fan of triangles whose edges arrive from vanilla
+// Automorph at only ~20% of their AUTHORED lengths.  A constraint whose rest
+// length is supportVerts accepts that collapse as rest.  This pass instead:
+//   1) finds the body's glute-cleft z/x footprint;
+//   2) applies a soft garment-space ROI around that footprint;
+//   3) enforces a lower edge-length barrier against authored EdgeConstraint rest;
+//   4) redistributes sampling tangentially and reprojects it to the ENTRY surface;
+//   5) restores seams and a small body floor.
+// It therefore changes parameterisation/triangle quality without inventing a
+// new outward silhouette.  Ships dark behind DRAPE_TANGENTIAL_REPAIR until a
+// live visual gate and the full corpus both pass.
+struct TangentialRepairStats {
+    int roiVerts = 0;
+    int symmetryVerts = 0;
+    int triggerEdges = 0;
+    int activeEdgeVisits = 0;
+    int movedVerts = 0;
+    int bodyFloored = 0;
+    bool revertedFlip = false;
+    float maxMove = 0.0f;
+    float zLo = 0.0f;
+    float zHi = 0.0f;
+    float bodySymmetryRms = -1.0f;
+};
+
+struct TangentialQuantKey {
+    int32_t x = 0, y = 0, z = 0;
+    bool operator==(const TangentialQuantKey& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+struct TangentialQuantKeyHash {
+    size_t operator()(const TangentialQuantKey& k) const {
+        uint64_t h = (uint32_t)k.x * 0x9E3779B185EBCA87ull;
+        h ^= (uint32_t)k.y * 0xC2B2AE3D27D4EB4Full;
+        h ^= (uint32_t)k.z * 0x165667B19E3779F9ull;
+        return (size_t)(h ^ (h >> 32));
+    }
+};
+
+static TangentialQuantKey TangentialKey(const Vec3& p, float step) {
+    const double inv = 1.0 / std::max((double)step, 1.0e-12);
+    return TangentialQuantKey{
+        (int32_t)std::llround(((double)p.x - (double)g_refCenterX) * inv),
+        (int32_t)std::llround(((double)p.y - (double)g_refCenterY) * inv),
+        (int32_t)std::llround((double)p.z * inv)};
+}
+
+// Body sliders sourced from a symmetric reference should retain a symmetric
+// displacement field.  Gate garment symmetrisation on that measurable fact so
+// intentionally asymmetric body sliders/poses are never mirrored.
+static bool BodyMorphIsSymmetric(const BodyBVH& refBody,
+                                 const BodyBVH& currentBody,
+                                 float maxRms,
+                                 float& outRms)
+{
+    outRms = -1.0f;
+    if (!refBody.valid || !currentBody.valid ||
+        refBody.verts.size() != currentBody.verts.size() || refBody.verts.empty())
+        return false;
+    const size_t n = refBody.verts.size();
+    constexpr float kStep = 0.01f;
+    std::unordered_map<TangentialQuantKey, std::vector<uint32_t>, TangentialQuantKeyHash> groups;
+    groups.reserve(n * 2);
+    for (size_t i = 0; i < n && i <= 0xFFFFFFFFu; ++i)
+        groups[TangentialKey(refBody.verts[i], kStep)].push_back((uint32_t)i);
+
+    double sum2 = 0.0;
+    size_t samples = 0, pairedVerts = 0;
+    std::unordered_set<TangentialQuantKey, TangentialQuantKeyHash> used;
+    used.reserve(groups.size());
+    for (const auto& kv : groups) {
+        const TangentialQuantKey& key = kv.first;
+        if (used.find(key) != used.end()) continue;
+        TangentialQuantKey mirror{-key.x, key.y, key.z};
+        auto jt = groups.find(mirror);
+        if (jt == groups.end()) continue;
+        const auto& a = kv.second;
+        const auto& b = jt->second;
+        size_t count = std::min(a.size(), b.size());
+        if (count == 0) continue;
+        if (key.x == 0) {
+            for (size_t k = 0; k < count; ++k) {
+                uint32_t i = a[k];
+                Vec3 d = Sub(currentBody.verts[i], refBody.verts[i]);
+                sum2 += (double)d.x * (double)d.x;
+                ++samples;
+                ++pairedVerts;
+            }
+        } else {
+            // Process each left/right pair once.  Vector ordering is stable: both
+            // groups were filled by ascending vertex index.
+            if (key.x > 0) continue;
+            for (size_t k = 0; k < count; ++k) {
+                uint32_t i = a[k], j = b[k];
+                Vec3 di = Sub(currentBody.verts[i], refBody.verts[i]);
+                Vec3 dj = Sub(currentBody.verts[j], refBody.verts[j]);
+                Vec3 err{di.x + dj.x, di.y - dj.y, di.z - dj.z};
+                sum2 += (double)Dot(err, err);
+                ++samples;
+                pairedVerts += 2;
+            }
+        }
+        used.insert(key);
+        used.insert(mirror);
+    }
+    if (pairedVerts < (size_t)(0.90 * (double)n) || samples == 0) return false;
+    outRms = (float)std::sqrt(sum2 / (double)samples);
+    return std::isfinite(outRms) && outRms <= maxRms;
+}
+
+static int ApplyAuthoredTangentialRepair(
+    std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<EdgeConstraint>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& body,
+    const BodyBVH* refBody,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>* protectedVerts,
+    int maxRoiVerts,
+    float bodyDip,
+    float edgeFloor,
+    float triggerFloor,
+    int minTriggerEdges,
+    int lapRounds,
+    float lapStrength,
+    int finishRounds,
+    float barrierStrength,
+    float barrierMaxStep,
+    float lapMaxStep,
+    float reprojectMaxDist,
+    float preSymMaxMove,
+    bool symmetryOn,
+    float symmetryPairTolerance,
+    float symmetryBodyRmsMax,
+    float finalMaxMove,
+    float bodyFloor,
+    TangentialRepairStats& stats)
+{
+    const size_t n = verts.size();
+    if (!body.valid || n == 0 || baseVerts.size() < n || edges.empty() ||
+        tris.empty() || lapRounds < 0 || finishRounds < 0)
+        return 0;
+
+    // Same body-derived cleft detector as the existing cleft bridge, but this
+    // pass uses the footprint only as a material-repair ROI.  The target surface
+    // remains the entry cloth, never the body.
+    float bzMin = 1.0e30f, bzMax = -1.0e30f;
+    for (const Vec3& bv : body.verts) {
+        bzMin = std::min(bzMin, bv.z);
+        bzMax = std::max(bzMax, bv.z);
+    }
+    if (!(bzMax > bzMin)) return 0;
+    const float zCeil = bzMin + 0.55f * (bzMax - bzMin);
+    std::unordered_map<int, std::unordered_map<int, float>> profile;
+    for (const Vec3& bv : body.verts) {
+        if (bv.y <= g_refCenterY || bv.z > zCeil) continue;
+        int zs = (int)std::floor(bv.z * 0.5f);
+        int xb = (int)std::floor(bv.x - g_refCenterX);
+        auto& row = profile[zs];
+        auto it = row.find(xb);
+        if (it == row.end() || bv.y > it->second) row[xb] = bv.y;
+    }
+
+    int zBottom = 999999, zTop = -999999;
+    float xLeft = 1.0e30f, xRight = -1.0e30f;
+    int slices = 0;
+    for (auto& kv : profile) {
+        auto& row = kv.second;
+        float centerY = -1.0e30f;
+        for (int xb = -2; xb <= 1; ++xb) {
+            auto it = row.find(xb);
+            if (it != row.end()) centerY = std::max(centerY, it->second);
+        }
+        if (centerY < -1.0e29f) continue;
+        float leftY = -1.0e30f, rightY = -1.0e30f;
+        int leftX = 0, rightX = 0;
+        for (int xb = -12; xb <= -3; ++xb) {
+            auto it = row.find(xb);
+            if (it != row.end() && it->second > leftY) {
+                leftY = it->second;
+                leftX = xb;
+            }
+        }
+        for (int xb = 2; xb <= 11; ++xb) {
+            auto it = row.find(xb);
+            if (it != row.end() && it->second > rightY) {
+                rightY = it->second;
+                rightX = xb;
+            }
+        }
+        if (leftY < -1.0e29f || rightY < -1.0e29f) continue;
+        if (std::min(leftY, rightY) - centerY < bodyDip) continue;
+        int sliceLo = kv.first * 2;
+        int sliceHi = sliceLo + 2;
+        zBottom = std::min(zBottom, sliceLo);
+        zTop = std::max(zTop, sliceHi);
+        xLeft = std::min(xLeft, (float)leftX + 0.5f + g_refCenterX);
+        xRight = std::max(xRight, (float)rightX + 0.5f + g_refCenterX);
+        ++slices;
+    }
+    if (slices == 0 || zTop <= zBottom || xRight <= xLeft) return 0;
+
+    auto smooth01 = [](float value) -> float {
+        value = ClampRange(value, 0.0f, 1.0f);
+        return value * value * (3.0f - 2.0f * value);
+    };
+    // For the live body the detected core is z=40..64 and shoulders ~+/-11.5.
+    // These derived margins reproduce the validated soft spike: outer z=35..72,
+    // x~=+/-20, with 5u vertical and 4u side/rear feathering.
+    const float coreZLo = (float)zBottom;
+    const float outerZLo = coreZLo - 5.0f;
+    const float coreZHi = (float)zTop + 3.0f;
+    const float outerZHi = coreZHi + 5.0f;
+    const float coreXLo = xLeft - 4.0f;
+    const float coreXHi = xRight + 4.0f;
+    const float outerXLo = coreXLo - 4.0f;
+    const float outerXHi = coreXHi + 4.0f;
+    stats.zLo = outerZLo;
+    stats.zHi = outerZHi;
+
+    const std::vector<Vec3> entry = verts;
+    std::vector<float> weight(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        if (protectedVerts && i < protectedVerts->size() && (*protectedVerts)[i])
+            continue;
+        const Vec3& p = entry[i];
+        float wy = smooth01((p.y - g_refCenterY) / 4.0f);
+        float wz0 = smooth01((p.z - outerZLo) / 5.0f);
+        float wz1 = smooth01((outerZHi - p.z) / 5.0f);
+        float wx0 = smooth01((p.x - outerXLo) / 4.0f);
+        float wx1 = smooth01((outerXHi - p.x) / 4.0f);
+        weight[i] = wy * wz0 * wz1 * wx0 * wx1;
+    }
+    // A coincident authored seam is one material point.  Propagate the maximum
+    // ROI weight across every unprotected group so weld/validation can never
+    // move a nominally weight-zero twin outside the checked set.
+    for (const auto& grp : exactSeamGroups) {
+        float maxWeight = 0.0f;
+        bool anyProtected = false;
+        for (uint32_t vi : grp) {
+            if (vi >= n) continue;
+            maxWeight = std::max(maxWeight, weight[vi]);
+            if (protectedVerts && vi < protectedVerts->size() &&
+                (*protectedVerts)[vi])
+                anyProtected = true;
+        }
+        if (anyProtected) maxWeight = 0.0f;
+        for (uint32_t vi : grp) if (vi < n) weight[vi] = maxWeight;
+    }
+    for (float w : weight) if (w > 0.0f) ++stats.roiVerts;
+    if (stats.roiVerts < 12 ||
+        (maxRoiVerts > 0 && stats.roiVerts > maxRoiVerts))
+        return 0;
+
+    edgeFloor = ClampRange(edgeFloor, 0.3f, 1.0f);
+    triggerFloor = ClampRange(triggerFloor, 0.1f, edgeFloor);
+    barrierStrength = ClampRange(barrierStrength, 0.0f, 1.0f);
+    lapStrength = ClampRange(lapStrength, 0.0f, 1.0f);
+    minTriggerEdges = std::max(1, minTriggerEdges);
+    for (const EdgeConstraint& e : edges) {
+        if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+        if (std::max(weight[e.a], weight[e.b]) < 0.5f) continue;
+        float len = Len(Sub(entry[e.b], entry[e.a]));
+        if (len < triggerFloor * e.restLength) ++stats.triggerEdges;
+    }
+    if (stats.triggerEdges < minTriggerEdges) return 0;
+
+    // Reprojection stays in the vertex's local two-ring.  The live garment is a
+    // multi-surface mesh; an unrestricted nearest-face query can otherwise jump
+    // to a coincident inner flap while still reporting a tiny distance.
+    std::vector<std::vector<uint32_t>> topologyAdj(n);
+    std::vector<std::vector<int>> incidentFaces(n);
+    for (const EdgeConstraint& e : edges) {
+        if (e.a >= n || e.b >= n) continue;
+        topologyAdj[e.a].push_back(e.b);
+        topologyAdj[e.b].push_back(e.a);
+    }
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        for (int k = 0; k < 3; ++k)
+            if (t[k] < n) incidentFaces[t[k]].push_back((int)ti);
+    }
+    std::vector<std::unordered_set<int>> allowedFaces(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        std::unordered_set<uint32_t> ring;
+        ring.insert((uint32_t)i);
+        for (uint32_t j : topologyAdj[i]) ring.insert(j);
+        std::vector<uint32_t> first(ring.begin(), ring.end());
+        for (uint32_t j : first)
+            if (j < n)
+                for (uint32_t k : topologyAdj[j]) ring.insert(k);
+        for (uint32_t j : ring)
+            if (j < n)
+                for (int ti : incidentFaces[j]) allowedFaces[i].insert(ti);
+    }
+    // Exact seam twins have separate topology but occupy one material point.
+    // Share their allowed local faces so deterministic BVH tie-breaking cannot
+    // reject one twin merely because it returned the other's coincident face.
+    for (const auto& grp : exactSeamGroups) {
+        std::unordered_set<int> merged;
+        bool active = false;
+        for (uint32_t vi : grp) {
+            if (vi >= n || weight[vi] <= 0.0f) continue;
+            active = true;
+            merged.insert(allowedFaces[vi].begin(), allowedFaces[vi].end());
+        }
+        if (!active) continue;
+        for (uint32_t vi : grp)
+            if (vi < n && weight[vi] > 0.0f) allowedFaces[vi] = merged;
+    }
+    std::vector<std::vector<int>> allowedFaceList(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        allowedFaceList[i].assign(allowedFaces[i].begin(), allowedFaces[i].end());
+        std::sort(allowedFaceList[i].begin(), allowedFaceList[i].end());
+    }
+
+    auto weldExact = [&]() {
+        for (const auto& grp : exactSeamGroups) {
+            if (grp.size() < 2) continue;
+            Vec3 avg{0.0f, 0.0f, 0.0f};
+            int count = 0;
+            float activeWeight = 0.0f;
+            for (uint32_t vi : grp) {
+                if (vi >= n) continue;
+                avg = Add(avg, verts[vi]);
+                ++count;
+                activeWeight = std::max(activeWeight, weight[vi]);
+            }
+            if (count < 2 || activeWeight <= 0.0f) continue;
+            avg = Scale(avg, 1.0f / (float)count);
+            for (uint32_t vi : grp) {
+                if (vi >= n) continue;
+                verts[vi] = avg;
+                // Symmetry uses tighter authored clusters than the seam weld.
+                // If it activates only one member, the whole welded material
+                // point must still participate in every later safety check.
+                weight[vi] = std::max(weight[vi], activeWeight);
+            }
+        }
+    };
+
+    auto vertexNormals = [&]() {
+        std::vector<Vec3> normal(n, Vec3{});
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            Vec3 fn = Cross(Sub(verts[t[1]], verts[t[0]]),
+                            Sub(verts[t[2]], verts[t[0]]));
+            normal[t[0]] = Add(normal[t[0]], fn);
+            normal[t[1]] = Add(normal[t[1]], fn);
+            normal[t[2]] = Add(normal[t[2]], fn);
+        }
+        for (Vec3& v : normal) {
+            float len = Len(v);
+            if (len > 1.0e-8f) v = Scale(v, 1.0f / len);
+        }
+        return normal;
+    };
+
+    auto compressionBarrier = [&]() -> int {
+        std::vector<Vec3> normal = vertexNormals();
+        std::vector<Vec3> correction(n, Vec3{});
+        std::vector<int> count(n, 0);
+        int active = 0;
+        for (const EdgeConstraint& e : edges) {
+            if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+            float wa = weight[e.a], wb = weight[e.b];
+            if (wa <= 0.0f && wb <= 0.0f) continue;
+            Vec3 edge = Sub(verts[e.b], verts[e.a]);
+            float len = Len(edge);
+            if (len <= 1.0e-9f) continue;
+            float deficit = edgeFloor * e.restLength - len;
+            if (deficit <= 0.0f) continue;
+            float denom = std::max(wa + wb, 1.0e-12f);
+            Vec3 dir = Scale(edge, 1.0f / len);
+            float amount = deficit * barrierStrength;
+            correction[e.a] = Sub(correction[e.a], Scale(dir, amount * wa / denom));
+            correction[e.b] = Add(correction[e.b], Scale(dir, amount * wb / denom));
+            ++count[e.a];
+            ++count[e.b];
+            ++active;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (count[i] <= 0 || weight[i] <= 0.0f) continue;
+            Vec3 delta = Scale(correction[i], 1.0f / (float)count[i]);
+            delta = Sub(delta, Scale(normal[i], Dot(delta, normal[i])));
+            float len = Len(delta);
+            if (barrierMaxStep > 0.0f && len > barrierMaxStep)
+                delta = Scale(delta, barrierMaxStep / len);
+            verts[i] = Add(verts[i], Scale(delta, weight[i]));
+        }
+        stats.activeEdgeVisits += active;
+        return active;
+    };
+
+    auto tangentialUmbrella = [&]() {
+        std::vector<Vec3> normal = vertexNormals();
+        std::vector<Vec3> neighbourSum(n, Vec3{});
+        std::vector<int> count(n, 0);
+        for (const EdgeConstraint& e : edges) {
+            if (e.a >= n || e.b >= n) continue;
+            neighbourSum[e.a] = Add(neighbourSum[e.a], verts[e.b]);
+            neighbourSum[e.b] = Add(neighbourSum[e.b], verts[e.a]);
+            ++count[e.a];
+            ++count[e.b];
+        }
+        std::vector<Vec3> next = verts;
+        for (size_t i = 0; i < n; ++i) {
+            if (count[i] <= 0 || weight[i] <= 0.0f) continue;
+            Vec3 avg = Scale(neighbourSum[i], 1.0f / (float)count[i]);
+            Vec3 delta = Sub(avg, verts[i]);
+            delta = Sub(delta, Scale(normal[i], Dot(delta, normal[i])));
+            float len = Len(delta);
+            if (lapMaxStep > 0.0f && len > lapMaxStep)
+                delta = Scale(delta, lapMaxStep / len);
+            next[i] = Add(verts[i], Scale(delta, lapStrength * weight[i]));
+        }
+        verts.swap(next);
+    };
+
+    bool reprojectFailed = false;
+    auto reprojectEntry = [&]() {
+        for (size_t i = 0; i < n; ++i) {
+            if (weight[i] <= 0.0f) continue;
+            Vec3 best{0.0f, 0.0f, 0.0f};
+            float bestD2 = 1.0e30f;
+            for (int face : allowedFaceList[i]) {
+                if (face < 0 || (size_t)face >= tris.size()) continue;
+                const auto& t = tris[(size_t)face];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                Vec3 cp = ClosestPtTriangle(verts[i], entry[t[0]], entry[t[1]], entry[t[2]]);
+                float d2 = Len2(Sub(cp, verts[i]));
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    best = cp;
+                }
+            }
+            if (bestD2 >= 1.0e29f ||
+                (reprojectMaxDist > 0.0f &&
+                 bestD2 > reprojectMaxDist * reprojectMaxDist)) {
+                reprojectFailed = true;
+                return;
+            }
+            verts[i] = best;
+        }
+    };
+
+    for (int round = 0; round < lapRounds; ++round) {
+        compressionBarrier();
+        tangentialUmbrella();
+        reprojectEntry();
+        if (reprojectFailed) {
+            verts = entry;
+            return 0;
+        }
+        weldExact();
+    }
+    for (int round = 0; round < finishRounds; ++round) {
+        if (compressionBarrier() == 0) break;
+        weldExact();
+    }
+
+    auto revertRepair = [&]() -> int {
+        verts = entry;
+        stats.revertedFlip = true;
+        stats.movedVerts = 0;
+        stats.bodyFloored = 0;
+        stats.maxMove = 0.0f;
+        return 0;
+    };
+
+    // Stage-one trust region: the validated tangent/barrier candidate moves at
+    // most ~2.01u.  Check it before the optional symmetry projection, whose
+    // paired redistribution legitimately reaches ~3.15u in the live target.
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        float len = Len(Sub(verts[i], entry[i]));
+        if (!std::isfinite(len) ||
+            (preSymMaxMove > 0.0f && len > preSymMaxMove))
+            return revertRepair();
+    }
+
+    // Bilateral displacement-field projection.  This is intentionally AFTER
+    // tangent+barrier: doing it before the relaxation reintroduces ~0.85 RMS of
+    // asymmetry, while post-projection matches the paired hand edit.  Absolute
+    // authored positions are preserved; only (candidate - authored) is mirrored.
+    bool bodySymmetric = false;
+    if (symmetryOn && refBody) {
+        bodySymmetric = BodyMorphIsSymmetric(*refBody, body,
+                                             symmetryBodyRmsMax,
+                                             stats.bodySymmetryRms);
+    }
+    if (bodySymmetric) {
+        struct RestCluster {
+            std::vector<uint32_t> members;
+            Vec3 baseMean{0.0f, 0.0f, 0.0f};
+            Vec3 entryMean{0.0f, 0.0f, 0.0f};
+            Vec3 displacementMean{0.0f, 0.0f, 0.0f};
+            bool protectedCluster = false;
+        };
+        constexpr float kClusterStep = 1.0e-5f;
+        std::unordered_map<TangentialQuantKey, uint32_t, TangentialQuantKeyHash> clusterByKey;
+        clusterByKey.reserve(n * 2);
+        std::vector<RestCluster> clusters;
+        clusters.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            TangentialQuantKey key = TangentialKey(baseVerts[i], kClusterStep);
+            auto it = clusterByKey.find(key);
+            uint32_t ci = 0;
+            if (it == clusterByKey.end()) {
+                ci = (uint32_t)clusters.size();
+                clusterByKey.emplace(key, ci);
+                clusters.push_back(RestCluster{});
+            } else {
+                ci = it->second;
+            }
+            clusters[ci].members.push_back((uint32_t)i);
+        }
+        for (RestCluster& c : clusters) {
+            for (uint32_t vi : c.members) {
+                c.baseMean = Add(c.baseMean, baseVerts[vi]);
+                c.entryMean = Add(c.entryMean, entry[vi]);
+                c.displacementMean = Add(c.displacementMean,
+                                         Sub(verts[vi], baseVerts[vi]));
+                if (protectedVerts && vi < protectedVerts->size() &&
+                    (*protectedVerts)[vi])
+                    c.protectedCluster = true;
+            }
+            float inv = 1.0f / (float)c.members.size();
+            c.baseMean = Scale(c.baseMean, inv);
+            c.entryMean = Scale(c.entryMean, inv);
+            c.displacementMean = Scale(c.displacementMean, inv);
+        }
+
+        std::vector<int> nearest(clusters.size(), -1);
+        std::vector<float> nearestDist2(clusters.size(), 1.0e30f);
+        for (size_t i = 0; i < clusters.size(); ++i) {
+            Vec3 target{2.0f * g_refCenterX - clusters[i].baseMean.x,
+                        clusters[i].baseMean.y,
+                        clusters[i].baseMean.z};
+            for (size_t j = 0; j < clusters.size(); ++j) {
+                float d2 = Len2(Sub(clusters[j].baseMean, target));
+                if (d2 < nearestDist2[i]) {
+                    nearestDist2[i] = d2;
+                    nearest[i] = (int)j;
+                }
+            }
+        }
+
+        symmetryPairTolerance = std::max(0.0f, symmetryPairTolerance);
+        const float pairTol2 = symmetryPairTolerance * symmetryPairTolerance;
+        const float symOuterX = std::max(std::fabs(xLeft - g_refCenterX),
+                                         std::fabs(xRight - g_refCenterX)) + 10.5f;
+        std::vector<Vec3> correction(clusters.size(), Vec3{});
+        std::vector<float> clusterWeight(clusters.size(), 0.0f);
+        for (size_t i = 0; i < clusters.size(); ++i) {
+            int j = nearest[i];
+            if (j < 0 || (size_t)j >= clusters.size() || nearest[(size_t)j] != (int)i ||
+                nearestDist2[i] > pairTol2 || clusters[i].protectedCluster ||
+                clusters[(size_t)j].protectedCluster)
+                continue;
+            const Vec3& ui = clusters[i].displacementMean;
+            const Vec3& uj = clusters[(size_t)j].displacementMean;
+            Vec3 mirroredJ{-uj.x, uj.y, uj.z};
+            Vec3 symmetric = Scale(Add(ui, mirroredJ), 0.5f);
+            correction[i] = Sub(symmetric, ui);
+
+            float xMag = 0.5f * (
+                std::fabs(clusters[i].entryMean.x - g_refCenterX) +
+                std::fabs(clusters[(size_t)j].entryMean.x - g_refCenterX));
+            float rearY = 0.5f * (clusters[i].entryMean.y +
+                                  clusters[(size_t)j].entryMean.y) - g_refCenterY;
+            float z = 0.5f * (clusters[i].entryMean.z +
+                              clusters[(size_t)j].entryMean.z);
+            clusterWeight[i] = smooth01(rearY / 4.0f)
+                * smooth01((z - outerZLo) / 5.0f)
+                * smooth01((outerZHi - z) / 5.0f)
+                * smooth01((symOuterX - xMag) / 5.0f);
+        }
+        for (size_t ci = 0; ci < clusters.size(); ++ci) {
+            float w = clusterWeight[ci];
+            if (w <= 0.0f) continue;
+            for (uint32_t vi : clusters[ci].members) {
+                verts[vi] = Add(verts[vi], Scale(correction[ci], w));
+                weight[vi] = std::max(weight[vi], w);  // validation/support union
+                ++stats.symmetryVerts;
+            }
+        }
+        weldExact();
+    }
+
+    // Trust region and body floor.  The validated spike's max was ~2.01u;
+    // the combined post-symmetry candidate reaches ~3.15u.  Roll back the complete
+    // pass rather than clipping one vertex and reintroducing a sliver.
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        Vec3 delta = Sub(verts[i], entry[i]);
+        float len = Len(delta);
+        if (!std::isfinite(len) || (finalMaxMove > 0.0f && len > finalMaxMove))
+            return revertRepair();
+        Vec3 target = verts[i];
+        if (len > 1.0e-5f && bodyFloor > 0.0f &&
+            BVHCollideVertex(body, target, bodyFloor)) {
+            verts[i] = target;
+            ++stats.bodyFloored;
+        }
+        // Body-flooring normally adds only ~0.04u (entry already has the 0.06
+        // final floor), but it is still part of the trust region.
+        delta = Sub(verts[i], entry[i]);
+        len = Len(delta);
+        if (!std::isfinite(len) || (finalMaxMove > 0.0f && len > finalMaxMove))
+            return revertRepair();
+    }
+    weldExact();
+
+    // Welding is the last topology operation.  Reapply trust/floor afterwards;
+    // coincident twins now start from the same point and therefore receive the
+    // same deterministic body correction without another weld.  Treat "moved"
+    // as a seam-group property: split entry positions can otherwise make one
+    // twin skip the floor while its welded mate applies it and reopens the seam.
+    std::vector<uint8_t> postWeldMoved(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] > 0.0f && Len(Sub(verts[i], entry[i])) > 1.0e-5f)
+            postWeldMoved[i] = 1;
+    }
+    for (const auto& grp : exactSeamGroups) {
+        bool anyMoved = false;
+        for (uint32_t vi : grp)
+            if (vi < n && postWeldMoved[vi]) { anyMoved = true; break; }
+        if (anyMoved)
+            for (uint32_t vi : grp)
+                if (vi < n && weight[vi] > 0.0f) postWeldMoved[vi] = 1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        float len = Len(Sub(verts[i], entry[i]));
+        if (!std::isfinite(len) || (finalMaxMove > 0.0f && len > finalMaxMove))
+            return revertRepair();
+        if (!postWeldMoved[i] || bodyFloor <= 0.0f) continue;
+        Vec3 target = verts[i];
+        if (BVHCollideVertex(body, target, bodyFloor)) {
+            verts[i] = target;
+            ++stats.bodyFloored;
+        }
+        len = Len(Sub(verts[i], entry[i]));
+        if (!std::isfinite(len) || (finalMaxMove > 0.0f && len > finalMaxMove))
+            return revertRepair();
+    }
+
+    // A tangential remesh must not invert/collapse a face or penetrate the body.
+    // Fail closed: revert the complete pass instead of patching an invalid local state.
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        if (weight[t[0]] <= 0.0f && weight[t[1]] <= 0.0f && weight[t[2]] <= 0.0f)
+            continue;
+        Vec3 before = Cross(Sub(entry[t[1]], entry[t[0]]),
+                            Sub(entry[t[2]], entry[t[0]]));
+        Vec3 after = Cross(Sub(verts[t[1]], verts[t[0]]),
+                           Sub(verts[t[2]], verts[t[0]]));
+        float beforeArea2 = Len(before);
+        float afterArea2 = Len(after);
+        float orientation = (beforeArea2 > 1.0e-9f && afterArea2 > 1.0e-9f)
+            ? Dot(before, after) / (beforeArea2 * afterArea2)
+            : -1.0f;
+        if (!std::isfinite(afterArea2) || afterArea2 <= 1.0e-9f ||
+            (beforeArea2 > 1.0e-9f && afterArea2 < 0.25f * beforeArea2) ||
+            orientation <= 0.5f)
+            return revertRepair();
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0f) continue;
+        float gap = 0.0f;
+        float len = Len(Sub(verts[i], entry[i]));
+        if (len > 1.0e-5f && BVHSignedGap(body, verts[i], gap, nullptr) &&
+            gap < std::max(0.0f, bodyFloor - 1.0e-3f))
+            return revertRepair();
+        stats.maxMove = std::max(stats.maxMove, len);
+        if (len > 1.0e-5f) ++stats.movedVerts;
+    }
+    return stats.movedVerts;
+}
+
 struct BodyColumnPoint {
     uint16_t idx = 0;
     float z = 0.0f;
@@ -4518,9 +5722,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                  // straps, rigid accessories). These push THIS outer piece away
                                  // from already-solved lower layers, instead of pulling cloth inward.
                                  const std::vector<OuterCollider>* innerColliders,
-                                 // Receives this mesh's final solved positions, for the caller to
-                                 // cache as an outerBVH source for later-solved inner meshes.
+                                 // Receives the final visual positions used by metrics/export.
                                  std::vector<Vec3>* outSolvedVerts,
+                                 // Optional collision-only proxy for downstream layers. Visual
+                                 // metrics/export always use outSolvedVerts.
+                                 std::vector<Vec3>* outColliderVerts,
                                  TargetDataDiffs& outDiff,
                                  StaticSolveStats& stats) {
     stats = StaticSolveStats{};
@@ -4542,7 +5748,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // true tight fitted garment (Blacksmith pencil skirt) even after both solve down
     // the fitted path - notably the cleft-bridge PLUMB GUARD, which is right to
     // hold a tight skirt plumb but wrong to inflate a loose coat's natural taper.
-    const bool wasOriginallyLoose = (NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED);
+    const int originalPreset = NormalizePreset(preset);
+    const bool wasOriginallyLoose = (originalPreset == DRAPE_PRESET_LOOSE_DRAPED);
     {
         bool mergeLoose = EnvToggle("DRAPE_MERGE_LOOSE", true);
 #if !defined(DRAPE_HARNESS_BUILD)
@@ -4578,6 +5785,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     size_t n = std::min<size_t>(baseVerts.size(), 0x10000);
     std::vector<Vec3> supportVerts(n);
     std::vector<Vec3> finalVerts(n);
+    std::vector<Vec3> downstreamColliderProxy;
     std::vector<float> follow(n, 1.0f);
     std::vector<float> invMass(n, 0.0f);
     std::vector<float> anchorWeight(n, 0.0f);
@@ -9320,15 +10528,29 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     }
 
     auto applyOuterAccessoryInnerClearance = [&](const char* stageLabel) -> int {
+        bool layerOrderPreserve = EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_off.flag"))
+            layerOrderPreserve = false;
+        else if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_on.flag"))
+            layerOrderPreserve = true;
+#endif
         const bool structuredOuter =
             normPreset == DRAPE_PRESET_BELT ||
             normPreset == DRAPE_PRESET_RIGID_ACCESSORY ||
             normPreset == DRAPE_PRESET_FLEXIBLE_ARMOR ||
             normPreset == DRAPE_PRESET_RIGID_ARMOR;
-        const bool intermediateOuterLayer =
+        const bool legacyIntermediateOuterLayer =
             (normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
              normPreset == DRAPE_PRESET_FITTED_CLOTH) &&
             outerColliders && !outerColliders->empty();
+        const bool authoredOutermostCloth =
+            layerOrderPreserve && shapeName == "vampire_robes_alt" &&
+            (normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
+             normPreset == DRAPE_PRESET_FITTED_CLOTH) &&
+            innerColliders && !innerColliders->empty();
+        const bool intermediateOuterLayer =
+            legacyIntermediateOuterLayer || authoredOutermostCloth;
         if (!(structuredOuter || intermediateOuterLayer) ||
             !innerColliders || innerColliders->empty() ||
             !bodyBVH || !bodyBVH->valid ||
@@ -9344,6 +10566,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kVertexStep = intermediateOuterLayer ? 0.075f : ((normPreset == DRAPE_PRESET_BELT) ? 0.105f : 0.075f);
         const float kFaceStep = intermediateOuterLayer ? 0.050f : ((normPreset == DRAPE_PRESET_BELT) ? 0.075f : 0.055f);
         const int kRounds = intermediateOuterLayer ? 5 : ((normPreset == DRAPE_PRESET_BELT) ? 8 : 5);
+        const float kAuthoredMaxMove = ClampRange(
+            EnvFloat("DRAPE_LAYER_ORDER_MAX_MOVE", 0.10f), 0.05f, 1.50f);
+        const std::vector<Vec3> clearanceEntry = authoredOutermostCloth
+            ? finalVerts : std::vector<Vec3>{};
 
         auto innerMarginFor = [&](int innerPreset) -> float {
             if (intermediateOuterLayer) {
@@ -9471,14 +10697,31 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
             if (roundAdjusted == 0) break;
             totalAdjusted += roundAdjusted;
+            if (authoredOutermostCloth) {
+                for (size_t i = 0; i < n; ++i) {
+                    Vec3 delta = Sub(finalVerts[i], clearanceEntry[i]);
+                    float len = Len(delta);
+                    if (len > kAuthoredMaxMove && len > 1.0e-6f)
+                        finalVerts[i] = Add(clearanceEntry[i],
+                            Scale(delta, kAuthoredMaxMove / len));
+                }
+            }
             applyFinalSupportCap(14, nullptr);
+            if (authoredOutermostCloth) {
+                // The Vampire mesh is a stack of plate islands. Local-normal
+                // expansion must restore authored twin/proximity invariants in
+                // every round, not after a large split has accumulated.
+                applyFinalExactSeamWeld(nullptr, /*force=*/true);
+                applyFinalProxSeamCap(6, nullptr);
+            }
         }
 
         if (totalAdjusted > 0)
             HLog("detour: outer-layer-inner-clearance shape='%s' stage='%s' adjusted=%d faceSamples=%d inners=%zu mode='%s'",
                  shapeName.c_str(), stageLabel ? stageLabel : "",
                  totalAdjusted, totalFaceSamples, innerColliders->size(),
-                 intermediateOuterLayer ? "intermediate" : "structured");
+                 authoredOutermostCloth ? "authored-outer" :
+                     (intermediateOuterLayer ? "intermediate" : "structured"));
         return totalAdjusted;
     };
 
@@ -11177,9 +12420,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // cap at the end. DRAPE_CLEFT_BRIDGE=0 or cleft_bridge_off.flag disables.
     {
         bool cleftOn = EnvToggle("DRAPE_CLEFT_BRIDGE", true);
+        bool cleftTrueRear = EnvToggle("DRAPE_CLEFT_TRUE_REAR", false);
 #if !defined(DRAPE_HARNESS_BUILD)
         if (fs::exists("E:/SkyrimDev/Drape/cleft_bridge_off.flag"))
             cleftOn = false;
+        if (fs::exists("E:/SkyrimDev/Drape/cleft_true_rear_on.flag"))
+            cleftTrueRear = true;
+        if (fs::exists("E:/SkyrimDev/Drape/cleft_true_rear_off.flag"))
+            cleftTrueRear = false;
 #endif
         if (cleftOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
             params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
@@ -11195,10 +12443,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // and enforce the cloth chord ONLY there. Pleats, hem and belly are
             // excluded by construction.
             const float kCBDip    = EnvFloat("DRAPE_CLEFT_BODY_DIP", 1.2f);   // min body V depth
-            // 1) Body ROI per 2u z-slice: back verts (y>0), lateral profile
-            //    maxY(x); shoulders = the outermost summits on each side, dip =
-            //    min(shoulderY) - centerY. Slices with dip >= kCBDip define the
-            //    cleft; record shoulder x positions per slice.
+            // 1) Body ROI per 2u z-slice. Historical code treated +Y as the
+            //    back, but Skyrim's torso is front=+Y / rear=-Y. Keep that old
+            //    branch byte-stable by default; DRAPE_CLEFT_TRUE_REAR flips the
+            //    profile to positive rear depth (centerY - y) for live A/B.
             struct CleftSlice { float xl, xr; };
             std::unordered_map<int, CleftSlice> roi;   // key = (int)floor(z/2)
             {
@@ -11212,14 +12460,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     bzMax = std::max(bzMax, bv.z);
                 }
                 const float zCeil = bzMin + 0.55f * (bzMax - bzMin);
-                std::unordered_map<int, std::unordered_map<int, float>> prof; // zslice -> xbin -> maxY
+                std::unordered_map<int, std::unordered_map<int, float>> prof; // zslice -> xbin -> max outward depth
                 for (const Vec3& bv : bodyBVH->verts) {
-                    if (bv.y <= 0.0f || bv.z > zCeil) continue;
+                    float outward = bv.y;
+                    if (cleftTrueRear) {
+                        outward = g_refCenterY - bv.y;
+                        if (outward <= 0.0f || bv.z > zCeil) continue;
+                    } else {
+                        if (bv.y <= 0.0f || bv.z > zCeil) continue;
+                    }
                     int zs = (int)std::floor(bv.z * 0.5f);
                     int xb = (int)std::floor(bv.x);
                     auto& row = prof[zs];
                     auto it = row.find(xb);
-                    if (it == row.end() || bv.y > it->second) row[xb] = bv.y;
+                    if (it == row.end() || outward > it->second) row[xb] = outward;
                 }
                 for (auto& kv : prof) {
                     auto& row = kv.second;
@@ -11328,7 +12582,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 int nReg = 0;
                 for (size_t i = 0; i < n; ++i) {
                     const Vec3& p = baseVerts[i];
-                    if (p.y <= 1.5f) continue;                 // back panel only
+                    if (cleftTrueRear) {
+                        if (g_refCenterY - p.y <= 1.5f) continue; // actual rear panel only
+                    } else {
+                        if (p.y <= 1.5f) continue;                // legacy +Y branch
+                    }
                     if (p.z < rzLo || p.z > rzHi) continue;
                     if (p.x < rxLo || p.x > rxHi) continue;
                     if (i < invMass.size() && invMass[i] <= 0.0f) continue;
@@ -11387,14 +12645,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     //     going DOWN from the outermost target, the outward level (y,
                     //     back panel) may only fall by kPlumbTaper per z - it can't
                     //     tuck in with the body. This is what turns the offset
-                    //     surface into a pencil-skirt fall. FRONT (y<0) is left alone.
+                    //     surface into a pencil-skirt fall. In true-rear mode the
+                    //     outward coordinate is centerY-y, not raw +Y.
                     // PLUMB GUARD applies only to TRUE fitted garments (tight pencil
                     // skirt). An originally-LOOSE coat merged onto the fitted path
                     // (yarl, vampire) naturally tapers/hangs away from the body - the
                     // plumb would inflate its butt ~2u past its own hand-sculpt
                     // (measured: yarl butt surfDist vs sculpt 1.87 -> 1.95). The
                     // bridge guard already stops the loose garments from tucking; they
-                    // do not need the plumb. FRONT (y<0) is always left alone.
+                    // do not need the plumb.
                     if (!wasOriginallyLoose)
                     {
                         const float kPlumbTaper  = EnvFloat("DRAPE_CLEFT_PLUMB", 0.04f);
@@ -11405,11 +12664,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         // plumbing from it inflates the whole column ~2u past the coat's
                         // own hand-sculpt. Gate per column: skip if the apex vert is not
                         // tight (measured apex-gap: Blacksmith med 2.3 / yarl med 4.3 -
-                        // a clean split at 3.5). FRONT (y<0) is always left alone.
+                        // a clean split at 3.5).
                         const float kPlumbApexGap = EnvFloat("DRAPE_CLEFT_PLUMB_APEXGAP", 3.25f);
+                        auto outwardY = [&](float y) {
+                            return cleftTrueRear ? (g_refCenterY - y) : y;
+                        };
+                        auto fromOutwardY = [&](float q) {
+                            return cleftTrueRear ? (g_refCenterY - q) : q;
+                        };
                         std::unordered_map<int, std::vector<uint32_t>> col;
                         for (size_t i = 0; i < n; ++i)
-                            if (fw[i] > 0.0f && finalVerts[i].y > 0.0f)
+                            if (fw[i] > 0.0f &&
+                                (cleftTrueRear
+                                    ? (g_refCenterY - finalVerts[i].y > 0.0f)
+                                    : (finalVerts[i].y > 0.0f)))
                                 col[(int)std::floor(baseVerts[i].x / 1.5f)].push_back((uint32_t)i);
                         for (auto& kv : col) {
                             auto& c = kv.second;
@@ -11428,12 +12696,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             // Reference the plumb from the CLOTH apex (the actual butt
                             // bulge at the region top), not the feathered-low target
                             // apex - the sculpt's lower fall hangs from the real butt.
-                            float maxY = finalVerts[c[0]].y, atZ = finalVerts[c[0]].z;
+                            float maxY = outwardY(finalVerts[c[0]].y);
+                            float atZ = finalVerts[c[0]].z;
                             for (size_t k = 1; k < c.size(); ++k) {
                                 uint32_t vi = c[k];
                                 float floorY = maxY - kPlumbTaper * (atZ - finalVerts[vi].z);
-                                if (tgt[vi].y < floorY) tgt[vi].y = floorY;
-                                float ref = std::max(finalVerts[vi].y, tgt[vi].y);
+                                float tgtOut = outwardY(tgt[vi].y);
+                                if (tgtOut < floorY) {
+                                    tgtOut = floorY;
+                                    tgt[vi].y = fromOutwardY(tgtOut);
+                                }
+                                float ref = std::max(outwardY(finalVerts[vi].y), tgtOut);
                                 if (ref > maxY) { maxY = ref; atZ = finalVerts[vi].z; }
                             }
                         }
@@ -11468,8 +12741,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     weldExact();
                     int zMin = 9999, zMax = -9999;
                     for (auto& kv : roi) { zMin = std::min(zMin, kv.first * 2); zMax = std::max(zMax, kv.first * 2 + 2); }
-                    HLog("detour: cleft-bridge shape='%s' roiSlices=%zu z=[%d..%d] moved=%d smooth=%d clear=%.2f maxDisp=%.2f maxGap=%.2f",
-                         shapeName.c_str(), roi.size(), zMin, zMax, lifted, ranIters, kClear, kMaxDisp, kMaxGap);
+                    HLog("detour: cleft-bridge shape='%s' trueRear=%d roiSlices=%zu z=[%d..%d] moved=%d smooth=%d clear=%.2f maxDisp=%.2f maxGap=%.2f",
+                         shapeName.c_str(), (int)cleftTrueRear, roi.size(), zMin, zMax,
+                         lifted, ranIters, kClear, kMaxDisp, kMaxGap);
                 }
             }
         }
@@ -12293,6 +13567,110 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }   // aGapP75 >= smTight (not skin-tight-like)
     }
 
+    // Topology/tension plumb. The lambda is invoked after the true-final body
+    // floor, so tpEntry is the exact golden baseline. Exact seam twins are
+    // collapsed after the pass. It remains default OFF; env/file switches are
+    // explicit experiments and retain instant rollback.
+    bool tensionPlumbOn = EnvToggle("DRAPE_TENSION_PLUMB", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/tension_plumb_off.flag"))
+        tensionPlumbOn = false;
+    else if (fs::exists("E:/SkyrimDev/Drape/tension_plumb_on.flag"))
+        tensionPlumbOn = true;
+#endif
+    auto applyTensionPlumb = [&]() {
+        if (!(tensionPlumbOn &&
+              originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
+              params.enabled && bodyBVH && bodyBVH->valid && !useEdges.empty()))
+            return;
+        const float tpSeedGap = EnvFloat("DRAPE_TENSION_PLUMB_SEED_GAP", 0.50f);
+        const float tpStrength = EnvFloat("DRAPE_TENSION_PLUMB_STRENGTH", 0.99f);
+        const float tpReturn = EnvFloat("DRAPE_TENSION_PLUMB_RETURN", 0.0f);
+        const int tpRounds = std::max(1, (int)EnvFloat("DRAPE_TENSION_PLUMB_ROUNDS", 10.0f));
+        const bool tpTensionGate = EnvToggle("DRAPE_TENSION_PLUMB_TENSION_GATE", true);
+        const float tpMinSpanFrac = EnvFloat("DRAPE_TENSION_PLUMB_MIN_SPAN_FRAC", 0.35f);
+        const float tpMaxMove = std::max(0.0f,
+            EnvFloat("DRAPE_TENSION_PLUMB_MAX_MOVE", 1.25f));
+        // Broad by design: outer layers own their covered under-mesh well beyond
+        // the final 2u collision band. 10u preserves the Blacksmith belt baseline
+        // while leaving the uncovered under-butt panel available to the pass.
+        const float tpCoverDist = EnvFloat("DRAPE_TENSION_PLUMB_COVER", 10.0f);
+        const std::vector<Vec3> tpEntry = finalVerts;
+        std::vector<uint8_t> tpProtected(n, 0);
+        if (outerColliders && tpCoverDist > 0.0f) {
+            const float cover2 = tpCoverDist * tpCoverDist;
+            for (size_t i = 0; i < n; ++i) {
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Current().valid) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, gn{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (BVHClosestPoint(oc.Current(), finalVerts[i], cp, gn, d2) && d2 < cover2) {
+                        tpProtected[i] = 1;
+                        break;
+                    }
+                }
+            }
+            // A protected member freezes the complete exact-seam group so the
+            // layer guard cannot reopen a coincident twin ladder.
+            for (const auto& grp : exactSeamGroups) {
+                bool any = false;
+                for (uint32_t vi : grp) if (vi < n && tpProtected[vi]) { any = true; break; }
+                if (any) for (uint32_t vi : grp) if (vi < n) tpProtected[vi] = 1;
+            }
+        }
+        float drapeMinZ = 1.0e30f, drapeMaxZ = -1.0e30f;
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+            drapeMinZ = std::min(drapeMinZ, finalVerts[i].z);
+            drapeMaxZ = std::max(drapeMaxZ, finalVerts[i].z);
+        }
+        float refSpan = std::max(1.0f, g_refMaxZ - g_refMinZ);
+        float drapeSpanFrac = drapeMaxZ > drapeMinZ
+            ? (drapeMaxZ - drapeMinZ) / refSpan
+            : 0.0f;
+        if (drapeSpanFrac < tpMinSpanFrac) return;
+
+        int tpMoved = ApplyTensionSeededGraphPlumb(
+            finalVerts, drapeEl, useEdges, *bodyBVH,
+            tpSeedGap, tpStrength, tpReturn, tpRounds, tpTensionGate);
+        if (tpMoved > 0) {
+            downstreamColliderProxy = tpEntry;
+            for (size_t i = 0; i < n; ++i) {
+                if (tpProtected[i]) {
+                    finalVerts[i] = tpEntry[i];
+                    continue;
+                }
+                Vec3 delta = Sub(finalVerts[i], tpEntry[i]);
+                float len = Len(delta);
+                if (tpMaxMove > 0.0f && len > tpMaxMove)
+                    finalVerts[i] = Add(tpEntry[i], Scale(delta, tpMaxMove / len));
+            }
+            for (const auto& grp : exactSeamGroups) {
+                if (grp.size() < 2) continue;
+                bool protectedGroup = false;
+                for (uint32_t vi : grp)
+                    if (vi < n && tpProtected[vi]) { protectedGroup = true; break; }
+                if (protectedGroup) continue;
+                Vec3 avg{0.0f, 0.0f, 0.0f};
+                int cnt = 0;
+                for (uint32_t vi : grp) {
+                    if (vi >= n) continue;
+                    avg = Add(avg, finalVerts[vi]);
+                    ++cnt;
+                }
+                if (cnt < 2) continue;
+                avg = Scale(avg, 1.0f / (float)cnt);
+                for (uint32_t vi : grp) if (vi < n) finalVerts[vi] = avg;
+            }
+        }
+        HLog("detour: tension-plumb shape='%s' moved=%d protected=%zu seedGap=%.2f strength=%.3f maxMove=%.2f rounds=%d tensionGate=%d spanFrac=%.3f originalLoose=%d",
+             shapeName.c_str(), tpMoved,
+             (size_t)std::count(tpProtected.begin(), tpProtected.end(), (uint8_t)1),
+             tpSeedGap, tpStrength, tpMaxMove, tpRounds, (int)tpTensionGate,
+             drapeSpanFrac,
+             (int)wasOriginallyLoose);
+    };
+
     // TRUE-final body floor (2026-07-09, the loose waistband clip). The designated
     // last-line clearance (final-body-clearance, ~:9912) is deliberately weak (one
     // round, step <= 0.25) so a vert 1.5u deep stays 1.25u deep, AND several passes
@@ -12315,6 +13693,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_FINAL_FLOOR", true)) {
         const float kFinalFloorClear = 0.06f;
         const float kCoveredDist = EnvFloat("DRAPE_FINAL_FLOOR_COVER", 2.0f);
+        bool safeTopologyFloor = EnvToggle("DRAPE_ANTICLIP_SAFE_FLOOR", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_off.flag"))
+            safeTopologyFloor = false;
+        else if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_on.flag"))
+            safeTopologyFloor = true;
+#endif
+        // First live pilot: the Vampire robe capture is the measured case where
+        // the legacy floor removes body penetration but creates new crossed
+        // panels. Keep the transactional O(movedFaces * allFaces) path scoped
+        // until the full corpus and the user's visual gate prove general use.
+        safeTopologyFloor = safeTopologyFloor &&
+            shapeName == "vampire_robes_alt" && tris && !tris->empty();
         auto floorable = [&](size_t i) -> bool {
             int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
             // Rigid plates keep their exact shape and placement (a translation was
@@ -12383,23 +13774,498 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         };
         int floored = 0;
-        for (int cycle = 0; cycle < 3; ++cycle) {
-            int moved = 0;
-            for (size_t i = 0; i < n; ++i) {
-                if (!floorable(i)) continue;
-                Vec3 target = finalVerts[i];
-                if (!BVHCollideVertex(*bodyBVH, target, kFinalFloorClear)) continue;
-                finalVerts[i] = target;
-                ++moved;
+        if (!safeTopologyFloor) {
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                int moved = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!floorable(i)) continue;
+                    Vec3 target = finalVerts[i];
+                    if (!BVHCollideVertex(*bodyBVH, target, kFinalFloorClear)) continue;
+                    finalVerts[i] = target;
+                    ++moved;
+                }
+                if (cycle == 0) floored = moved;
+                if (moved == 0) break;
+                applyFinalSupportCap(16, "final-floor-stretch-cap");
+                weldGroupsFloored();
             }
-            if (cycle == 0) floored = moved;
-            if (moved == 0) break;
-            applyFinalSupportCap(16, "final-floor-stretch-cap");
-            weldGroupsFloored();
+            if (floored > 0)
+                HLog("detour: final-body-floor shape='%s' clr=%.2f pushed=%d",
+                     shapeName.c_str(), kFinalFloorClear, floored);
+        } else {
+            const float maxStep = ClampRange(
+                EnvFloat("DRAPE_ANTICLIP_SAFE_FLOOR_STEP", 0.40f), 0.05f, 1.0f);
+            const float minAreaRatio = ClampRange(
+                EnvFloat("DRAPE_ANTICLIP_SAFE_FLOOR_AREA", 0.25f), 0.05f, 0.95f);
+            const float minNormalDot = ClampRange(
+                EnvFloat("DRAPE_ANTICLIP_SAFE_FLOOR_NORMAL", 0.20f), -0.25f, 0.95f);
+
+            std::vector<std::vector<uint32_t>> incidentTris(n);
+            for (size_t ti = 0; ti < tris->size(); ++ti) {
+                const auto& t = (*tris)[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                incidentTris[t[0]].push_back((uint32_t)ti);
+                incidentTris[t[1]].push_back((uint32_t)ti);
+                incidentTris[t[2]].push_back((uint32_t)ti);
+            }
+            std::vector<std::vector<uint32_t>> incidentEdges(n);
+            for (size_t ei = 0; ei < useEdges.size(); ++ei) {
+                const EdgeConstraint& e = useEdges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                incidentEdges[e.a].push_back((uint32_t)ei);
+                incidentEdges[e.b].push_back((uint32_t)ei);
+            }
+            std::vector<int> seamGroupOf(n, -1);
+            for (size_t gi = 0; gi < exactSeamGroups.size(); ++gi)
+                for (uint32_t vi : exactSeamGroups[gi])
+                    if (vi < n && seamGroupOf[vi] < 0) seamGroupOf[vi] = (int)gi;
+
+            int rejectedFace = 0, rejectedEdge = 0, rejectedCross = 0;
+            int acceptedUnits = 0, acceptedVerts = 0;
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                std::vector<uint8_t> processed(n, 0);
+                int movedThisCycle = 0;
+                for (size_t seed = 0; seed < n; ++seed) {
+                    if (processed[seed]) continue;
+                    std::vector<uint32_t> members;
+                    const int gi = seamGroupOf[seed];
+                    if (gi >= 0 && gi < (int)exactSeamGroups.size()) {
+                        for (uint32_t vi : exactSeamGroups[(size_t)gi])
+                            if (vi < n) members.push_back(vi);
+                    } else {
+                        members.push_back((uint32_t)seed);
+                    }
+                    if (members.empty()) continue;
+                    bool canFloorUnit = true;
+                    for (uint32_t vi : members) {
+                        processed[vi] = 1;
+                        if (!floorable(vi)) canFloorUnit = false;
+                    }
+                    if (!canFloorUnit) continue;
+
+                    Vec3 delta{0.0f, 0.0f, 0.0f};
+                    int collided = 0;
+                    for (uint32_t vi : members) {
+                        Vec3 target = finalVerts[vi];
+                        if (BVHCollideVertex(*bodyBVH, target, kFinalFloorClear)) {
+                            delta = Add(delta, Sub(target, finalVerts[vi]));
+                            ++collided;
+                        }
+                    }
+                    if (collided == 0) continue;
+                    delta = Scale(delta, 1.0f / (float)collided);
+                    float deltaLen = Len(delta);
+                    if (!std::isfinite(deltaLen) || deltaLen <= 1.0e-6f) continue;
+                    if (deltaLen > maxStep)
+                        delta = Scale(delta, maxStep / deltaLen);
+
+                    std::vector<uint32_t> affectedTris;
+                    std::vector<uint32_t> affectedEdges;
+                    std::vector<uint8_t> triMarked(tris->size(), 0);
+                    std::vector<uint8_t> edgeMarked(useEdges.size(), 0);
+                    for (uint32_t vi : members) {
+                        for (uint32_t ti : incidentTris[vi]) {
+                            if (!triMarked[ti]) {
+                                triMarked[ti] = 1;
+                                affectedTris.push_back(ti);
+                            }
+                        }
+                        for (uint32_t ei : incidentEdges[vi]) {
+                            if (!edgeMarked[ei]) {
+                                edgeMarked[ei] = 1;
+                                affectedEdges.push_back(ei);
+                            }
+                        }
+                    }
+
+                    std::vector<Vec3> beforeNormals;
+                    std::vector<float> beforeAreas;
+                    beforeNormals.reserve(affectedTris.size());
+                    beforeAreas.reserve(affectedTris.size());
+                    for (uint32_t ti : affectedTris) {
+                        const auto& t = (*tris)[ti];
+                        Vec3 normal = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                            Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                        beforeNormals.push_back(normal);
+                        beforeAreas.push_back(Len(normal));
+                    }
+                    std::vector<float> beforeEdgeRatios;
+                    beforeEdgeRatios.reserve(affectedEdges.size());
+                    for (uint32_t ei : affectedEdges) {
+                        const EdgeConstraint& e = useEdges[ei];
+                        const float rest = Len(Sub(baseVerts[e.b], baseVerts[e.a]));
+                        beforeEdgeRatios.push_back(rest > 1.0e-6f
+                            ? Len(Sub(finalVerts[e.b], finalVerts[e.a])) / rest
+                            : 1.0f);
+                    }
+
+                    std::unordered_set<uint64_t> beforeCrossings;
+                    std::unordered_set<uint64_t> testedPairs;
+                    for (uint32_t ti : affectedTris) {
+                        for (size_t tj = 0; tj < tris->size(); ++tj) {
+                            if (ti == tj) continue;
+                            const uint32_t lo = std::min(ti, (uint32_t)tj);
+                            const uint32_t hi = std::max(ti, (uint32_t)tj);
+                            const uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
+                            if (!testedPairs.insert(key).second) continue;
+                            const auto& a = (*tris)[ti];
+                            const auto& b = (*tris)[tj];
+                            if (TrianglesShareVertex(a, b)) continue;
+                            if (TrianglesCrossNonCoplanar(finalVerts, a, b))
+                                beforeCrossings.insert(key);
+                        }
+                    }
+
+                    std::vector<Vec3> oldPositions;
+                    oldPositions.reserve(members.size());
+                    for (uint32_t vi : members) oldPositions.push_back(finalVerts[vi]);
+                    bool accepted = false;
+                    float alpha = 1.0f;
+                    for (int attempt = 0; attempt < 8; ++attempt, alpha *= 0.5f) {
+                        for (size_t mi = 0; mi < members.size(); ++mi)
+                            finalVerts[members[mi]] = Add(oldPositions[mi], Scale(delta, alpha));
+
+                        bool facesOk = true;
+                        for (size_t ai = 0; ai < affectedTris.size(); ++ai) {
+                            const auto& t = (*tris)[affectedTris[ai]];
+                            Vec3 after = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                               Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                            const float beforeArea = beforeAreas[ai];
+                            const float afterArea = Len(after);
+                            const float dot = (beforeArea > 1.0e-8f && afterArea > 1.0e-8f)
+                                ? Dot(beforeNormals[ai], after) / (beforeArea * afterArea)
+                                : -1.0f;
+                            if (!std::isfinite(afterArea) ||
+                                afterArea < beforeArea * minAreaRatio ||
+                                dot < minNormalDot) {
+                                facesOk = false;
+                                break;
+                            }
+                        }
+                        if (!facesOk) {
+                            ++rejectedFace;
+                            for (size_t mi = 0; mi < members.size(); ++mi)
+                                finalVerts[members[mi]] = oldPositions[mi];
+                            continue;
+                        }
+
+                        bool edgesOk = true;
+                        for (size_t ai = 0; ai < affectedEdges.size(); ++ai) {
+                            const EdgeConstraint& e = useEdges[affectedEdges[ai]];
+                            const float rest = Len(Sub(baseVerts[e.b], baseVerts[e.a]));
+                            if (rest <= 1.0e-6f) continue;
+                            const float ratio = Len(Sub(finalVerts[e.b], finalVerts[e.a])) / rest;
+                            const float beforeRatio = beforeEdgeRatios[ai];
+                            const float minAllowed = beforeRatio < 0.25f
+                                ? beforeRatio * 0.95f : 0.25f;
+                            const float maxAllowed = std::max(4.0f, beforeRatio + 1.0e-3f);
+                            if (!std::isfinite(ratio) || ratio < minAllowed || ratio > maxAllowed) {
+                                edgesOk = false;
+                                break;
+                            }
+                        }
+                        if (!edgesOk) {
+                            ++rejectedEdge;
+                            for (size_t mi = 0; mi < members.size(); ++mi)
+                                finalVerts[members[mi]] = oldPositions[mi];
+                            continue;
+                        }
+
+                        bool crossingOk = true;
+                        testedPairs.clear();
+                        for (uint32_t ti : affectedTris) {
+                            for (size_t tj = 0; tj < tris->size(); ++tj) {
+                                if (ti == tj) continue;
+                                const uint32_t lo = std::min(ti, (uint32_t)tj);
+                                const uint32_t hi = std::max(ti, (uint32_t)tj);
+                                const uint64_t key = ((uint64_t)lo << 32) | (uint64_t)hi;
+                                if (!testedPairs.insert(key).second ||
+                                    beforeCrossings.count(key))
+                                    continue;
+                                const auto& a = (*tris)[ti];
+                                const auto& b = (*tris)[tj];
+                                if (TrianglesShareVertex(a, b)) continue;
+                                if (TrianglesCrossNonCoplanar(finalVerts, a, b)) {
+                                    crossingOk = false;
+                                    break;
+                                }
+                            }
+                            if (!crossingOk) break;
+                        }
+                        if (!crossingOk) {
+                            ++rejectedCross;
+                            for (size_t mi = 0; mi < members.size(); ++mi)
+                                finalVerts[members[mi]] = oldPositions[mi];
+                            continue;
+                        }
+
+                        accepted = true;
+                        ++acceptedUnits;
+                        acceptedVerts += (int)members.size();
+                        movedThisCycle += (int)members.size();
+                        break;
+                    }
+                    if (!accepted)
+                        for (size_t mi = 0; mi < members.size(); ++mi)
+                            finalVerts[members[mi]] = oldPositions[mi];
+                }
+                if (cycle == 0) floored = movedThisCycle;
+                if (movedThisCycle == 0) break;
+            }
+            HLog("detour: anti-clip-safe-floor shape='%s' clr=%.2f first=%d units=%d verts=%d rejectFace=%d rejectEdge=%d rejectCross=%d step=%.2f",
+                 shapeName.c_str(), kFinalFloorClear, floored, acceptedUnits,
+                 acceptedVerts, rejectedFace, rejectedEdge, rejectedCross, maxStep);
         }
-        if (floored > 0)
-            HLog("detour: final-body-floor shape='%s' clr=%.2f pushed=%d",
-                 shapeName.c_str(), kFinalFloorClear, floored);
+    }
+
+    // Actual posterior bridge (-Y).  This runs on the shipped final surface and
+    // keeps that entry mesh as the downstream collision proxy, so an opt-in
+    // visual correction cannot perturb belts/Pants solved later.
+    bool posteriorChordOn = EnvToggle("DRAPE_POSTERIOR_CHORD", false);
+    bool posteriorChordMoved = false;
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/posterior_chord_off.flag"))
+        posteriorChordOn = false;
+    else if (fs::exists("E:/SkyrimDev/Drape/posterior_chord_on.flag"))
+        posteriorChordOn = true;
+#endif
+    if (posteriorChordOn &&
+        shapeName == "BlackSmithTorso" &&
+        originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
+        params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
+        !useEdges.empty()) {
+        const std::vector<Vec3> pcEntry = finalVerts;
+        std::vector<uint8_t> pcProtected(n, 0);
+        for (size_t i = 0; i < n; ++i) {
+            if (i < invMass.size() && invMass[i] <= 0.0f) {
+                pcProtected[i] = 1;
+                continue;
+            }
+            int id = islandIdOut.empty() ? -1
+                : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+            if (id >= 0 && id < (int)islandRigidOut.size() &&
+                islandRigidOut[(size_t)id])
+                pcProtected[i] = 1;
+        }
+        const float pcCover = std::max(0.0f,
+            EnvFloat("DRAPE_POSTERIOR_CHORD_COVER", 0.75f));
+        if (outerColliders && pcCover > 0.0f) {
+            const float cover2 = pcCover * pcCover;
+            for (size_t i = 0; i < n; ++i) {
+                if (pcProtected[i]) continue;
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Current().valid) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, normal{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (BVHClosestPoint(oc.Current(), finalVerts[i], cp, normal, d2) &&
+                        d2 < cover2) {
+                        pcProtected[i] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto& grp : exactSeamGroups) {
+            bool anyProtected = false;
+            for (uint32_t vi : grp)
+                if (vi < n && pcProtected[vi]) { anyProtected = true; break; }
+            if (anyProtected)
+                for (uint32_t vi : grp) if (vi < n) pcProtected[vi] = 1;
+        }
+        PosteriorChordStats pcStats;
+        const int pcMoved = ApplyPosteriorChordBridge(
+            finalVerts, baseVerts, useEdges, *tris, *bodyBVH,
+            exactSeamGroups, &pcProtected,
+            EnvFloat("DRAPE_POSTERIOR_CHORD_ANCHOR_MIN_X", 1.50f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_ANCHOR_MAX_X", 14.0f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_ANCHOR_STEP", 0.25f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_SAG", 0.90f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_SAG_Z_START", 0.44135f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_SAG_Z_END", 0.50826f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_X_POWER", 2.0f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_BODY_DIP", 1.20f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_CLOTH_DIP", 0.15f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_DEPTH", 8.0f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_Z_LO", 0.42f),
+            // 0.6038 maps the live reference-body span to z~=74.0 and keeps
+            // the correction below BlackSmithBelt; 0.62 admitted three upper
+            // verts and measurably worsened the Torso/Belt residual.
+            EnvFloat("DRAPE_POSTERIOR_CHORD_Z_HI", 0.6038f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_MAX_MOVE", 3.30f),
+            std::max(1, (int)EnvFloat("DRAPE_POSTERIOR_CHORD_MAX_ROI", 64.0f)),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_MIN_AREA", 0.65f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_MIN_EDGE", 0.65f),
+            EnvFloat("DRAPE_POSTERIOR_CHORD_MIN_GAP", 0.06f),
+            pcStats);
+        if (pcMoved > 0) {
+            posteriorChordMoved = true;
+            if (downstreamColliderProxy.empty())
+                downstreamColliderProxy = pcEntry;
+        }
+        HLog("detour: posterior-chord shape='%s' moved=%d decisions=%d protected=%zu maxMove=%.3f minGap=%.3f reverted=%d",
+             shapeName.c_str(), pcMoved, pcStats.decisionVerts,
+             (size_t)std::count(pcProtected.begin(), pcProtected.end(), (uint8_t)1),
+             pcStats.maxMove,
+             pcStats.minMovedGap < 1.0e29f ? pcStats.minMovedGap : -1.0f,
+             (int)pcStats.reverted);
+    }
+
+    // Authored-compression/tangential repair runs after the true-final floor so
+    // its entry surface is the exact shipped baseline.  Keep it opt-in until the
+    // live visual gate; when active, downstream layers continue to collide with
+    // the baseline proxy so a sampling-quality repair cannot move Pants/belts.
+    bool tangentialRepairOn = EnvToggle("DRAPE_TANGENTIAL_REPAIR", false);
+    bool tangentialRepairMoved = false;
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/tangential_repair_off.flag"))
+        tangentialRepairOn = false;
+    else if (fs::exists("E:/SkyrimDev/Drape/tangential_repair_on.flag"))
+        tangentialRepairOn = true;
+#endif
+    if (!posteriorChordMoved && tangentialRepairOn &&
+        originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
+        params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
+        !useEdges.empty()) {
+        const std::vector<Vec3> trEntry = finalVerts;
+        std::vector<uint8_t> trProtected(n, 0);
+        // Rigid islands keep their exact solve.  Also leave cloth immediately
+        // under an outer garment untouched; the pass is visual-only and must not
+        // create a new Torso/Belt intersection near the upper feather.
+        for (size_t i = 0; i < n; ++i) {
+            int id = islandIdOut.empty() ? -1
+                : (i < islandIdOut.size() ? islandIdOut[i] : -1);
+            if (id >= 0 && id < (int)islandRigidOut.size() &&
+                islandRigidOut[(size_t)id])
+                trProtected[i] = 1;
+        }
+        const float trCover = std::max(0.0f,
+            EnvFloat("DRAPE_TANGENTIAL_COVER", 2.0f));
+        if (outerColliders && trCover > 0.0f) {
+            const float cover2 = trCover * trCover;
+            for (size_t i = 0; i < n; ++i) {
+                for (const OuterCollider& oc : *outerColliders) {
+                    if (!oc.Current().valid) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, gn{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (BVHClosestPoint(oc.Current(), finalVerts[i], cp, gn, d2) &&
+                        d2 < cover2) {
+                        trProtected[i] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto& grp : exactSeamGroups) {
+            bool anyProtected = false;
+            for (uint32_t vi : grp)
+                if (vi < n && trProtected[vi]) { anyProtected = true; break; }
+            if (anyProtected)
+                for (uint32_t vi : grp) if (vi < n) trProtected[vi] = 1;
+        }
+        TangentialRepairStats trStats;
+        int trMoved = ApplyAuthoredTangentialRepair(
+            finalVerts, baseVerts, useEdges, *tris, *bodyBVH, &g_refBodyBVH,
+            exactSeamGroups,
+            &trProtected,
+            std::max(0, (int)EnvFloat("DRAPE_TANGENTIAL_MAX_ROI", 512.0f)),
+            EnvFloat("DRAPE_TANGENTIAL_BODY_DIP", 1.2f),
+            EnvFloat("DRAPE_TANGENTIAL_EDGE_FLOOR", 0.75f),
+            EnvFloat("DRAPE_TANGENTIAL_TRIGGER_FLOOR", 0.50f),
+            std::max(1, (int)EnvFloat("DRAPE_TANGENTIAL_TRIGGER_EDGES", 4.0f)),
+            std::max(0, (int)EnvFloat("DRAPE_TANGENTIAL_LAP_ROUNDS", 4.0f)),
+            EnvFloat("DRAPE_TANGENTIAL_LAP_K", 0.80f),
+            std::max(0, (int)EnvFloat("DRAPE_TANGENTIAL_FINISH_ROUNDS", 16.0f)),
+            EnvFloat("DRAPE_TANGENTIAL_BARRIER_K", 0.90f),
+            EnvFloat("DRAPE_TANGENTIAL_BARRIER_STEP", 0.35f),
+            EnvFloat("DRAPE_TANGENTIAL_LAP_STEP", 0.30f),
+            EnvFloat("DRAPE_TANGENTIAL_REPROJECT_MAX", 0.10f),
+            EnvFloat("DRAPE_TANGENTIAL_PRE_SYM_MAX_MOVE", 2.20f),
+            EnvToggle("DRAPE_TANGENTIAL_SYMMETRY", true),
+            EnvFloat("DRAPE_TANGENTIAL_SYMMETRY_PAIR_TOL", 0.40f),
+            EnvFloat("DRAPE_TANGENTIAL_SYMMETRY_BODY_RMS", 0.15f),
+            EnvFloat("DRAPE_TANGENTIAL_MAX_MOVE", 3.30f),
+            EnvFloat("DRAPE_TANGENTIAL_BODY_FLOOR", 0.10f),
+            trStats);
+        if (trMoved > 0) {
+            tangentialRepairMoved = true;
+            if (downstreamColliderProxy.empty())
+                downstreamColliderProxy = trEntry;
+        }
+        HLog("detour: tangential-repair shape='%s' moved=%d roi=%d sym=%d trigger=%d edgeVisits=%d protected=%zu body=%d bodySymRms=%.4f maxMove=%.3f z=[%.1f,%.1f] flipRevert=%d",
+             shapeName.c_str(), trMoved, trStats.roiVerts, trStats.symmetryVerts,
+             trStats.triggerEdges,
+             trStats.activeEdgeVisits,
+             (size_t)std::count(trProtected.begin(), trProtected.end(), (uint8_t)1),
+             trStats.bodyFloored, trStats.bodySymmetryRms, trStats.maxMove,
+             trStats.zLo, trStats.zHi, (int)trStats.revertedFlip);
+    }
+
+    // Run tension-plumb after the true-final floor/optional tangential repair.
+    // With its default OFF this remains a no-op; tpEntry is its own exact visual
+    // baseline and can safely serve as a downstream-only collider proxy.
+    if (!posteriorChordMoved && !tangentialRepairMoved)
+        applyTensionPlumb();
+
+    // Final degradation guard for the anti-clip pilot.  The captured Vampire
+    // failure is not merely a few body penetrations: the legacy final floor can
+    // turn panels through one another, leaving flipped or nearly zero-area
+    // triangles.  Compare against the vanilla-conformed pose, which Outfit
+    // Studio has already computed and can always serve as a safe fallback.
+    // A compound threshold is intentional: the corpus contains legitimate
+    // large panel rotations (many negative normal dots) and a few thin faces,
+    // but only the broken Vampire baseline has both failure signals together.
+    bool antiClipIntegrityGuard = EnvToggle("DRAPE_ANTICLIP_SAFE_FLOOR", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_off.flag"))
+        antiClipIntegrityGuard = false;
+    else if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_on.flag"))
+        antiClipIntegrityGuard = true;
+#endif
+    if (antiClipIntegrityGuard && shapeName == "vampire_robes_alt" &&
+        tris && !tris->empty()) {
+        std::vector<Vec3> vanillaVerts(n);
+        for (size_t i = 0; i < n; ++i)
+            vanillaVerts[i] = Add(baseVerts[i],
+                DiffAt(rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
+
+        int flippedFaces = 0;
+        int collapsedFaces = 0;
+        for (const auto& t : *tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const Vec3 vb = Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]);
+            const Vec3 vc = Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]);
+            const Vec3 sb = Sub(finalVerts[t[1]], finalVerts[t[0]]);
+            const Vec3 sc = Sub(finalVerts[t[2]], finalVerts[t[0]]);
+            const double vnx = (double)vb.y * vc.z - (double)vb.z * vc.y;
+            const double vny = (double)vb.z * vc.x - (double)vb.x * vc.z;
+            const double vnz = (double)vb.x * vc.y - (double)vb.y * vc.x;
+            const double snx = (double)sb.y * sc.z - (double)sb.z * sc.y;
+            const double sny = (double)sb.z * sc.x - (double)sb.x * sc.z;
+            const double snz = (double)sb.x * sc.y - (double)sb.y * sc.x;
+            const double vanillaAreaSq = vnx * vnx + vny * vny + vnz * vnz;
+            if (vanillaAreaSq <= 1.0e-16) continue;
+            const double solvedAreaSq = snx * snx + sny * sny + snz * snz;
+            if (vnx * snx + vny * sny + vnz * snz < 0.0) ++flippedFaces;
+            if (solvedAreaSq < 0.01 * vanillaAreaSq) ++collapsedFaces;
+        }
+
+        const int maxFlips = std::max(0,
+            (int)EnvFloat("DRAPE_ANTICLIP_MAX_FLIPS", 20.0f));
+        const int maxCollapsed = std::max(0,
+            (int)EnvFloat("DRAPE_ANTICLIP_MAX_COLLAPSED", 2.0f));
+        if (flippedFaces > maxFlips && collapsedFaces > maxCollapsed) {
+            outDiff = rawDiff;
+            stats.written = (int)outDiff.size();
+            if (outSolvedVerts) *outSolvedVerts = vanillaVerts;
+            if (outColliderVerts) *outColliderVerts = vanillaVerts;
+            HLog("detour: anti-clip-integrity FALLBACK shape='%s' flips=%d/%d collapsed=%d/%d -> vanilla",
+                 shapeName.c_str(), flippedFaces, maxFlips,
+                 collapsedFaces, maxCollapsed);
+            return true;
+        }
+        HLog("detour: anti-clip-integrity PASS shape='%s' flips=%d/%d collapsed=%d/%d",
+             shapeName.c_str(), flippedFaces, maxFlips,
+             collapsedFaces, maxCollapsed);
     }
 
     static constexpr float kWriteEps2 = 1.0e-10f;
@@ -12415,10 +14281,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             outDiff[kv.first] = kv.second;
     }
 
-    // Hand the final solved positions back so the caller can cache them as an
-    // outer-collider source for inner meshes solved later in this slider.
+    // Hand visual positions and the optional downstream-only collision proxy
+    // back separately. Metrics/export must always use finalVerts.
     if (outSolvedVerts)
         *outSolvedVerts = finalVerts;
+    if (outColliderVerts)
+        *outColliderVerts = downstreamColliderProxy.empty()
+            ? finalVerts
+            : downstreamColliderProxy;
 
     return true;
 }
@@ -12447,6 +14317,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
                                  const std::vector<OuterCollider>* outerColliders,
                                  const std::vector<OuterCollider>* innerColliders,
                                  std::vector<Vec3>* outSolvedVerts,
+                                 std::vector<Vec3>* outColliderVerts,
                                  TargetDataDiffs& outDiff,
                                  StaticSolveStats& stats) {
 #if defined(_MSC_VER)
@@ -12454,7 +14325,7 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         return ApplyStaticClothPassImpl(shapeName, sliderName, preset, baseVerts,
                                         profiles, edges, tris, bodyShell, bodyBVH,
                                         presetMask, rawDiff, outerColliders, innerColliders,
-                                        outSolvedVerts, outDiff, stats);
+                                        outSolvedVerts, outColliderVerts, outDiff, stats);
     }
     __except (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW
                   ? (_resetstkoflw(), EXCEPTION_EXECUTE_HANDLER)
@@ -12465,13 +14336,14 @@ static bool ApplyStaticClothPass(const std::string& shapeName,
         outDiff.clear();
         stats = StaticSolveStats{};
         if (outSolvedVerts) outSolvedVerts->clear();
+        if (outColliderVerts) outColliderVerts->clear();
         return false;
     }
 #else
     return ApplyStaticClothPassImpl(shapeName, sliderName, preset, baseVerts,
                                     profiles, edges, tris, bodyShell, bodyBVH,
                                     presetMask, rawDiff, outerColliders, innerColliders,
-                                    outSolvedVerts, outDiff, stats);
+                                    outSolvedVerts, outColliderVerts, outDiff, stats);
 #endif
 }
 
@@ -13046,6 +14918,7 @@ struct ReplayOutcome {
     SolverCapture capture;
     TargetDataDiffs solvedDiff;
     std::vector<Vec3> solvedVerts;
+    std::vector<Vec3> colliderVerts;
     HarnessMetrics metrics;
 };
 
@@ -13177,6 +15050,7 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                                       cap.outerColliders.empty() ? nullptr : &cap.outerColliders,
                                       cap.innerColliders.empty() ? nullptr : &cap.innerColliders,
                                       &out.solvedVerts,
+                                      &out.colliderVerts,
                                       out.solvedDiff, stats);
     if (hadPreviousBending)
         g_shapeBending[cap.shapeName] = std::move(previousBending);
@@ -13410,9 +15284,14 @@ static int ReplayCaptureDir(const fs::path& dir) {
     }
     std::unordered_map<std::string, int> dependencyCountByPath;
     dependencyCountByPath.reserve(files.size());
+    std::unordered_map<std::string, fs::path> capturePathByShape;
+    std::unordered_map<std::string, std::vector<std::string>> inferredInnersByOuter;
     for (const fs::path& f : files) {
         SolverCapture cap;
         if (ReadSolverCapture(f, cap)) {
+            capturePathByShape[cap.shapeName] = f;
+            for (const OuterCollider& oc : cap.outerColliders)
+                if (!oc.name.empty()) inferredInnersByOuter[oc.name].push_back(cap.shapeName);
             int key = (int)cap.outerColliders.size();
             // M1b rest-on: a BELT rests on the loose dress, so it must solve AFTER the
             // loose garments (support-availability). Bump it past every normal
@@ -13422,6 +15301,10 @@ static int ReplayCaptureDir(const fs::path& dir) {
                 key += 1000;
             dependencyCountByPath[f.string()] = key;
         }
+    }
+    for (auto& kv : inferredInnersByOuter) {
+        std::sort(kv.second.begin(), kv.second.end());
+        kv.second.erase(std::unique(kv.second.begin(), kv.second.end()), kv.second.end());
     }
     std::sort(files.begin(), files.end(), [&](const fs::path& a, const fs::path& b) {
         int da = INT_MAX;
@@ -13453,6 +15336,50 @@ static int ReplayCaptureDir(const fs::path& dir) {
             ++failures;
             continue;
         }
+
+        // The old captures predate serialization of general inner colliders.
+        // Reconstruct the inverse authored relation for the layer-order pilot:
+        // if Filler's capture says robes is OUTER, robes receives raw-conformed
+        // Filler as INNER before it solves. This mirrors the live collider graph
+        // and makes the feature testable without a new host capture.
+        int inferredInnerCount = 0;
+        if (EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false) &&
+            cap.shapeName == "vampire_robes_alt") {
+            std::unordered_set<std::string> existingInnerNames;
+            for (const OuterCollider& ic : cap.innerColliders)
+                existingInnerNames.insert(ic.name);
+            auto rel = inferredInnersByOuter.find(cap.shapeName);
+            if (rel != inferredInnersByOuter.end()) {
+                for (const std::string& innerName : rel->second) {
+                    if (existingInnerNames.count(innerName)) continue;
+                    auto pathIt = capturePathByShape.find(innerName);
+                    if (pathIt == capturePathByShape.end()) continue;
+                    SolverCapture innerCap;
+                    if (!ReadSolverCapture(pathIt->second, innerCap)) continue;
+                    if (innerCap.baseVerts.empty() || innerCap.baseVerts.size() > 64 ||
+                        innerCap.tris.empty())
+                        continue;
+                    std::vector<Vec3> innerVanilla(innerCap.baseVerts.size());
+                    for (size_t i = 0; i < innerCap.baseVerts.size(); ++i)
+                        innerVanilla[i] = Add(innerCap.baseVerts[i],
+                            DiffAt(innerCap.rawDiff,
+                                (uint16_t)std::min<size_t>(i, 0xFFFF)));
+                    OuterCollider ic;
+                    ic.name = innerName;
+                    ic.preset = NormalizePreset(innerCap.preset) == DRAPE_PRESET_AUTO
+                        ? DRAPE_PRESET_FITTED_CLOTH : innerCap.preset;
+                    BuildBodyBVH(innerCap.baseVerts, innerCap.tris, ic.base);
+                    BuildBodyBVH(innerVanilla, innerCap.tris, ic.current);
+                    if (!ic.Base().valid || !ic.Current().valid) continue;
+                    cap.innerColliders.push_back(std::move(ic));
+                    existingInnerNames.insert(innerName);
+                    ++inferredInnerCount;
+                }
+            }
+        }
+        if (inferredInnerCount > 0)
+            std::cout << "REPLAY_DIR_INFERRED_INNER shape=" << cap.shapeName
+                      << " addedInner=" << inferredInnerCount << "\n";
 
         int replacedOuters = 0;
         std::unordered_set<std::string> existingOuterNames;
@@ -13548,7 +15475,9 @@ static int ReplayCaptureDir(const fs::path& dir) {
             rs.preset = out.capture.preset;
             rs.baseVerts = out.capture.baseVerts;
             rs.tris = out.capture.tris;
-            rs.solvedVerts = out.solvedVerts;
+            rs.solvedVerts = out.colliderVerts.empty()
+                ? out.solvedVerts
+                : out.colliderVerts;
             solvedByName[out.capture.shapeName] = std::move(rs);
         }
     }
@@ -13591,7 +15520,8 @@ static SolverCapture MakeSelfTestCapture() {
     cap.expectedPassOk = ApplyStaticClothPass(cap.shapeName, cap.sliderName, cap.preset,
                                               cap.baseVerts, nullptr, &cap.edges, &cap.tris,
                                               nullptr, &body, cap.presetMask, cap.rawDiff,
-                                              nullptr, nullptr, &solvedVerts, solved, stats);
+                                              nullptr, nullptr, &solvedVerts, nullptr,
+                                              solved, stats);
     cap.hasExpected = true;
     cap.expectedDiff = solved;
     cap.expectedSolvedVerts = solvedVerts;
@@ -13805,13 +15735,14 @@ static const SolvedMesh* EnsureSupportSolvedLocked(
     if (!HostGetRawResultDiff(self, &supportName, &sliderName, rawDiff)) return nullptr;
 
     std::vector<Vec3> solvedVerts;
+    std::vector<Vec3> colliderVerts;
     TargetDataDiffs solvedDiff;
     StaticSolveStats stats;
     bool ok = ApplyStaticClothPass(supportName, sliderName, preset, vIt->second,
                                    profiles, edges, tris, bodyShell, bodyBVH,
                                    presetMask, rawDiff,
                                    /*outerColliders*/ nullptr, /*innerColliders*/ nullptr,
-                                   &solvedVerts, solvedDiff, stats);
+                                   &solvedVerts, &colliderVerts, solvedDiff, stats);
     if (!ok || solvedVerts.empty()) return nullptr;
     SolveValidation val = ValidateSolveOutput(vIt->second, solvedVerts, edges);
     if (!val.ok) {
@@ -13821,7 +15752,9 @@ static const SolvedMesh* EnsureSupportSolvedLocked(
     }
 
     SolvedMesh sm;
-    sm.verts = std::move(solvedVerts);
+    sm.verts = colliderVerts.empty()
+        ? std::move(solvedVerts)
+        : std::move(colliderVerts);
     { auto lit = g_shapeLayer.find(supportName);
       sm.layer = lit != g_shapeLayer.end() ? lit->second : 0; }
     if (tris && !tris->empty()) BuildBodyBVH(sm.verts, *tris, sm.bvh);
@@ -13983,8 +15916,6 @@ static void Detour_GenResult(
                 for (const std::string& other : colliderNames) {
                     if (other == *shapeName) continue;
                     int otherPreset = PresetForShapeLocked(other);
-                    if (NormalizePreset(otherPreset) == DRAPE_PRESET_AUTO)
-                        continue;                                  // skip body meshes
                     int otherRank = 0;
                     { auto it = g_shapeLayer.find(other); if (it != g_shapeLayer.end()) otherRank = it->second; }
                     bool pairSaysOtherOuter = ShapeCoversInnerLocked(other, *shapeName);
@@ -14017,6 +15948,39 @@ static void Detour_GenResult(
                     if (otherVertsIt == g_shapeVerts.end()) continue;
                     const auto& obase = otherVertsIt->second;
                     if (obase.empty() || obase.size() > 0xFFFF) continue;
+
+                    // Authored-order preservation pilot: an AUTO mesh is normally
+                    // skipped here because AUTO includes reference/body parts. But a
+                    // tiny explicitly-covered garment such as Vampire's 34-vert
+                    // Filler is valid INNER collision geometry. Admit only that
+                    // narrow class, never AUTO as an outer, and filter body-part
+                    // names. This lets the authored outer robe make room instead of
+                    // forcing the Filler through the body.
+                    bool layerOrderPreserve = EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+                    if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_off.flag"))
+                        layerOrderPreserve = false;
+                    else if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_on.flag"))
+                        layerOrderPreserve = true;
+#endif
+                    std::string otherLower = lower(other);
+                    bool bodyPartName = false;
+                    static const char* kColliderBodyPartTokens[] = {
+                        "vagina", "anus", "penis", "scrotum", "clitoris",
+                        "labia", "areola", "nipple",
+                    };
+                    for (const char* tok : kColliderBodyPartTokens)
+                        if (NameHas(otherLower, tok)) { bodyPartName = true; break; }
+                    const bool smallAuthoredAutoInner =
+                        layerOrderPreserve && otherIsInner &&
+                        pairSaysThisOuter && !pairSaysOtherOuter &&
+                        NormalizePreset(otherPreset) == DRAPE_PRESET_AUTO &&
+                        obase.size() <= 64 && !bodyPartName;
+                    if (NormalizePreset(otherPreset) == DRAPE_PRESET_AUTO &&
+                        !smallAuthoredAutoInner)
+                        continue;                                  // skip body meshes
+                    if (smallAuthoredAutoInner)
+                        otherPreset = DRAPE_PRESET_FITTED_CLOTH;
                     auto baseBvhIt = g_shapeBaseBVH.find(other);
                     if (baseBvhIt == g_shapeBaseBVH.end() || !baseBvhIt->second.valid) continue;
 
@@ -14091,6 +16055,7 @@ static void Detour_GenResult(
             }
 
             std::vector<Vec3> solvedVerts;
+            std::vector<Vec3> colliderVerts;
             const bool captureThis = EnvFlagEnabled("DRAPE_CAPTURE");
             SolverCapture solverCapture;
             if (captureThis) {
@@ -14108,6 +16073,7 @@ static void Detour_GenResult(
                                                outerColliders.empty() ? nullptr : &outerColliders,
                                                innerColliders.empty() ? nullptr : &innerColliders,
                                                &solvedVerts,
+                                               &colliderVerts,
                                                solvedDiff, stats);
             if (captureThis)
                 MaybeWriteSolverCapture(std::move(solverCapture), passOk, solvedDiff, solvedVerts);
@@ -14136,7 +16102,9 @@ static void Detour_GenResult(
                         auto mlit = g_shapeLayer.find(*shapeName);
                         if (mlit != g_shapeLayer.end()) myLayer = mlit->second;
                         SolvedMesh sm;
-                        sm.verts = std::move(solvedVerts);
+                        sm.verts = colliderVerts.empty()
+                            ? std::move(solvedVerts)
+                            : std::move(colliderVerts);
                         sm.layer = myLayer;
                         if (tris && !tris->empty())
                             BuildBodyBVH(sm.verts, *tris, sm.bvh);

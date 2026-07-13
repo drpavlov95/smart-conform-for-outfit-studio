@@ -7,6 +7,9 @@ reference/
 reference/tmp/
 captures/
 tmp/
+__pycache__/
+*.pyc
+drape_harness_selftest.drcap
 panels_on.flag
 hbridge_on.flag
 panel_radial_in.flag
