@@ -501,3 +501,31 @@ variante persistente alcança mais baixo, mas não reproduz o perfil do sculpt c
 força suficiente sem degradar outras métricas. Próximo trabalho depende de
 localizar visualmente qual sintoma continua: fenda central, under-butt/perfil, ou
 ausência total de mudança live. Métrica escalar não decide esse ramo.
+
+## 2026-07-13 — marco 6.5: Path A (religar o PBD loose) falsificado contra os sculpts
+
+Investigação Opus, registrada aqui para o handoff (rótulos de métrica CORRETOS):
+religar o caminho LOOSE_DRAPED (`DRAPE_MERGE_LOOSE=0`) foi medido contra os
+hand-sculpts nos garments loose. Erro POR ÍNDICE (`tools/error_map.py`):
+
+| garment | MERGED | PBD loose ("verlet") |
+|---|---:|---:|
+| falmer Cloth | 2.490 | 4.42 |
+| vampire robe | 1.186 | 2.18 |
+| yarl Cloak | 2.046 | 2.10 |
+
+O PBD loose amontoa as tiras do hem do falmer (banda z<30: 8 verts, std radial
+0.28, vs sculpt 44 verts, std 4.63) — compressão lateral e ausência de
+estrutura de spread. Determinístico (SHA-idêntico), sem colapso de maxDisp.
+Decisão: NÃO religar; MERGED segue como baseline. O caminho é este spike
+(Path B). Plano: `PATH_B_SHELL_SOLVE_PLAN.md` (v2.1).
+
+## 2026-07-14 — fase 0.0: proveniência dos ground truths (S0.0a/b)
+
+Inventário completo em `fixtures/pathb/GROUND_TRUTH_CANDIDATES.md` (tracked),
+candidatos preservados em `fixtures/pathb/sculpt_candidates/`. Achado central:
+o OSD do falmer foi salvo em 2026-07-12 21:26 com conteúdo a 0.211 da nossa
+produção (contaminado por um Smart Conform salvo); o hand-sculpt verdadeiro
+sobrevive só nos snapshots OBJ de 2026-07-09 (`1b52898da8fd`, duas cópias
+byte-idênticas). Blacksmith/yarl/vampire: candidatos concordam (limpos).
+S0.0c (decisão do usuário) pendente.
