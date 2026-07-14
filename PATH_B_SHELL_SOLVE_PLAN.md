@@ -1,25 +1,51 @@
-# Path B — Static Shell Solve: plano de pesquisa e implementação
+# Path B — Static Shell Solve: plano de pesquisa e implementação (v2)
 
 Data: 2026-07-14 · Branch: `wip/path-b-shell-solve` · Autor: Opus (planejamento)
-Revisor pretendido: Codex (peer review) · Implementador pretendido: Sonnet
+v2 após peer-review do Codex (2026-07-14) — bloqueadores aceitos e verificados.
+Revisor: Codex · Implementador pretendido: Sonnet
 
 ---
 
 ## 0. O que é este documento
 
-Plano completo e auto-contido para a próxima etapa do "Path B": transformar o
-Smart Conform de um pipeline **correction-mode** (conserta o conform vanilla com
-passes heurísticos) em um **solve quase-estático de shell** onde a forma do
-tecido emerge de leis materiais + contato + gravidade. Este arquivo carrega TODO
-o contexto necessário: quem for implementar não precisa reler o histórico do
-projeto. As fases são bite-sized, com gates numéricos e regras de parada, para
-implementação por um modelo mais econômico (Sonnet) sem re-derivação.
+Plano completo e auto-contido para o "Path B": transformar o Smart Conform de
+pipeline **correction-mode** (conserta o conform vanilla com heurísticas) em um
+**solve quase-estático de shell** onde a forma do tecido emerge de leis
+materiais + contato + gravidade. Quem implementa não precisa reler o histórico.
+Fases bite-sized, gates numéricos, regras de parada.
 
-Regra de ouro herdada do projeto: **o hand-sculpt do usuário é a loss function**
-(refs em `tmp/smval/*_sculpt.obj` e datasets congelados). Métrica escalar mente;
-todo candidato é julgado por superfície-a-superfície CONTRA O SCULPT **e** por
-renders em múltiplos ângulos **e**, no final, pelo gate visual live do usuário
-(marco 6 do spike provou que métricas offline podem melhorar e o live falhar).
+**Mudanças da v2 (bloqueadores do peer-review, todos verificados no código):**
+1. H3 dividida em H3a/H3b/H3c — a alegação de "uma lei única" foi retirada; o
+   stretch do spike JÁ é igualdade bilateral (resiste compressão de aresta):
+   `tools/shell_spike.py:900` `c = length - rest`. Preflight do Codex:
+   no Blacksmith o shell defeituoso NÃO tem arestas <0.95×rest e o SCULPT TEM
+   ~90 (o sculpt faz PREGAS) ⇒ piso de compressão por aresta está **rejeitado
+   como fix do under-butt** e não deve nem ser implementado sem passar o
+   preflight da Fase 0.3.
+2. Métricas separadas e renomeadas: `tools/error_map.py` é erro **POR ÍNDICE**
+   (`norm(test-ref)` vértice a vértice), não superfície. Ambas importam
+   (índice pega clump tangencial; superfície pega forma). O runner reporta as
+   três: indexed, surface fwd (result→sculpt), surface rev (sculpt→result).
+3. Ground truth do falmer sob suspeita de contaminação (OSD modificado após o
+   snapshot, hoje ≈ MERGED — pode ter sido salvo de um resultado nosso).
+   Fase 0.0 preserva as duas versões + proveniência e o USUÁRIO decide.
+4. Fase 0 reproduzível: fixtures versionadas (não `tmp/`), manifest tracked,
+   caminhos de captura corrigidos (só nomes `git ls-files`), parser do spike
+   estendido para capturas v4 (Lemoria) — hoje aceita v1-v3
+   (`shell_spike.py:113`).
+5. Gates de integridade adicionados (faces/seams/self-intersection/pens/
+   ativação de constraint/convergência/RM_Thin/painel inclinado) e a métrica de
+   hem passa a usar **lista fixa de IDs autorais** (população por z<30 é
+   manipulável pela própria gravidade).
+6. Correções de tabela: os números `7.92°/10.82/6.41` eram do shell-base
+   experimental (não da produção MERGED) — baselines do gate C serão re-medidos
+   na Fase 0.2. A captura yarl citada era um arquivo local inexistente no
+   corpus tracked.
+
+Regra de ouro do projeto: **o hand-sculpt do usuário é a loss function**, mas
+métrica escalar mente e métrica offline melhor JÁ falhou gate visual live
+(marco 6 do spike). Todo candidato = números (3 métricas separadas) + renders
+múltiplos ângulos + gates de integridade; o veredito final é o olho do usuário.
 
 ---
 
@@ -27,291 +53,284 @@ renders em múltiplos ângulos **e**, no final, pelo gate visual live do usuári
 
 - **Drape / Smart Conform**: DLL C++ (`algo/conform_hook.cpp`, ~16k linhas) que
   hooka o Conform do OutfitStudio (BodySlide) para ajustar roupas de Skyrim a
-  morphs extremos de corpo (slider `RM_Heavy` a 100%). Será publicado como mod —
-  logo **nenhuma solução por-garment/allowlist é aceitável** (decisão explícita
-  do usuário 2026-07-13).
-- **Harness offline**: `build/algo/RelWithDebInfo/drape-harness.exe` faz replay
-  determinístico de capturas `.drcap` (roupa base, conform vanilla, corpo base E
-  morphado — topologias corpo base/morph idênticas, diff por vértice). Corpus de
-  regressão: `scripts/check_corpus.py` vs `corpus/golden/*.json` (18 shapes, 4
-  outfits). Goldens atuais casam com o binário **RelWithDebInfo** (default do
-  script).
-- **Pedido do usuário (verbatim, 2026-07-13)**: "está parecendo mais um
-  'conform all melhorado' do que um conform all com cloth simulation de
-  verdade... o tecido não respeita a gravidade". Sintomas concretos ao vivo:
-  bump atrás da coxa em roupas penduradas (falmer, vampire, lemoria, fur 1;
-  NÃO blacksmith/yarl), tecido livre "herdando" a silhueta do corpo à distância.
+  morphs extremos (`RM_Heavy`=100%). Será publicado como mod ⇒ **nada de
+  solução por-garment/allowlist** (decisão explícita do usuário, 2026-07-13).
+- **Harness offline**: `build/algo/RelWithDebInfo/drape-harness.exe`
+  (`--replay cap.drcap --result-obj --body-obj --refbody-obj`). Corpus:
+  `py -3 scripts/check_corpus.py` vs `corpus/golden/*.json` (18 shapes;
+  goldens casam com o binário **RelWithDebInfo**, o default do script).
+- **Pedido do usuário (2026-07-13)**: "está parecendo mais um 'conform all
+  melhorado' do que um conform all com cloth simulation de verdade... o tecido
+  não respeita a gravidade". Sintomas live: bump atrás da coxa em roupas
+  penduradas (falmer/vampire/lemoria/fur; NÃO blacksmith/yarl), tecido livre
+  herdando a silhueta do corpo à distância.
 
 ## 2. Evidência acumulada — o que JÁ SABEMOS (não re-derivar)
 
-### 2.1 Por que o caminho atual erra (raiz, medida)
-O caminho de produção (`Fitted Cloth`, correction-mode) parte do conform
-vanilla e usa a roupa **já conformada** como posição E métrica de repouso
-(rest lengths do vanilla: `conform_hook.cpp` ~5543; anchors para supportVerts).
-O vanilla preserva o gap autoral sobre o corpo MORPHADO ⇒ tecido livre herda o
-crescimento radial do corpo ("imprint"). Medido no falmer Cloth: na coxa o
-tecido pendura a gap ~4.2u do corpo, mas o corpo cresceu +5.29u ali, e o pano
-carrega parte disso (o bump). O sculpt do usuário, ao contrário, cai **reto**:
-perfil back-thigh (x∈[7,14]) constante ~16.5 enquanto o corpo vai 10.7→13.9.
+### 2.1 Raiz do defeito (medida)
+O caminho de produção (correction-mode) usa a roupa vanilla-conformada como
+posição E métrica de repouso (`conform_hook.cpp` ~5543) ⇒ tecido livre herda o
+crescimento radial do corpo ("imprint"). Falmer Cloth: pano pendura a gap
+~4.2u, corpo cresceu +5.29u ali. O sculpt cai RETO (~16.5 constante no perfil
+back-thigh x∈[7,14]) enquanto o corpo vai 10.7→13.9.
 
-### 2.2 Path A (religar o verlet) — FALSIFICADO 2026-07-13
-O caminho LOOSE_DRAPED ("verlet") é, na verdade, **relaxação PBD quase-estática**
-(sem momentum) com stretch, seams, proximidade, colisão e bending aproximado
-(distância entre vértices opostos, NÃO diedro assinado — `conform_hook.cpp:348`).
-Correção do peer-review do Codex aceita: não é "física crua sem estrutura"; é
-estrutura **insuficiente**:
-- stretch resiste à extensão, **compressão é grátis** (null-space conhecido);
-- "bending" por distância mistura dobra/shear, não preserva diedro autoral;
-- sem self-collision geral;
-- rest metrics do vanilla assam o imprint no repouso.
+### 2.2 Path A (religar o "verlet") — FALSIFICADO 2026-07-13
+O caminho LOOSE_DRAPED é PBD quase-estático (sem momentum) com stretch
+bilateral, seams, proximidade, colisão e bending por distância de vértices
+opostos (NÃO diedro assinado; `conform_hook.cpp:348`). Insuficiências: bending
+não-diedral mistura dobra/shear; sem self-collision; rest do vanilla assa o
+imprint. Nota: no solver de PRODUÇÃO a compressão é null-space conhecido; no
+SPIKE o stretch já é bilateral (v2 correção 1).
 
-Resultado medido (erro superfície vs sculpt, `tools/error_map.py`):
+Erro **POR ÍNDICE** vs sculpt (`error_map.py`; comparação apples-to-apples —
+é exatamente a métrica que pega clump de tiras) + superfície (medição Codex):
 
-| garment | MERGED (produção) | VERLET | veredito |
-|---|---:|---:|---|
-| falmer Cloth | **2.49** | 4.42 | verlet colapsa as tiras do hem (8 verts std 0.28 vs sculpt 44 verts std 4.63) |
-| vampire robe | **1.19** | 2.18 | idem |
-| yarl Cloak | **2.05** | 2.10 | ~empate |
-| yarl Clothes | = | = | "No Physics", nunca entra no verlet |
+| garment | MERGED indexed | VERLET indexed | MERGED surface fwd/rev |
+|---|---:|---:|---:|
+| falmer Cloth | **2.490** | 4.42 | 0.926 / 1.275 |
+| vampire robe | **1.186** | 2.18 | 0.503 / 0.555 |
+| yarl Cloak | **2.046** | 2.10 | 1.218 / 0.904 |
 
-⇒ **NÃO religar/tunar o verlet.** O merged é o melhor match atual; seu resíduo
-é o bump (visualmente saliente, numericamente pequeno: remover só o bump por
-plumb geométrico move 2.49→2.47).
+Colapso real do verlet: tiras do hem do falmer amontoam (bandas ~0.27-0.53×
+o arco base vs sculpt 0.87-1.07× — medição preflight do Codex). ⇒ **NÃO religar
+nem tunar o verlet.** MERGED é o melhor baseline atual.
 
-### 2.3 O spike do Path B JÁ EXISTE e já falsificou hipóteses
-`tools/shell_spike.py` (1612 linhas; CLI: `--inspect`, `--contact-check`,
-`--solve` + knobs) + diário `SHELL_SPIKE_LOG.md`. Estado ao fim do marco 6:
+### 2.3 O spike JÁ existe e já falsificou hipóteses (`SHELL_SPIKE_LOG.md`)
+`tools/shell_spike.py` (~1600 linhas; `--inspect/--contact-check/--solve`).
+- **Validado**: parser v1-v3 do `.drcap`; continuação do morph
+  `B(t)=B0+t(B1-B0)`; contato unilateral (broad phase determinística + closest
+  point exato); stretch XPBD bilateral; diedro assinado autoral; weld de seam
+  twins; mobilidade contínua (cutoff duro 0.20 abriu stretch 6-8x — usar a
+  transição contínua); determinismo SHA-idêntico.
+- **FALSIFICADO (marco 1)**: "contato + continuação + membrana/diedro locais
+  reproduzem o sculpt fora de contato" — FALSO. Vale só: contato+continuação
+  apaga a fenda horizontal sem ROI anatômica.
+- **FALSIFICADOS (NÃO REPETIR)**: sweeps de rest (base/uniform/pre-tension/
+  flat-panel/lowpass — melhor 0.9548 vs produção 0.7538 indexed); gravity
+  shadow (todas as variantes); energia de meridiano; graph plumb uniforme
+  (conserta Blacksmith 0.8779, REGRIDE yarl — painel abre p/ y~11.8-12 vs
+  vanilla 10-11).
+- **Marcos 4-6**: tension-seeded plumb portado ao C++
+  (`ApplyTensionSeededGraphPlumb`, `DRAPE_TENSION_PLUMB`, default OFF):
+  métricas do Blacksmith melhoram (0.7538→0.7306 indexed), **gate visual live
+  FALHOU** e foi revertido. Mecanismo de suporte-por-tração continua candidato,
+  insuficiente sozinho na porção baixa do under-butt.
+- Infra parcial existente: `build_band_circumference_constraints` /
+  `xpbd_band_circumference` (~:749/:790) — HOJE é (a) soma de arestas
+  ~horizontais INCLUINDO diagonais internas, (b) componentes topológicos SEM
+  unir seams, (c) agrupamento por Z global, (d) TETO (`arc ≤ rest`), não piso.
+  Ou seja: o descriptor NÃO é uma circunferência e precisa de redesenho
+  (Fase 1) — não basta inverter o sinal.
 
-- **Validado**: parser do `.drcap`; continuação do morph `B(t)=B0+t(B1-B0)`
-  em passos fixos; contato unilateral (broad phase determinística + closest
-  point exato); stretch XPBD; **bending por diedro assinado autoral**; weld dos
-  seam twins; mobilidade contínua (cutoff duro 0.20 da produção abriu stretch
-  6-8x — usar transição contínua); determinismo (SHA-256 idêntico em reruns).
-- **FALSIFICADO (marco 1)**: a hipótese forte — "obstáculo corporal + membrana/
-  dobra locais + continuação do morph reproduzem o sculpt no espaço sem
-  contato" — é FALSA. Confirmado apenas: contato+continuação **apaga a fenda
-  horizontal** (não copia o cofrinho) sem ROI anatômica.
-- **FALSIFICADOS (marcos 1-3, NÃO REPETIR):** sweep de rest metrics (base /
-  uniform growth / pre-tension isotrópica / flat-panel / lowpass — lowpass foi
-  o melhor shell local, 0.9548, ainda pior que produção 0.7538); gravity-shadow
-  em todas as variantes (corpo inteiro / contato exato / 1-3 anéis / falloff /
-  radial — melhor 0.9540, superinfla ou faz picos); energia de meridiano local;
-  **graph plumb uniforme** (0.8779 no Blacksmith mas REGRIDE o yarl Clothes:
-  abre o painel para y~11.8-12 vs vanilla 10-11, piora bend 7.9°→9.7°, strain,
-  worst stretch — mesma lição: parâmetro que conserta um garment quebra outro).
-- **Marcos 4-6 (tension-plumb)**: versão semeada por contato e transmitida só
-  por arestas em tração foi portada pro C++ (`ApplyTensionSeededGraphPlumb`,
-  `DRAPE_TENSION_PLUMB`, hoje default OFF). Melhorou métricas do Blacksmith
-  (0.7538→0.7306) sem regressões, **mas o gate visual live FALHOU** (usuário
-  não viu o defeito resolvido) e a promoção foi revertida. Lição dupla: (a)
-  métrica offline melhora ≠ visual resolve; (b) o mecanismo de suporte por
-  tração é promissor mas insuficiente sozinho na porção baixa do under-butt.
-- Infra parcial que JÁ EXISTE no spike e deve ser auditada antes de codar:
-  `build_band_circumference_constraints`/`xpbd_band_circumference` (linhas
-  ~749/790, knobs `--band-circumference-compliance` (default -1=off),
-  `--band-z-cell`, `--band-rest base|vanilla`) e `--gravity` — **sem matriz de
-  falsificação registrada no log** para essas famílias.
+### 2.4 Hipóteses da etapa (v2 — separadas, cada uma falsificável)
+- **H3a (modelo local assimétrico)**: teto de extensão + piso de compressão
+  COM FOLGAS INDEPENDENTES vs a igualdade bilateral atual. Só entra se passar
+  o preflight 0.3 (prior do Codex: no Blacksmith NÃO passa — o sculpt viola o
+  piso; no falmer as tiras amontoadas podem passar).
+- **H3b (suporte global de baixa frequência por bandas)**: piso de
+  circunferência/folga autoral por banda MATERIAL (descriptor redesenhado:
+  loops de superfície com seams unidos, sem diagonais, não dependente só de
+  Z global). Prior: promissor no falmer (0.27-0.53 vs 0.87-1.07); no
+  Blacksmith o piso de `arc_base` nem ativa ⇒ pode resolver falmer sem
+  explicar o under-butt — aceitável, contanto que não regrida os outros.
+- **H3c (anti-imprint)**: rest SEMPRE autoral (base) + continuação do morph +
+  corpo só como obstáculo — já parcialmente validado (fenda horizontal);
+  permanece como fundação de todos os candidatos.
+- **Under-butt do Blacksmith permanece SEM candidato comprovado** após os
+  marcos 1-6 (nem compressão, nem banda, nem plumb uniforme, nem tension-plumb
+  sozinho). O preflight 0.3 deve caracterizá-lo ANTES de propor família nova
+  (pistas: o sculpt TEM pregas — 90 arestas <0.95×rest — e sustenta o raio:
+  a resposta provável combina suporte-por-tração + permitir prega SEM perder
+  raio, não proibir compressão).
 
-### 2.4 Conclusão do peer-review (Codex, 2026-07-13) — aceita
-Path A descartado; Path B vale como **pesquisa harness-first**; diedro+gravidade
-sozinhos NÃO resolvem (já falsificado); é preciso adicionar **preservação
-global de pattern/suporte, resistência à compressão, proximidade/self-contact e
-mobilidade contínua**. Gate offline multi-garment ANTES de qualquer port a DLL.
-Estimativa honesta: 2-4 dias para candidato sério no harness; 1-2 semanas para
-integração live experimental; 2-4 semanas para universal.
+## 3. Garments-sentinela e dados (caminhos verificados por `git ls-files`)
 
-## 3. Hipótese central desta etapa (H3) e fundamentação
+Sentinelas (julgados SEMPRE juntos):
+- `corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap`
+- `corpus/falmer_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Falmer__Im_Physics___Cloth__RM_Heavy.drcap`
+- `corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap`
+  (“No Physics” é nome do projeto, não condição do solver. PENDÊNCIA de
+  preflight: uma medição 2026-07-13 achou saída byte-idêntica com
+  `DRAPE_MERGE_LOOSE=0/1` para este garment; o peer-review afirma que ele entra
+  no solve. Resolver na Fase 0.2 via HLog do caminho executado e REGISTRAR.)
 
-**H3:** Sobre o shell já validado (continuação do morph + contato unilateral +
-stretch XPBD + diedro assinado autoral + seams + mobilidade contínua + gravidade),
-adicionar **resistência à compressão in-plane** (arestas têm piso de comprimento,
-não só teto) e sua forma integrada de baixa frequência, **conservação de
-circunferência/folga autoral por banda**, é suficiente para reproduzir
-simultaneamente — em Blacksmith E falmer E yarl, sem ROI anatômica e sem tuning
-por-garment — as propriedades do sculpt no espaço sem contato:
-queda reta sob gravidade, sem imprint do corpo, tiras/hem espalhadas, under-butt
-sustentado.
+Secundários (gate final da Fase 2): vampire_robes_alt, yarl Cloak,
+Lemoria SkirtA/B (`captures/universality/lemoria_rm_heavy_v4/`, formato v4 —
+exige a extensão de parser da S0.1; se a extensão travar, adiar Lemoria para a
+Fase 3 e registrar).
 
-**Por que compressão é a lei que falta (síntese dos 3 sintomas):**
-1. *Tuck do under-butt* — abaixo do ápice o tubo de tecido só consegue "afinar"
-   se as arestas circunferenciais ENCURTAREM. Com compressão grátis (estado
-   atual do PBD), afinar é de graça e o closest-point/relaxação puxa pra dentro.
-   Com piso de compressão, o excesso vira prega/queda reta — que é o que tecido
-   real faz e o que o sculpt mostra.
-2. *Clump das tiras do falmer (o colapso real do verlet)* — as tiras se amontoam
-   porque compressão lateral é grátis. Piso de compressão + conservação de arco
-   por banda mantém a distribuição autoral.
-3. *Imprint/bump* — rest SEMPRE da roupa BASE (autoral), nunca do vanilla
-   conformado; o corpo só participa como obstáculo (já é regra do spike). O que
-   mantém o pano afastado reto abaixo do suporte é a inextensibilidade vertical
-   + gravidade + dobra; o que impede de "afinar de volta" é a compressão.
+Sculpts/referências: ver Fase 0.0 (proveniência PRIMEIRO; nada de confiar em
+`tmp/smval`/`tmp/beltlive` sem re-derivar e hashear).
 
-**Riscos conhecidos de H3 (honestidade com o marco 3):** conservação de
-circunferência com rest=base pode ser FORTE demais em painéis largos autorais
-(yarl) e criar guarda-chuva. Por isso a família entra como **desigualdade com
-folga** (piso `(1-εc)·rest`, εc varrido) e é julgada **simultaneamente** nos
-três garments-sentinela — nunca tunada num só. Se H3 falhar nesse critério, o
-plano PARA e registra (ver regras de parada), sem sweep infinito.
+## 4. Gates (valores preenchidos na Fase 0.2 pelo runner — não deste texto)
 
-## 4. Garments-sentinela, dados e alvos numéricos (gates)
-
-Sentinelas (capturas já no repo):
-- `corpus/fur_blacksmith_rm_heavy/...BlackSmithTorso__RM_Heavy.drcap` (fitted justo; alvo: cofrinho/under-butt)
-- `corpus/falmer_rm_heavy/...Cloth__RM_Heavy.drcap` (penduradas + tiras; alvo: queda reta + spread)
-- `corpus/yarl_rm_heavy/...Clothes...161653.drcap` (painel largo; alvo: NÃO regredir — sentinela anti-guarda-chuva)
-- Secundários no gate final: vampire_robes_alt, yarl Cloak, Lemoria SkirtA/B (`captures/universality/lemoria_rm_heavy_v4/`).
-
-Referências de sculpt: `tmp/smval/falmer_rm_heavy_Cloth_sculpt.obj`,
-`tmp/smval/vampire_rm_heavy_vampire_robes_alt_sculpt.obj`,
-`tmp/smval/yarl_rm_heavy_Cloak_sculpt.obj`, Blacksmith:
-`tmp/shell_spike_blacksmith/cloth_sculpt.obj`. **Atenção (housekeeping do
-peer-review): o OSD do falmer foi modificado depois do snapshot** ⇒ Fase 0
-re-extrai e CONGELA todos os sculpts com SHA-256 num manifest.
-
-Números a bater (baseline = produção MERGED atual, medidos 2026-07-13):
-
-| gate | métrica | baseline | alvo do candidato |
-|---|---|---:|---|
-| A. Blacksmith sculpt | surf mean result→sculpt / reverse | 0.7538 / 0.7868 | ≤ baseline (meta ≤0.73); hard-fail >0.80 |
-| B. falmer sculpt | surf mean vs sculpt | 2.49 | < 2.49 |
-| B2. falmer queda reta | perfil back-thigh x∈[7,14]: máx bulge local vs sculpt (~16.5 const; merged tem 19.1 em z44) | +2.6u | ≤ +0.8u |
-| B3. falmer tiras | hem z<30: nº verts na banda / std radial (sculpt 44/4.63) | 36/6.90 | ≥30 / ∈[3.5, 6.0] |
-| C. yarl Clothes | vs vanilla da captura (sem sculpt): mean bend / worst stretch / máx vanilla→result | 7.92° / 10.82 / 6.41 | sem piora >10% em qualquer; painel NÃO abre além de y~11 nas bandas z44-60 |
-| D. determinismo | SHA-256 de 2 runs idênticos | — | idêntico, sempre |
+| gate | métrica | baseline (medir em 0.2) | critério do candidato |
+|---|---|---|---|
+| A. Blacksmith | indexed + surface fwd/rev vs sculpt | produção ≈0.7538 indexed (confirmar) | ≤ baseline em indexed E surface fwd; hard-fail se indexed >0.80 |
+| B. falmer forma | indexed + surface fwd/rev vs sculpt decidido em 0.0 | MERGED ≈2.49 indexed / 0.926 surf | melhor que MERGED em indexed E surface fwd |
+| B2. falmer queda | perfil back-thigh x∈[7,14]: bulge local máx vs sculpt (~16.5) | MERGED +2.6u | ≤ +0.8u |
+| B3. falmer tiras | com IDs FIXOS de hem autoral: spread lateral std + distância média entre tiras não-adjacentes | medir | ∈ [0.75, 1.30] × sculpt |
+| C. yarl Clothes | vs vanilla da captura: mean bend / worst stretch / máx vanilla→result / abertura do painel z44-60 | medir em 0.2 (produção) | nenhuma piora >10%; painel não abre além do baseline+0.5u |
+| I. integridade | TODOS: faces invertidas=0 novas; área degenerada=0 novas; seams abertos=0; self-intersections novas=0; pens de corpo ≤ baseline; NaN=0 | medir | hard-fail |
+| D. determinismo | SHA-256 de 2 runs | — | idêntico, sempre |
 | E. corpus | check_corpus com feature OFF | verde | verde inalterado |
+| F. convergência | mesmas conclusões em morphSteps {3,6,12} × iterations {5,10,20} | — | ranking de candidatos estável |
+| G. contração | RM_Thin (ou slider de contração disponível) + 1 painel inclinado (falmer Strap ou lemoria) | medir | sem inversão/colapso; gates I e D valem |
 
 ## 5. Fases e tarefas (bite-sized, para Sonnet)
 
-**Regras gerais de engenharia (valem para TODAS as tarefas):**
-- Branch `wip/path-b-shell-solve`; commits pequenos por marco, mensagem em EN,
-  rodando os gates da tarefa antes de commitar. NUNCA tocar `master`.
-- Fases 0-2 são **somente** `tools/` + `tmp/pathb/` (gitignored): proibido
-  editar `algo/conform_hook.cpp` ou goldens.
-- Todo resultado: número + render (`tools/render_shell_diagnostics.py` com body
-  + sculpt + candidato; ângulos left E back no mínimo) + SHA de determinismo.
-- Saídas em `tmp/pathb/<garment>/...`; atualizar `SHELL_SPIKE_LOG.md` a cada
-  marco (o diário é parte do produto).
-- Se um gate falhar 2 tentativas de ajuste honesto: PARAR a tarefa, registrar
-  no log, marcar a hipótese específica como falsificada e seguir o plano (ou
-  parar o plano, se for gate de parada). NÃO fazer sweep por-garment.
+**Regras gerais**: branch `wip/path-b-shell-solve`; Fases 0-2 tocam SÓ
+`tools/`, `fixtures/pathb/` e `tmp/pathb/`; proibido editar
+`algo/conform_hook.cpp` e goldens; commits pequenos por marco com gates da
+tarefa rodados; atualizar `SHELL_SPIKE_LOG.md` a cada marco; se um gate falhar
+2 tentativas honestas: parar a tarefa, registrar como falsificado, seguir o
+plano. NÃO fazer sweep por-garment. Saídas de execução em `tmp/pathb/`;
+fixtures e manifests em `fixtures/pathb/` (TRACKED).
 
-### FASE 0 — Fundações e baseline congelado (½ dia)
-- **S0.1 Congelar datasets**: para cada sentinela+secundário, exportar via
-  harness (`--replay <cap> --result-obj ... --body-obj ... --refbody-obj ...`)
-  base/vanilla/corpo-base/corpo-morph/produção-atual; re-extrair sculpts do OSD
-  (`tools/osd_extract.py` — NÃO usar caches de `tmp/smval` sem re-gerar;
-  verificar contagem de verts == captura); gravar tudo + SHA-256 em
-  `tmp/pathb/MANIFEST.txt`. Gate: contagens batem; 2 exports = mesmo SHA.
-- **S0.2 Métricas do plano**: criar `tools/pathb_metrics.py` que imprime UMA
-  linha por garment com: surf mean/p95 (ambas direções, reusar lógica do
-  error_map), perfil back-thigh (máx bulge local vs sculpt), hem-spread
-  (nº verts/std na banda z<30), mean bend vs autoral, worst stretch, SHA do OBJ.
-  Determinístico. Gate: rodar no baseline MERGED e reproduzir (±0.01) os
-  números da tabela da seção 4.
-- **S0.3 Runner da matriz**: criar `tools/pathb_gate.py` que roda shell_spike
-  em N capturas com um preset de knobs e emite a tabela markdown do scoreboard
-  (uma linha por garment × candidato). Gate: reproduz o candidato "marco 2"
-  do log (graph-plumb 0.4614 no Blacksmith → 0.8779±0.001).
+### FASE 0.0 — Proveniência do ground truth (BLOQUEIA tudo; ½ dia)
+- **S0.0a**: inventariar TODAS as versões de sculpt existentes por garment
+  (`tmp/smval/*_sculpt.obj`, `tmp/beltlive/*sculpt*.obj`,
+  `tmp/shell_spike_blacksmith/cloth_sculpt.obj`, OSDs atuais via
+  `tools/osd_extract.py`): para cada uma, SHA-256, data, origem provável, e
+  distância indexed até (a) o MERGED atual e (b) as outras versões. NÃO
+  sobrescrever nada.
+- **S0.0b**: relatório curto por garment: "candidato X (velho) difere do OSD
+  atual por N; OSD atual está a M do MERGED (suspeita de contaminação se
+  M≈0)". Blacksmith e falmer primeiro.
+- **S0.0c — DECISÃO DO USUÁRIO**: apresentar o relatório e ele aponta qual
+  versão é o hand-sculpt verdadeiro por garment. Registrar a escolha + SHA em
+  `fixtures/pathb/GROUND_TRUTH.md`. **Gate B fica bloqueado até esta decisão.**
 
-### FASE 1 — Famílias de constraint novas no spike (1-1.5 dia)
-- **S1.1 AUDITORIA (antes de codar)**: ler `build_band_circumference_constraints`
-  + `xpbd_band_circumference` (shell_spike.py ~749/790) e documentar no log o
-  que fazem hoje (igualdade? desigualdade? por componente?). Se já forem
-  desigualdade-com-folga utilizável, S1.3 vira só exposição de knobs.
-- **S1.2 Compressão in-plane (piso de aresta)**: no loop XPBD, adicionar
-  constraint bilateral inferior: `len ≥ (1-εc)·rest_base`, compliance própria
-  (`--compression-compliance`, default off), εc knob (`--compression-slack`,
-  default 0.05). Aplicar no MESMO loop (Gauss-Seidel/Jacobi consistente com o
-  existente), ordem fixa. Gate: determinismo; com εc=0.05 no falmer, hem-spread
-  std sobe vs shell-base (direção certa) sem worst-stretch explodir (>1.3×
-  baseline da variante).
-- **S1.3 Circunferência por banda como DESIGUALDADE com folga**: piso
-  `arc ≥ (1-εb)·arc_base` por banda-z por componente (usar/estender o código
-  auditado em S1.1; `--band-floor-slack`, default off). SEM teto novo (teto é
-  o stretch normal). Gate: determinismo; no Blacksmith, bandas sob o ápice não
-  encurtam >εb (relatório da métrica), sem inflar yarl (gate C não piora).
-- **S1.4 Proximidade/self-contact mínimo (opcional, só se S1.2 deixar tiras
-  coladas)**: repulsão de pares não-adjacentes < r_min reusando a broad phase
-  existente. Flag própria, default off. Gate: determinismo + custo <2× tempo.
+### FASE 0.1 — Fixtures reproduzíveis (½ dia)
+- **S0.1a**: criar `fixtures/pathb/` (tracked) com: os sculpts escolhidos
+  (arquivos pequenos, OBJ), `MANIFEST.md` com — caminho+SHA de cada capture,
+  OSD/DataName+SHA, proveniência do sculpt, commit da ferramenta, comando
+  integral de export, SHA dos OBJs derivados. Derivados grandes (base/vanilla/
+  corpos exportados do harness) ficam em `tmp/pathb/` mas com SHA registrado
+  no manifest para verificação.
+- **S0.1b**: estender o parser do spike para aceitar capturas v4 lendo o
+  prefixo v3 (v4 é append-only; `UNIVERSALITY_HANDOFF.md`). Gate: `--inspect`
+  numa captura Lemoria v4 valida contagens; numa v3 continua byte-igual ao
+  comportamento atual (rodar `--inspect` no Blacksmith antes/depois e
+  comparar a saída).
+- **S0.1c**: congelar a LISTA DE IDs de hem/tiras do falmer (e Blacksmith) a
+  partir da roupa BASE autoral (seleção geométrica documentada, ex.: verts de
+  boundary com z autoral < limiar por componente), gravada no manifest.
+  Gate: determinística (2 runs = mesma lista).
 
-### FASE 2 — Matriz de falsificação de H3 (1-1.5 dia) ← COMEÇA O VEREDITO
-- **S2.1 Matriz principal** (via pathb_gate.py, SEMPRE nos 3 sentinelas):
-  {shell-base} × {+compressão} × {+banda} × {+ambas} × εc∈{0.03,0.05,0.10} ×
-  εb∈{0.05,0.10} × gravity∈{0, leve}, morph-steps=6, iterations=10. Rest
-  SEMPRE base. Proibido: shadow, plumb uniforme, rest sweeps (§2.3).
-- **S2.2 Leitura**: para cada célula, scoreboard + renders left/back dos 3.
-  Candidato vencedor = passa gates A+B+B2+B3+C+D com UM conjunto de knobs.
-- **S2.3 Se houver vencedor**: rodar nos secundários (vampire, cloak, lemoria
-  SkirtA/B) e registrar; 2 runs SHA-idênticos; escrever "marco 7" no log com
-  comando reproduzível.
-- **REGRA DE PARADA DA FASE 2**: se nenhuma célula passa A+B2+C juntos
-  (Blacksmith não piora / falmer cai reto / yarl não abre), H3 está
-  falsificada. Escrever o marco negativo no log (números + renders), commitar,
-  e PARAR — a decisão do próximo passo volta ao usuário/Opus. NÃO improvisar
-  famílias novas fora deste plano.
+### FASE 0.2 — Métricas separadas + baseline real (½-1 dia)
+- **S0.2a**: `tools/pathb_metrics.py` — por (garment, OBJ): indexed mean/p95;
+  surface fwd/rev mean/p95 (closest-point-em-triângulo, reusar a máquina do
+  spike; NUNCA rotular indexed de "surface"); perfil back-thigh; hem por IDs
+  fixos (spread std + distância entre tiras não-adjacentes); integridade
+  (faces invertidas vs base, área degenerada, seams abertos via
+  exactSeamGroups, self-intersections não-adjacentes via broad phase, pens de
+  corpo, NaN); SHA do OBJ. Uma linha-resumo por OBJ + bloco detalhado.
+- **S0.2b**: `tools/pathb_gate.py` — roda a matriz (N capturas × preset de
+  knobs), chama o metrics, emite scoreboard markdown; grava comando+SHAs.
+- **S0.2c**: medir os BASELINES reais: produção MERGED atual e, para
+  contexto, o shell-base do spike, nos 3 sentinelas + secundários. Preencher a
+  tabela da seção 4 num commit ("fase 0.2: baselines"). Gate de sanidade:
+  Blacksmith produção indexed ≈0.7538±0.01; reproduzir o marco 2 do log
+  (graph-plumb 0.4614 → 0.8779±0.001).
+- **S0.2d**: resolver a pendência do yarl Clothes (caminho de solve executado,
+  via HLog `%TEMP%\drape_debug.log` com `DRAPE_MERGE_LOOSE=0/1`) e registrar.
+
+### FASE 0.3 — Preflight de necessidade (o coração da v2; ½ dia)
+Para cada família candidata (H3a piso-compressão-aresta; H3b piso-banda;
+tension-seeded support marco-4; e qualquer nova), medir NOS DADOS (defeito
+atual + sculpt escolhido + shell-base):
+1. o resultado DEFEITUOSO viola a constraint? (se não: ela não conserta nada)
+2. o SCULPT satisfaz a constraint? (se não: ela IMPEDE o alvo)
+3. existe margem mensurável entre os dois? (tamanho do sinal)
+Registrar a tabela verdade por garment×família no log ("marco 7: preflight").
+Priors já medidos pelo Codex a confirmar: Blacksmith×H3a = REPROVA (sculpt tem
+90 arestas <0.95×rest; defeito tem 0); falmer×H3b = aprova (0.27-0.53 vs
+0.87-1.07). **Saída da fase: lista fechada de famílias a implementar, com
+justificativa numérica. Só o que passar entra na Fase 1.**
+
+### FASE 1 — Implementação das famílias aprovadas (1-1.5 dia)
+- **S1.1 (se H3b aprovar)**: redesenhar o descriptor de banda: loops de
+  superfície por componente-com-seams-unidos, SEM diagonais internas, eixo por
+  "down" autoral do componente (não Z global — capas/mangas/bandoliers),
+  piso-com-folga `arc ≥ (1-εb)·arc_base`. Testes de invariância obrigatórios:
+  duplicação de seam, diagonais invertidas, subdivisão (construir 3 variantes
+  sintéticas pequenas e verificar que o descriptor não muda além de ε).
+- **S1.2 (se H3a aprovar em algum garment)**: separar o stretch em teto/piso
+  com folgas independentes (`--stretch-ceiling-slack`, `--compression-slack`),
+  mantendo o modo igualdade como default para A/B.
+- **S1.3 (se preflight apontar)**: revisitar tension-seeded support DENTRO do
+  loop XPBD do spike (não como projeção final) — o marco 4-6 indica que ele
+  ajuda mas precisa conviver com as outras constraints, não vir depois.
+- **S1.4 (opcional)**: self-proximity mínimo para tiras (repulsão de pares
+  não-adjacentes < r_min via broad phase), flag própria, default off.
+- Todos: contador de ATIVAÇÃO + residual por família por run (sai no metrics);
+  determinismo; ordem fixa.
+
+### FASE 2 — Matriz de falsificação (1-1.5 dia) ← VEREDITO
+- **S2.1**: matriz nos 3 sentinelas: {famílias aprovadas, isoladas e
+  combinadas} × folgas {2-3 valores por família} × gravity {0, leve};
+  morph-steps=6, iterations=10; rest SEMPRE base. Proibido: shadow, plumb
+  uniforme, rest sweeps.
+- **S2.2**: scoreboard + renders (left E back) por célula; vencedor = passa
+  A+B+B2+B3+C+I+D com UM conjunto de knobs.
+- **S2.3**: vencedor roda gates F (convergência) e G (RM_Thin + inclinado) +
+  secundários; 2 runs SHA-idênticos; "marco 8" no log com comando.
+- **PARADA**: sem célula que passe A+B2+C+I juntos ⇒ registrar marco negativo
+  (números+renders), commitar e PARAR — decisão volta ao usuário/Opus. NÃO
+  improvisar famílias fora do preflight.
 
 ### FASE 3 — Port C++ isolado (1-2 dias; SÓ com Fase 2 verde)
-- **S3.1** Criar `algo/static_shell_solver.h/.cpp` (novo, isolado): dados de
-  entrada explícitos (base cloth, corpo base+diff, edges/hinges/seams/mobilidade),
-  o loop XPBD com as famílias vencedoras, saída de verts. `conform_hook.cpp`
-  ganha SÓ: gate `DRAPE_SHELL_SOLVE` (env; default OFF) + flag live
-  `shell_solve_on.flag` + chamada que substitui o resultado do caminho atual
-  pelo do solver para presets Fitted/merged-Loose. Zero mudanças com flag OFF.
-- **S3.2** Paridade Python↔C++: mesmo garment, mesmos knobs → diferença média
-  <0.05u e mesmos gates passando (não exigir bit-igualdade entre linguagens;
-  exigir bit-igualdade entre 2 runs C++).
-- **S3.3** Gates de release do harness: corpus OFF=verde intocado; com ON,
-  medir os 18 shapes e registrar (sem promover golden); determinismo; tempo
-  por shape ≤ ~5s (temos 3.9s de precedente aceito no anticlip).
-- **S3.4** Deploy A/B: build RelWithDebInfo, verificar deploy automático nas
-  duas pastas (SHA idênticos das 3 cópias), flag OFF por default. Commit + push.
+- **S3.1**: `algo/static_shell_solver.h/.cpp` novo e isolado; em
+  `conform_hook.cpp` SÓ: gate `DRAPE_SHELL_SOLVE` (default OFF) + flag live
+  `shell_solve_on.flag` + chamada substituindo o resultado para presets
+  Fitted/merged-Loose. Zero mudanças com flag OFF (corpus prova).
+- **S3.2**: paridade Python↔C++ (mesmo garment/knobs: diferença média <0.05u,
+  mesmos gates; bit-igualdade exigida ENTRE runs C++, não entre linguagens).
+- **S3.3**: corpus OFF=verde intocado; ON: medir os 18 shapes e REGISTRAR (sem
+  promover golden); tempo por shape ≤ ~5s (precedente aceito: 3.9s).
+- **S3.4**: build RelWithDebInfo; verificar deploy nas 2 pastas (SHA idêntico
+  das 3 cópias); flag OFF; commit + push.
 
-### FASE 4 — Gate visual live (usuário) e decisão de promoção
-- Usuário liga `shell_solve_on.flag`, reconforma sentinelas + secundários no
-  OutfitStudio (REINICIAR o OS antes: a DLL carrega no launch) e julga: queda
-  com gravidade, sem bump, sem clump, cofrinho ok, nada regrediu. Só depois
-  disso se discute default ON, remoção de passes redundantes (cleft-bridge,
-  plumb-guard etc.) — cada remoção com corpus + A/B próprios, NUNCA em bloco.
+### FASE 4 — Gate visual live (usuário) e promoção
+Usuário liga `shell_solve_on.flag`, REINICIA o OutfitStudio (DLL carrega no
+launch), reconforma sentinelas+secundários e julga. Só depois: default ON e
+remoção de passes redundantes — um por vez, cada um com corpus + A/B próprios.
 
-## 6. Armadilhas conhecidas (lidas antes de cada fase; custaram dias)
+## 6. Armadilhas conhecidas (ler antes de cada fase)
+1. `check_corpus.py` default RelWithDebInfo = goldens atuais; drift impossível
+   ⇒ `git stash` e checar HEAD antes de crer/`--update`.
+2. DLL carrega no LAUNCH do OS; flags `.flag` são lidos por conform.
+3. Renders matplotlib enganam em features sutis; usar os perfis numéricos E
+   múltiplos ângulos; o olho do usuário é o juiz final.
+4. `error_map.py` = INDEXED. Nunca chamar de surface. `score_sculpt.py` lê
+   caches velhos — não usar sem re-gerar.
+5. OSD pode ter sido salvo DE um resultado nosso ⇒ proveniência antes de
+   confiar em qualquer "sculpt" (Fase 0.0; vale para o futuro também).
+6. Seam twins: weldar `exactSeamGroups` por iteração; tears invisíveis a
+   métricas de stretch (detector: `tmp/beltlive/twincheck.py`).
+7. Cutoff de mobilidade 0.20 duro ⇒ stretch 6-8x; usar transição contínua.
+8. Vampire tem placas internas autorais: pens "profundas" podem ser placa
+   escondida (12/13 no caso medido) — julgar por superfície visível.
+9. O stretch do spike é IGUALDADE BILATERAL (`:900`) — não assumir compressão
+   livre no spike; essa suposição custou a H3 da v1.
+10. PowerShell 5.1 sem `&&`; heredocs Python via Bash tool (`py -3 -`).
 
-1. `check_corpus.py` default = **RelWithDebInfo** e os goldens atuais são
-   RelWithDebInfo (rebaked 2026-07-13). Se um dia o drift parecer impossível:
-   `git stash` e checar HEAD antes de acreditar/`--update`.
-2. A DLL carrega no LAUNCH do OutfitStudio: teste live exige reiniciar o OS;
-   flags `.flag` são lidos por conform (não exigem restart).
-3. Renders matplotlib low-poly ENGANAM em features sutis (me enganaram 3× no
-   bump): usar os perfis numéricos de `pathb_metrics.py` + múltiplos ângulos, e
-   tratar o olho do usuário como juiz final.
-4. `score_sculpt.py` lê caches velhos de `tmp/smval` — não usar sem re-gerar.
-5. Seam twins: qualquer pass posicional deve weldar `exactSeamGroups` por
-   iteração (spike já faz; manter no C++). Tears de twins são invisíveis a
-   métricas de stretch (detector manual: `tmp/beltlive/twincheck.py`).
-6. Cutoff de mobilidade 0.20 duro → stretch 6-8x em arestas na fronteira; usar
-   a transição contínua do spike.
-7. Yarl Clothes é "No Physics" e preset FITTED nato para o solver — continua
-   entrando no shell solve pelo preset merged; é sentinela, não exceção.
-8. Vampire tem placas internas autorais: penetração de vértice "profunda" pode
-   ser placa escondida (12/13 no caso medido) — julgar por superfície visível.
-9. PowerShell 5.1: sem `&&`; heredocs Python via Bash tool com `py -3 -`.
+## 7. Housekeeping incluído
+- Fase 0.0/0.1 cobrem: sculpt falmer (duas versões preservadas), fixtures
+  tracked, manifest completo, parser v4.
+- Registrar a investigação Path A no `SHELL_SPIKE_LOG.md` ("marco 6.5") — 10
+  linhas com a tabela §2.2 (indexed + surface, rotuladas corretamente).
+- `UNIVERSALITY_HANDOFF.md` tem hash antigo de DLL — fora de escopo; anotado.
 
-## 7. Housekeeping pendente (peer-review), incluído na Fase 0
-- Congelar sculpt do falmer (OSD mudou pós-snapshot) — S0.1.
-- Commitar/pushar esta branch com este plano (primeiro commit da branch).
-- Registrar a investigação Path A no diário (`SHELL_SPIKE_LOG.md` "marco 6.5:
-  verlet falsificado contra sculpts" com a tabela §2.2) — 10 linhas, S0.1.
-- `UNIVERSALITY_HANDOFF.md` menciona hash antigo de DLL; NÃO atualizar agora
-  (fora do escopo desta branch; anotar apenas).
-
-## 8. Referências rápidas
-- Solver PBD atual (loose path): `algo/conform_hook.cpp:9019` região; bending
-  por distância: `:348`; merge Loose→Fitted: `:7695`; rest do vanilla: `:5543`.
-- Spike: `tools/shell_spike.py` (CLI linhas ~1525-1568); diário:
-  `SHELL_SPIKE_LOG.md`; render: `tools/render_shell_diagnostics.py`.
-- Harness: `--replay --result-obj --body-obj --refbody-obj`; corpus:
-  `py -3 scripts/check_corpus.py`.
-- Falsificação Path A + números: memória do projeto
-  (`project-verlet-regresses-sculpt`) e §2.2 deste plano.
-- Peer-review do Codex (2026-07-13): verlet=PBD com estrutura insuficiente;
-  spike já cobre parte do Path B; dihedral sozinho não basta; gate offline
-  multi-garment antes de port; estimativas 2-4d/1-2sem/2-4sem.
+## 8. Referências
+- Spike: `tools/shell_spike.py` (stretch bilateral `:886-900`; bandas
+  `:749/:790`; parser v1-v3 `:113`; CLI `~:1525-1568`). Diário:
+  `SHELL_SPIKE_LOG.md` (marcos 1-6). Render:
+  `tools/render_shell_diagnostics.py`.
+- Produção: bending por distância `algo/conform_hook.cpp:348`; merge
+  Loose→Fitted `:7695`; rest do vanilla `~:5543`; tension-plumb
+  `ApplyTensionSeededGraphPlumb` (`DRAPE_TENSION_PLUMB`, OFF).
+- Falsificação Path A: memória `project-verlet-regresses-sculpt` + §2.2.
+- Peer-reviews do Codex: 2026-07-13 (arquitetura) e 2026-07-14 (v1 deste
+  plano — bloqueadores incorporados nesta v2).
