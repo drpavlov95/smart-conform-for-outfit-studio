@@ -1,0 +1,33 @@
+# pathb hem IDs | rule=boundary&authored-z<=zmin+0.2*range
+# source=tmp/pathb/ds_falmer_cloth/cloth_base.obj sha256_12=ddae1069d2ed
+# verts=752 boundary=298 zrange=[15.515,74.557] zcut=27.323 selected=30
+75
+78
+79
+80
+81
+92
+93
+94
+166
+167
+168
+169
+181
+182
+183
+261
+262
+263
+264
+265
+276
+277
+278
+349
+350
+352
+353
+365
+366
+367

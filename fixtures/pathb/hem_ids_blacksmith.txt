@@ -1,0 +1,21 @@
+# pathb hem IDs | rule=boundary&authored-z<=zmin+0.2*range
+# source=tmp/shell_spike_blacksmith/cloth_base.obj sha256_12=3a71a704936d
+# verts=2316 boundary=631 zrange=[7.379,113.362] zcut=28.576 selected=18
+218
+220
+221
+223
+227
+229
+406
+408
+410
+425
+427
+429
+1482
+1491
+1571
+1669
+1670
+2299
