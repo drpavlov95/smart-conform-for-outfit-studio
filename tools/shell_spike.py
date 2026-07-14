@@ -114,7 +114,12 @@ def read_capture_front(path: Path) -> CaptureFront:
     """Read capture fields through rawDiff; later collider payload is unnecessary."""
     r = BinReader(path)
     magic, version = r.unpack("II")
-    if magic != 0x43505244 or not 1 <= version <= 3:
+    # v4 (publication-aware, 2026-07-13) only adds fields AFTER the prefix this
+    # reader consumes: the C++ ReadSolverCapture gates version>=3 innerColliders
+    # and version>=4 publication state, both serialized after rawDiff. The
+    # prefix through rawDiff is byte-identical across v3/v4, so accepting v4
+    # here is safe (verified against conform_hook.cpp ReadSolverCapture).
+    if magic != 0x43505244 or not 1 <= version <= 4:
         raise ValueError(f"unsupported capture magic/version: {magic:#x}/{version}")
 
     shape_name = r.string()
