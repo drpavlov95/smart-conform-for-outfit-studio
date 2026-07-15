@@ -676,3 +676,37 @@ na DISTRIBUIÇÃO dentro da banda, não no arco) e com o marco 1.
 measurement-only da DISTRIBUIÇÃO por banda** — centro, largura e quantis
 direcionais da seção — para caracterizar o que de fato difere ANTES de
 implementar qualquer constraint nova. NÃO implementar constraint sem isso.
+
+## 2026-07-14 — S0.3d: distribuição por banda (measurement-only) — RESULTADO UNIVERSAL
+
+`tools/pathb_band_distribution.py` decompõe a diferença sculpt-vs-defeito por
+banda material (iso-linha validada) em: centro da seção (translação), largura
+(escala) e raios direcionais normalizados (forma, após remover centro+escala).
+
+| garment | shape_rms | w_ratio | dCenter (máx) | componente dominante |
+|---|---|---|---:|---|
+| blacksmith | 0.028–0.070 | 0.97–1.08 | 1.23 (s=0.38-0.50 = under-butt) | perp 0.84 + axial 1.13 |
+| yarl_clothes | 0.003–0.069 | 0.99–1.01 | 1.45 (s=0.50-0.62) | axial 1.09/-1.39 |
+| yarl_cloak | 0.016–0.249 | 0.70–1.02 | 4.52 (s=0.15-0.50) | **axial 3.3–4.4** |
+
+**ACHADO UNIVERSAL: a FORMA da seção já está certa.** Depois de remover centro e
+escala, os raios direcionais do sculpt ≈ os do defeito (shape_rms ≤0.07 em quase
+tudo). A diferença é quase inteiramente **ONDE a seção fica** (translação) +
+escala secundária. O tecido tem a seção transversal correta no lugar errado.
+
+Isso fecha a busca por leis materiais: nem compressão (H3a), nem arco (H3b), nem
+anchors/contato (H3c) — e agora sabemos porquê: **nenhuma delas controla a
+POSIÇÃO da seção**. A informação que falta é a TRAJETÓRIA DO CENTRO da seção por
+banda, com duas componentes:
+- **axial** (quão longe o pano desce ao longo do eixo) — grande, dominante no
+  cloak (3.3-4.4u): o sculpt pendura MUITO mais pra baixo e mais estreito
+  (w_ratio 0.70-0.96). É literalmente "não respeita a gravidade", medido;
+- **perpendicular** (onde a seção fica no plano) — até 1.7 no cloak, 0.84 no
+  under-butt do blacksmith: "pendura a prumo vs segue o corpo".
+
+**Consequência experimental imediata:** a GRAVIDADE nunca foi testada de fato
+(`--gravity` default 0.0; todos os marcos anteriores rodaram com g=0). A
+componente axial agora MOTIVA testá-la — não como palpite, mas como a variável
+que a medição aponta. Próximo: sweep de gravidade normalizada por continuação
+(g_step = G_total/morph_steps) nos 3 sentinelas, medindo se o gap axial fecha
+SEM abrir os outros gates.
