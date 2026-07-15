@@ -710,3 +710,55 @@ componente axial agora MOTIVA testá-la — não como palpite, mas como a variá
 que a medição aponta. Próximo: sweep de gravidade normalizada por continuação
 (g_step = G_total/morph_steps) nos 3 sentinelas, medindo se o gap axial fecha
 SEM abrir os outros gates.
+
+## 2026-07-14 — gravidade testada de verdade: REJEITADA (e o que isso significa)
+
+Sweep normalizado (`g_step = G_total/morph_steps`, protocolo v2.1), rest=base,
+6 steps, 10 iters, 3 sentinelas. indexed vs sculpt na REGIÃO LIVRE:
+
+| garment | G=0 | G=0.5 | G=1.0 | G=2.0 |
+|---|---:|---:|---:|---:|
+| blacksmith | 1.8195 | 1.8178 | 1.8870 | 2.1746 |
+| yarl_clothes | 2.4851 | 2.4793 | 2.5378 | 2.8156 |
+| yarl_cloak | 2.6419 | 2.6490 | 2.6563 | 2.6717 |
+
+**REJEITADA.** No cloak — que tem o MAIOR gap axial (3.3-4.4u) e onde a
+gravidade deveria ser decisiva — ela piora MONOTONICAMENTE. Nos outros dois,
+G=0.5 melhora 0.005 (ruído) e G≥1 piora. A componente axial identificada em
+S0.3d NÃO é o pano caindo por gravidade.
+
+**CAVEAT honesto:** a gravidade do spike é crua — `x[:,2] -= g*inv_mass` uma vez
+por morph step, e as constraints (stretch/bend/contato) relaxam em seguida. Não
+é equilíbrio quase-estático de energia (potencial gravitacional vs membrana/
+dobra); com stretch quase-inextensível e anchors no topo, o pano não "cai": a
+gravidade só injeta um viés que o stretch desfaz, e mais gravidade = mais
+distorção. Portanto o que está rejeitado é ESTA gravidade, não gravidade em
+princípio. Um equilíbrio energético de verdade é uma mudança de solver, não um
+knob.
+
+### Estado do preflight (Fase 0.3 COMPLETA) — todas as alavancas propostas caíram
+
+| hipótese | veredito | por quê (medido) |
+|---|---|---|
+| H3a piso de compressão | REJEITADA | o sculpt faz PREGAS: tem mais arestas <0.95×rest que o defeito |
+| H3b piso/teto de arco | REJEITADA | arco por banda do sculpt ≈ do defeito; nada colapsa |
+| H3c anchors/soft/contato | SEM ALAVANCA | nenhum fator domina o erro da região livre (8 células) |
+| gravidade (crua) | REJEITADA | piora monotonicamente no garment de maior gap axial |
+
+E **S0.3d explica todas de uma vez**: a FORMA da seção já está correta
+(shape_rms ≤0.07); a diferença é a POSIÇÃO da seção (translação axial +
+perpendicular). Nenhuma das leis testadas controla posição de seção.
+
+**Encruzilhada estratégica (decisão do usuário/Codex):** a única família que
+ataca posição-de-seção é suporte/plumb (marco 4), que melhorou métrica e FALHOU
+o gate visual (marco 6). Agora temos o alvo exato (dC_perp e dC_axis por banda),
+mas mirar posição diretamente é alvo POSICIONAL — exatamente o que o Path B
+queria substituir. As opções honestas:
+(a) equilíbrio energético de verdade (gravidade como energia, não deslocamento) —
+    mudança de solver, ainda dentro da física;
+(b) suporte/plumb mirado pela caracterização S0.3d — funciona, mas é heurística
+    posicional (o que já temos na produção);
+(c) aceitar que o sculpt pode não ser fisicamente reproduzível pelo modelo atual
+    e reavaliar o alvo.
+NÃO implementar nada antes dessa decisão — a regra do plano é não inventar
+família fora do preflight.
