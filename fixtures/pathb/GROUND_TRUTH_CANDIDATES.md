@@ -60,14 +60,15 @@ As distâncias indexed→PROD medidas aqui reproduzem os baselines conhecidos:
 blacksmith 1.5441, falmer 2.4897, vampire 1.1858, cloak 2.0463 — sanidade do
 pipeline de medição ✓.
 
-## S0.0c — DECISÃO DO USUÁRIO (pendente)
+## S0.0c — DECISÃO (registrada 2026-07-14)
 
-1. **falmer_cloth**: confirmar o sculpt ANTIGO `1b52898da8fd` (2026-07-09) como
-   ground truth? (recomendado; o OSD atual é resultado nosso, não sculpt)
-2. **blacksmith / yarl_clothes / yarl_cloak / vampire**: confirmar os
-   candidatos únicos (todos concordam entre si) como ground truth?
-3. (Opcional, futuro) Se quiser re-esculpir o falmer algum dia, o novo OSD
-   substitui a escolha — mas registre a data pra proveniência.
+- **falmer_cloth**: **BENCHED** por decisão do usuário — não usar em nenhum
+  gate/teste até re-esculpir (ground truth contaminado). Fixtures preservadas
+  para quando voltar. yarl Cloak assume o papel de sentinela de gravidade.
+- **blacksmith / yarl_clothes / yarl_cloak / vampire**: ground truths LIMPOS
+  (todos os candidatos concordam dentro de 1e-4). Auto-resolvidos com o
+  candidato representativo (menor mtime / snapshot congelado) — o usuário pode
+  sobrepor se quiser. Escolhas em `MANIFEST.md`.
 
-Após a decisão: S0.1a copia os escolhidos para `fixtures/pathb/` como
-`<garment>__GROUND_TRUTH.obj` e grava o `MANIFEST.md`.
+S0.1a: sculpts escolhidos copiados como `<garment>__GROUND_TRUTH.obj` e
+registrados em `fixtures/pathb/MANIFEST.md`.

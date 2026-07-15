@@ -144,16 +144,23 @@ nem tunar o verlet.** MERGED é o melhor baseline atual.
   (Fase 1) — não basta inverter o sinal.
 
 ### 2.4 Hipóteses da etapa (v2 — separadas, cada uma falsificável)
+NOTA (2026-07-14): os priors do Codex medidos NO FALMER estão EM ESPERA — o
+falmer foi benchado (ground truth contaminado). Reconfirmar cada prior nos
+sentinelas LIMPOS atuais (Blacksmith, yarl Clothes, yarl Cloak) no preflight
+0.3 antes de tratar como fato.
 - **H3a (modelo local assimétrico)**: teto de extensão + piso de compressão
   COM FOLGAS INDEPENDENTES vs a igualdade bilateral atual. Só entra se passar
   o preflight 0.3 (prior do Codex: no Blacksmith NÃO passa — o sculpt viola o
-  piso; no falmer as tiras amontoadas podem passar).
+  piso, tem ~90 arestas <0.95×rest; o caso "tiras amontoadas" perdeu o garment
+  de teste com o falmer benchado — reavaliar se algum sentinela limpo o exibe).
 - **H3b (suporte global de baixa frequência por bandas)**: piso de
   circunferência/folga autoral por banda MATERIAL (descriptor redesenhado:
   loops de superfície com seams unidos, sem diagonais, não dependente só de
-  Z global). Prior: promissor no falmer (0.27-0.53 vs 0.87-1.07); no
-  Blacksmith o piso de `arc_base` nem ativa ⇒ pode resolver falmer sem
-  explicar o under-butt — aceitável, contanto que não regrida os outros.
+  Z global). Prior "promissor" era do falmer (benchado) ⇒ EM ESPERA; o
+  descriptor S0.3a deve ser exercitado no yarl Cloak (gravidade/hang limpo) e
+  no Blacksmith. No Blacksmith o piso de `arc_base` pode nem ativar ⇒ H3b pode
+  ajudar um garment sem explicar o under-butt — aceitável se não regride os
+  outros.
 - **H3c (anti-imprint)**: rest SEMPRE autoral (base) + continuação do morph +
   corpo só como obstáculo — já parcialmente validado (fenda horizontal);
   permanece como fundação de todos os candidatos.
@@ -166,31 +173,43 @@ nem tunar o verlet.** MERGED é o melhor baseline atual.
 
 ## 3. Garments-sentinela e dados (caminhos verificados por `git ls-files`)
 
-Sentinelas (julgados SEMPRE juntos):
-- `corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap`
-- `corpus/falmer_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Falmer__Im_Physics___Cloth__RM_Heavy.drcap`
-- `corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap`
+**FALMER BENCHED (decisão do usuário 2026-07-14):** o ground truth do falmer
+Cloth está contaminado (S0.0a: o OSD foi salvo sobre um resultado nosso) ⇒ NÃO
+usar o falmer em nenhum gate/teste até re-esculpir. As fixtures dele
+(`fixtures/pathb/sculpt_candidates/falmer_cloth__sculpt_2026-07-09__1b52898da8fd.obj`
+e `hem_ids_falmer_cloth.txt`) ficam prontas para quando voltar. O teste de
+**tiras/hem (gate B3) fica ADIADO** — nenhum garment tattered tem ground truth
+limpo agora; re-adicionar o falmer (ou outro tattered re-esculpido) reabre B3.
+
+Sentinelas ATUAIS (julgados SEMPRE juntos; todos com ground truth limpo — S0.0a):
+- **Blacksmith** (fitted justo; alvo: cofrinho/under-butt)
+  `corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap`
+- **yarl Clothes** (painel largo; sentinela ANTI-GUARDA-CHUVA — não regredir)
+  `corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap`
   (“No Physics” é nome do projeto, não condição do solver. PENDÊNCIA de
   preflight: uma medição 2026-07-13 achou saída byte-idêntica com
   `DRAPE_MERGE_LOOSE=0/1` para este garment; o peer-review afirma que ele entra
   no solve. Resolver na Fase 0.2 via HLog do caminho executado e REGISTRAR.)
+- **yarl Cloak** (loose, pendura das costas; sentinela de GRAVIDADE/anti-imprint,
+  promovido no lugar do falmer)
+  `corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap`
 
-Secundários (gate final da Fase 2): vampire_robes_alt, yarl Cloak,
+Secundários (gate final da Fase 2): vampire_robes_alt,
 Lemoria SkirtA/B (`captures/universality/lemoria_rm_heavy_v4/`, formato v4 —
-exige a extensão de parser da S0.1; se a extensão travar, adiar Lemoria para a
-Fase 3 e registrar).
+parser estendido em S0.1b ✓).
 
-Sculpts/referências: ver Fase 0.0 (proveniência PRIMEIRO; nada de confiar em
-`tmp/smval`/`tmp/beltlive` sem re-derivar e hashear).
+Sculpts/referências: escolhidos em S0.0
+(`fixtures/pathb/GROUND_TRUTH_CANDIDATES.md`); nada de confiar em
+`tmp/smval`/`tmp/beltlive` sem re-derivar e hashear.
 
 ## 4. Gates (valores preenchidos na Fase 0.2 pelo runner — não deste texto)
 
 | gate | métrica | baseline (medir em 0.2) | critério do candidato |
 |---|---|---|---|
 | A. Blacksmith | indexed + surface fwd + surface rev, mean E p95, vs sculpt | produção ≈ indexed 1.5441 / surf fwd 0.7538 / surf rev 0.7868 (TENSION_PLUMB_HANDOFF; confirmar em 0.2) | nenhuma das 3 métricas (mean OU p95) pior que baseline×1.05; meta: melhorar surf fwd |
-| B. falmer forma | indexed + surface fwd + surface rev, mean E p95, vs sculpt decidido em 0.0 | MERGED ≈ indexed 2.490 / surf fwd 0.926 / surf rev 1.275 (confirmar em 0.2) | melhor que MERGED em indexed E surf fwd; surf REV e p95 sem piora >5% (colapso/perda de cobertura aparece no rev) |
-| B2. falmer queda | perfil back-thigh x∈[7,14]: bulge local máx vs sculpt (~16.5) | MERGED +2.6u | ≤ +0.8u |
-| B3. falmer tiras | com IDs FIXOS de hem autoral: spread lateral std + distância média entre tiras não-adjacentes | medir | ∈ [0.75, 1.30] × sculpt |
+| B. yarl Cloak (gravidade) | indexed + surface fwd + surface rev, mean E p95, vs sculpt | MERGED ≈ indexed 2.046 (surf fwd/rev confirmar em 0.2) | melhor que MERGED em indexed E surf fwd; surf REV e p95 sem piora >5% (colapso/perda de cobertura aparece no rev) |
+| B2. cloak queda/imprint | perfil das costas (y<0, centro): o pano NÃO segue o crescimento do corpo abaixo do ombro (bulge local vs sculpt) | medir em 0.2 | ≤ +0.8u |
+| B3. tiras/hem | **ADIADO** — sem garment tattered com ground truth limpo (falmer benched). IDs fixos prontos (`fixtures/pathb/hem_ids_falmer_cloth.txt`); reabre ao re-esculpir | — | — |
 | C. yarl Clothes | vs vanilla da captura: mean bend / worst stretch / máx vanilla→result / abertura do painel z44-60 | medir em 0.2 (produção) | nenhuma piora >10%; painel não abre além do baseline+0.5u |
 | I. integridade | TODOS: faces invertidas=0 novas; área degenerada=0 novas; seams abertos=0; self-intersections novas=0; pens de corpo ≤ baseline; NaN=0 | medir | hard-fail |
 | D. determinismo | SHA-256 de 2 runs | — | idêntico, sempre |
@@ -298,9 +317,10 @@ fixtures e manifests em `fixtures/pathb/` (TRACKED).
   2. o SCULPT satisfaz a constraint? (se não: ela IMPEDE o alvo)
   3. existe margem mensurável entre os dois? (tamanho do sinal)
   Registrar a tabela verdade por garment×família no log ("marco 7: preflight").
-  Priors já medidos pelo Codex a confirmar: Blacksmith×H3a = REPROVA (sculpt
-  tem ~90 arestas <0.95×rest; defeito tem 0); falmer×H3b = aprova (bandas
-  0.27-0.53 vs 0.87-1.07) — reconfirmar com o descriptor S0.3a.
+  Priors do Codex: Blacksmith×H3a = REPROVA (sculpt tem ~90 arestas <0.95×rest;
+  defeito tem 0) — confirmar. O prior falmer×H3b está EM ESPERA (falmer
+  benchado) — exercitar o descriptor S0.3a nos sentinelas limpos (yarl Cloak,
+  Blacksmith) e registrar do zero.
 - **S0.3c (v2.1 — ablação de H3c)**: o spike injeta o rawDiff VANILLA pelos
   anchors (`shell_spike.py:1242-1243`), então "corpo só como obstáculo" ainda
   NÃO é verdade no experimento. Rodar shell-base × anchors ∈ {vanilla-diff
