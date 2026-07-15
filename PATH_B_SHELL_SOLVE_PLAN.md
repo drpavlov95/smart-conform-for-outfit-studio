@@ -204,14 +204,23 @@ Sculpts/referências: escolhidos em S0.0
 
 ## 4. Gates (valores preenchidos na Fase 0.2 pelo runner — não deste texto)
 
-| gate | métrica | baseline (medir em 0.2) | critério do candidato |
-|---|---|---|---|
-| A. Blacksmith | indexed + surface fwd + surface rev, mean E p95, vs sculpt | produção ≈ indexed 1.5441 / surf fwd 0.7538 / surf rev 0.7868 (TENSION_PLUMB_HANDOFF; confirmar em 0.2) | nenhuma das 3 métricas (mean OU p95) pior que baseline×1.05; meta: melhorar surf fwd |
-| B. yarl Cloak (gravidade) | indexed + surface fwd + surface rev, mean E p95, vs sculpt | MERGED ≈ indexed 2.046 (surf fwd/rev confirmar em 0.2) | melhor que MERGED em indexed E surf fwd; surf REV e p95 sem piora >5% (colapso/perda de cobertura aparece no rev) |
-| B2. cloak queda/imprint | perfil das costas (y<0, centro): o pano NÃO segue o crescimento do corpo abaixo do ombro (bulge local vs sculpt) | medir em 0.2 | ≤ +0.8u |
-| B3. tiras/hem | **ADIADO** — sem garment tattered com ground truth limpo (falmer benched). IDs fixos prontos (`fixtures/pathb/hem_ids_falmer_cloth.txt`); reabre ao re-esculpir | — | — |
-| C. yarl Clothes | vs vanilla da captura: mean bend / worst stretch / máx vanilla→result / abertura do painel z44-60 | medir em 0.2 (produção) | nenhuma piora >10%; painel não abre além do baseline+0.5u |
-| I. integridade | TODOS: faces invertidas=0 novas; área degenerada=0 novas; seams abertos=0; self-intersections novas=0; pens de corpo ≤ baseline; NaN=0 | medir | hard-fail |
+Baselines MEDIDOS em S0.2c (`fixtures/pathb/BASELINES.md`, `pathb_metrics.py`):
+
+| garment | indexed | surf_fwd | surf_rev | flips(vs base) |
+|---|---:|---:|---:|---:|
+| blacksmith | 1.5441 | 0.7563 | 0.7915 | 1 |
+| yarl_clothes | 0.8388 | 0.259 | 0.3023 | 7 |
+| yarl_cloak | 2.0463 | 1.2265 | 0.9154 | 10 |
+| vampire | 1.1858 | 0.5099 | 0.5591 | 34 |
+
+| gate | métrica | critério do candidato (vs baseline acima) |
+|---|---|---|
+| A. Blacksmith | indexed + surf fwd + surf rev, mean E p95, vs sculpt | nenhuma das 3 (mean OU p95) pior que baseline×1.05; meta: melhorar surf fwd (<0.7563) |
+| B. yarl Cloak (gravidade) | indexed + surf fwd + surf rev, mean E p95, vs sculpt | melhor que baseline em indexed (<2.046) E surf fwd (<1.2265); surf REV e p95 sem piora >5% (colapso aparece no rev) |
+| B2. cloak queda/imprint | perfil das costas (y<0): pano NÃO segue o crescimento do corpo abaixo do ombro | bulge local ≤ +0.8u vs sculpt |
+| B3. tiras/hem | **ADIADO** — sem tattered com GT limpo (falmer benched); IDs prontos, reabre ao re-esculpir | — |
+| C. yarl Clothes (anti-guarda-chuva) | indexed + surf fwd + surf rev vs sculpt (já 0.8388/0.259/0.3023 = bem casado) | SEM regressão >5% em nenhuma; painel não abre (surf rev não sobe) |
+| I. integridade | flips/degen/seams/self-intersect/pens/NaN vs BASELINE (0 NOVOS além do baseline: bs≤1, clothes≤7, cloak≤10, vampire≤34) | hard-fail |
 | D. determinismo | SHA-256 de 2 runs | — | idêntico, sempre |
 | E. corpus | check_corpus com feature OFF | verde | verde inalterado |
 | F. convergência | mesmas conclusões em morphSteps {3,6,12} × iterations {5,10,20} | — | ranking de candidatos estável |
