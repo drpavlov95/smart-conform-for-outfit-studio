@@ -41,3 +41,7 @@ Ground truth chosen per garment (S0.0c). SHA-256 full for verification.
 ## Tool commit
 
 - generated at git - generated at git a5c6ca7
+
+## RM_Thin captures (gate G — contração; já existiam, S0.1d dispensa sessão live)
+- `yarl_cloak__RM_Thin.drcap` sha256=`4f98da8f3134b22bf76fd4aa2d8aa4e0b6b0bbad07ea1f9633d7230ec91189c8`
+- `yarl_clothes__RM_Thin.drcap` sha256=`75a89c6cd7b97989adf30e8c45d8e24cecc963cf2212bbd04c0793409231f294`

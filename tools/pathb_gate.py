@@ -47,26 +47,58 @@ SECONDARY = {
         base=TMP / "ds_vampire/cloth_base.obj", hem=None, role="secondary"),
 }
 
+# measured production baselines (fixtures/pathb/BASELINES.md, S0.2c).
+# A candidate FAILS if any mean exceeds baseline x1.05 or adds flipped faces.
+BASELINE = {
+    "blacksmith":   dict(indexed_mean=1.5441, surf_fwd_mean=0.7563,
+                         surf_rev_mean=0.7915, flips=1),
+    "yarl_clothes": dict(indexed_mean=0.8388, surf_fwd_mean=0.2590,
+                         surf_rev_mean=0.3023, flips=7),
+    "yarl_cloak":   dict(indexed_mean=2.0463, surf_fwd_mean=1.2265,
+                         surf_rev_mean=0.9154, flips=10),
+    "vampire":      dict(indexed_mean=1.1858, surf_fwd_mean=0.5099,
+                         surf_rev_mean=0.5591, flips=34),
+}
 
-def make_candidate(garment, cfg, mode, workdir):
+
+def make_candidate(garment, cfg, mode, workdir, journal):
+    """FAIL-CLOSED: delete any stale OBJ first, hard-error on a non-zero
+    producer or a missing/empty result. A gate must never score a stale mesh."""
     out = workdir / f"cand_{garment}.obj"
     cap = ROOT / cfg["capture"]
+    if mode.startswith("obj:"):
+        p = ROOT / mode[4:].format(g=garment)
+        if not p.exists():
+            raise SystemExit(f"FAIL {garment}: obj not found: {p}")
+        journal.append(f"{garment}: obj {p}  sha={_sha12(p)}")
+        return p
+    if out.exists():
+        out.unlink()                      # never reuse a previous run's mesh
     if mode == "production":
-        subprocess.run([str(HARNESS), "--replay", str(cap), "--result-obj", str(out)],
-                       capture_output=True)
-    elif mode.startswith("obj:"):
-        return ROOT / mode[4:].format(g=garment)
+        cmd = [str(HARNESS), "--replay", str(cap), "--result-obj", str(out)]
     elif mode.startswith("shell:"):
         ds = workdir / f"ds_{garment}"
         ds.mkdir(parents=True, exist_ok=True)
-        args = mode[6:].split()
-        subprocess.run([sys.executable, str(ROOT / "tools/shell_spike.py"),
-                        "--capture", str(cap), "--dataset", str(ds),
-                        "--solve", "--output", str(out), *args],
-                       capture_output=True)
+        cmd = [sys.executable, str(ROOT / "tools/shell_spike.py"),
+               "--capture", str(cap), "--dataset", str(ds),
+               "--solve", "--output", str(out), *mode[6:].split()]
     else:
         raise SystemExit(f"unknown mode: {mode}")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    # the harness returns non-zero on some replays while still writing a valid
+    # OBJ, so treat "no/empty output file" as the hard failure, and surface a
+    # non-zero exit as a warning in the journal.
+    if not out.exists() or out.stat().st_size == 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+        raise SystemExit(f"FAIL {garment}: producer wrote no mesh (rc={r.returncode})\n"
+                         + "\n".join(tail))
+    journal.append(f"{garment}: rc={r.returncode} sha={_sha12(out)} cmd={' '.join(cmd)}")
     return out
+
+
+def _sha12(p):
+    import hashlib
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()[:12]
 
 
 def metrics(obj, cfg, label):
@@ -104,23 +136,55 @@ def main():
     cols = ["indexed_mean", "indexed_p95", "surf_fwd_mean", "surf_fwd_p95",
             "surf_rev_mean", "surf_rev_p95", "int_flipped_faces",
             "int_degenerate_faces", "int_worst_seam_split", "int_nan"]
+    journal = []
     rows = []
     for g, cfg in sset.items():
-        obj = make_candidate(g, cfg, a.mode, workdir)
+        obj = make_candidate(g, cfg, a.mode, workdir, journal)
         m = metrics(obj, cfg, f"{a.label}_{g}")
+        if "error" in m:
+            raise SystemExit(f"FAIL {g}: metrics produced no SUMMARY: {m['error']}")
         rows.append((g, cfg["role"], m))
-    lines = [f"# scoreboard: {a.label}  (mode: `{a.mode}`)", "",
-             "| garment | role | " + " | ".join(cols) + " |",
-             "|---|---|" + "|".join(["---"] * len(cols)) + "|"]
+    # PASS/FAIL vs the measured production baselines (fixtures/pathb/BASELINES.md)
+    verdicts = []
     for g, role, m in rows:
-        lines.append("| " + g + " | " + role + " | " +
-                     " | ".join(str(m.get(c, m.get("error", "-"))) for c in cols) + " |")
+        b = BASELINE.get(g)
+        if not b:
+            verdicts.append((g, "n/a", []))
+            continue
+        bad = []
+        for k, tol in (("indexed_mean", 1.05), ("surf_fwd_mean", 1.05),
+                       ("surf_rev_mean", 1.05)):
+            try:
+                if float(m[k]) > b[k] * tol:
+                    bad.append(f"{k} {m[k]}>{round(b[k]*tol,4)}")
+            except (KeyError, ValueError):
+                bad.append(f"{k} missing")
+        try:
+            if int(m["int_flipped_faces"]) > b["flips"]:
+                bad.append(f"flips {m['int_flipped_faces']}>{b['flips']}")
+        except (KeyError, ValueError):
+            pass
+        verdicts.append((g, "FAIL" if bad else "PASS", bad))
+    lines = [f"# scoreboard: {a.label}  (mode: `{a.mode}`)", "",
+             "| garment | role | verdict | " + " | ".join(cols) + " |",
+             "|---|---|---|" + "|".join(["---"] * len(cols)) + "|"]
+    for (g, role, m), (_, v, bad) in zip(rows, verdicts):
+        lines.append("| " + g + " | " + role + " | " + v + " | " +
+                     " | ".join(str(m.get(c, "-")) for c in cols) + " |")
+    fails = [(g, bad) for g, v, bad in verdicts if v == "FAIL"]
+    if fails:
+        lines += ["", "## FAIL detail"] + [f"- {g}: {', '.join(b)}" for g, b in fails]
+    lines += ["", "## journal (commands + result hashes)", ""] + \
+             [f"- `{j}`" for j in journal]
     text = "\n".join(lines)
     print(text)
     if a.out:
         Path(a.out).write_text(text + "\n", encoding="utf-8")
         print(f"\nwrote {a.out}")
+    overall = "FAIL" if fails else "PASS"
+    print(f"\nOVERALL: {overall}")
+    return 1 if fails else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
