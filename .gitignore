@@ -16,3 +16,8 @@ panel_radial_in.flag
 contact_radial_on.flag
 loose_contact_floor_on.flag
 no_contact_radial_on.flag
+
+# Path B fixtures are tracked on purpose: a gate must never depend on a
+# gitignored capture (peer-review 2026-07-14). 'captures/' above still ignores
+# the working capture dumps.
+!fixtures/pathb/captures/
