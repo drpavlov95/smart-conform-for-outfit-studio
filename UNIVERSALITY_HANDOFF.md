@@ -1,6 +1,6 @@
 # Smart Conform universality handoff
 
-Updated: 2026-07-13 (America/Sao_Paulo)
+Updated: 2026-07-15 (America/Sao_Paulo)
 
 ## Objective
 
@@ -9,13 +9,51 @@ with special attention to free-hanging cloth, body/garment anti-clipping,
 layer order, belts, seams and disconnected rigid decorations. Preserve the
 Blacksmith and Vampire results already approved by the user.
 
-Branch: `wip/codex-anticlip-harness`. The latest commit on that branch is the
-authoritative checkpoint; use `git log -1 --oneline` rather than copying a hash
-from this document.
+Production/universality branch: `wip/codex-anticlip-harness`. Path-B shell
+research is isolated on `wip/path-b-shell-solve`; its operational checkpoint is
+`PATH_B_HANDOFF.md`. Use `git log -1 --oneline` on the relevant branch rather
+than copying an old commit from this document.
 
 The only unrelated tracked worktree change is the user's EOF/newline change in
 `corpus/golden/fur_blacksmith_rm_heavy.json`. Never stage, overwrite or restore
-that file.
+that file. `scripts/capture_outfitstudio_vfs.ps1` is also an unrelated untracked
+user file and must not be staged by Path-B commits.
+
+## Path B checkpoint — corrected S0.3e (2026-07-15)
+
+The earlier “preflight complete” conclusion was retracted after direct audit:
+
+- S0.3d compared the hand-sculpt to production `MERGED`, not to the Path-B
+  shell whose model it claimed to characterize.
+- PCA-axis sign was interpreted as gravity. In world coordinates the Yarl
+  Cloak sculpt is above both candidates in every measured band, so a `-Z`
+  force worsening its score does not reject gravity.
+- S0.3c's `authored gap>2` population contained hard anchors and vertices later
+  reached by the body; `body-mode` was static-vs-continuation, not contact off/on.
+
+S0.3e now provides material-correspondent section metrics, explicit XYZ/dDown,
+coverage, globally exact offline closest-point distance/candidates under the
+existing sign convention, and per-vertex collision-correction histories. The
+corrected factorial only supports a narrow statement:
+effects are small on the conservative subpopulation that is movable,
+`drape>=0.55` and remains above clearance in every cell. It does not rule out
+contact/anchors as a localized bump cause; that mask is selected after
+observing all eight cells.
+
+An offline-only `surface-corot` support target was implemented as the missing
+physical middle between copied rawDiff and frozen authored anchors. Static-body
+equivalence with authored targets is byte-identical after stabilizing the
+clamp. It still fails all three implemented mean gates with clamp on and off;
+with clamp it also produces `13/16/50` flips. It is blocked from RM_Thin, C++
+and live deployment. The result is narrow: broad independent nearest-triangle
+bindings under the current support mask failed; it does not reject every
+coherent support-boundary model.
+
+The production DLL, `MERGED` behavior and live flags were not changed. Yarl
+Cloak is now a section-position/anti-imprint sentinel, not a gravity sentinel.
+Falmer remains benched. Next research, if resumed, starts with support-mask /
+boundary-condition classification or a clean gravity ground truth — not an
+energy solver or sculpt-targeted plumb.
 
 ## User-confirmed Blacksmith reference
 
@@ -262,5 +300,6 @@ explicit `publishMode`.
 
 - Stage only intentional source/docs; exclude the user's Blacksmith golden.
 - Keep experimental finisher gates dark until both metrics and renders pass.
-- Push every validated checkpoint to
-  `origin/wip/codex-anticlip-harness`.
+- Push universality checkpoints to `origin/wip/codex-anticlip-harness` and
+  Path-B research checkpoints to `origin/wip/path-b-shell-solve`; never mix the
+  two workstreams in one commit.

@@ -1,0 +1,2296 @@
+{
+  "garments": {
+    "blacksmith": {
+      "capture": "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+      "capture_sha256": "4c182319a0e9589b2cb667037057045e0a1dcd77b67f78f15baa4265ca48a780",
+      "cells": {
+        "authored_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.obj",
+          "output_sha256": "c21a14484c49d914cb7411ee9baf075925f44c0816ab51cf1e6a3d5ce5de08a9",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 8.492072945647399,
+              "indexed_mean": 2.95281427957648,
+              "indexed_p95": 6.290364126017403,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.3801461287824885,
+              "indexed_mean": 1.910314660004957,
+              "indexed_p95": 5.331093987971614,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.3801461287824885,
+              "indexed_mean": 1.910314660004957,
+              "indexed_p95": 5.331093987971614,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 8.492072945647399,
+              "indexed_mean": 2.9640581189304562,
+              "indexed_p95": 6.154659044065791,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.3801461287824885,
+              "indexed_mean": 2.0508418677274993,
+              "indexed_p95": 5.690279570858907,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.3801461287824885,
+              "indexed_mean": 2.0508418677274993,
+              "indexed_p95": 5.690279570858907,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 550,
+            "fixed": 1444,
+            "never_contacted_active": 322,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "120b0d183a3f6f8e885fee213a9f1d6f88af7964911695c0757206385e335658"
+        },
+        "authored_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.obj",
+          "output_sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 11.976767458097319,
+              "indexed_mean": 5.108823741430425,
+              "indexed_p95": 9.648635892615676,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 1.9581352797757194,
+              "indexed_p95": 5.63614401975934,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 1.9581352797757194,
+              "indexed_p95": 5.63614401975934,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 10.353703952945661,
+              "indexed_mean": 4.564969733907579,
+              "indexed_p95": 9.173042101717751,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 2.1088803357955066,
+              "indexed_p95": 6.080282826025295,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 2.1088803357955066,
+              "indexed_p95": 6.080282826025295,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 0,
+            "fixed": 1444,
+            "never_contacted_active": 872,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "d806d7f9d60c088c6ab8f111582d7292416574d42b67c315a7882f8ed553e7d7"
+        },
+        "authored_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.obj",
+          "output_sha256": "ff6b94013b8be1f6c56778075e8cff74253fb73939bf0f9ab440f7f975ec55d0",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 8.440842428638016,
+              "indexed_mean": 2.86906157053448,
+              "indexed_p95": 6.178613427406601,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.380019308122746,
+              "indexed_mean": 1.9104842215492657,
+              "indexed_p95": 5.329509420817756,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.380019308122746,
+              "indexed_mean": 1.9104842215492657,
+              "indexed_p95": 5.329509420817756,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 8.440842428638016,
+              "indexed_mean": 2.945470300019175,
+              "indexed_p95": 6.15347065388045,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.380019308122746,
+              "indexed_mean": 2.0504297283109496,
+              "indexed_p95": 5.689422299259438,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.380019308122746,
+              "indexed_mean": 2.0504297283109496,
+              "indexed_p95": 5.689422299259438,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 550,
+            "fixed": 1444,
+            "never_contacted_active": 322,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "c8936c2f7b1fe03199b87a06fedb5067f07d044daa68313b4288c7f605675498"
+        },
+        "authored_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.obj",
+          "output_sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 11.976767458097319,
+              "indexed_mean": 5.108823741430425,
+              "indexed_p95": 9.648635892615676,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 1.9581352797757194,
+              "indexed_p95": 5.63614401975934,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 1.9581352797757194,
+              "indexed_p95": 5.63614401975934,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 10.353703952945661,
+              "indexed_mean": 4.564969733907579,
+              "indexed_p95": 9.173042101717751,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 2.1088803357955066,
+              "indexed_p95": 6.080282826025295,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.864218360545402,
+              "indexed_mean": 2.1088803357955066,
+              "indexed_p95": 6.080282826025295,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 0,
+            "fixed": 1444,
+            "never_contacted_active": 872,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "1aa5e9f30b89c2a79e47c8e74664f61535a0edbaf46a3d50e6e161c710524b86"
+        },
+        "vanilla_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.obj",
+          "output_sha256": "99dc1669fc3133a94eda861a9a3fc96487b1eb62e34e25a9551a858699c8451c",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 8.416980468048665,
+              "indexed_mean": 2.6832751786009847,
+              "indexed_p95": 5.8677941567042655,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.379797990069657,
+              "indexed_mean": 1.9100300592486028,
+              "indexed_p95": 5.326184228790546,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.379797990069657,
+              "indexed_mean": 1.9100300592486028,
+              "indexed_p95": 5.326184228790546,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 8.416980468048665,
+              "indexed_mean": 2.914780285855077,
+              "indexed_p95": 6.1422148647212085,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.379797990069657,
+              "indexed_mean": 2.050488349722272,
+              "indexed_p95": 5.690265468404995,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.379797990069657,
+              "indexed_mean": 2.050488349722272,
+              "indexed_p95": 5.690265468404995,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 550,
+            "fixed": 1444,
+            "never_contacted_active": 322,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "421fe372e814789b494ac312c3abb9c28293198a5310ef43527f8e7352c62807"
+        },
+        "vanilla_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.obj",
+          "output_sha256": "050e3b3da1d8434275bd3d5771c9a73e93964d76ebb9b3e8f5d3fa8b1c19a4e6",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.590904001955538,
+              "indexed_mean": 4.74414002022305,
+              "indexed_p95": 9.351425279528257,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.920404628279004,
+              "indexed_mean": 1.9592080563740228,
+              "indexed_p95": 5.636988676200728,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.920404628279004,
+              "indexed_mean": 1.9592080563740228,
+              "indexed_p95": 5.636988676200728,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 10.590904001955538,
+              "indexed_mean": 4.60736079221619,
+              "indexed_p95": 9.319214503686723,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.920404628279004,
+              "indexed_mean": 2.110229808825114,
+              "indexed_p95": 6.100213828724278,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.920404628279004,
+              "indexed_mean": 2.110229808825114,
+              "indexed_p95": 6.100213828724278,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 30,
+            "fixed": 1444,
+            "never_contacted_active": 842,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "ba962d70eedb29ae1a43c634d08c8a7f64ac21c8ade5bbe7d89ed068bf1f8a94"
+        },
+        "vanilla_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.obj",
+          "output_sha256": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 8.376172345155046,
+              "indexed_mean": 2.453057156711986,
+              "indexed_p95": 5.864315069350702,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.378645490198046,
+              "indexed_mean": 1.862585510883116,
+              "indexed_p95": 5.319565176614322,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.378645490198046,
+              "indexed_mean": 1.862585510883116,
+              "indexed_p95": 5.319565176614322,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 8.376172345155046,
+              "indexed_mean": 2.872156497485334,
+              "indexed_p95": 6.107960589913588,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.378645490198046,
+              "indexed_mean": 2.0408986677914682,
+              "indexed_p95": 5.68203014593163,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.378645490198046,
+              "indexed_mean": 2.0408986677914682,
+              "indexed_p95": 5.68203014593163,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 552,
+            "fixed": 1444,
+            "never_contacted_active": 320,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "8771dcadb15318fb72aa69801c647c9c8a5a9820c4661ed0093bbe716746e505"
+        },
+        "vanilla_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.obj",
+          "output_sha256": "2d4b7fa6e1e0691cc7e02a5306d80924599f6b3ed6727a01392bed3ae92fe0df",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.32466281487125,
+              "indexed_mean": 3.745646846193814,
+              "indexed_p95": 8.974182660296718,
+              "n": 872
+            },
+            "active_always_clear": {
+              "indexed_max": 7.78872125584845,
+              "indexed_mean": 1.910225917493071,
+              "indexed_p95": 5.636039461338242,
+              "n": 320
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.78872125584845,
+              "indexed_mean": 1.910225917493071,
+              "indexed_p95": 5.636039461338242,
+              "n": 320
+            },
+            "fully_free": {
+              "indexed_max": 10.32466281487125,
+              "indexed_mean": 4.54049939574938,
+              "indexed_p95": 9.163375346610529,
+              "n": 590
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.78872125584845,
+              "indexed_mean": 2.0987918209549665,
+              "indexed_p95": 6.047148219813111,
+              "n": 254
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.78872125584845,
+              "indexed_mean": 2.0987918209549665,
+              "indexed_p95": 6.047148219813111,
+              "n": 254
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.trace.json",
+          "trace_counts": {
+            "active": 872,
+            "ever_contacted_active": 10,
+            "fixed": 1444,
+            "never_contacted_active": 862,
+            "support_target_clamps": 0,
+            "vertices": 2316
+          },
+          "trace_sha256": "1144ef57241d8ecd6f183f8b4b3ab21a96b0a63bda02e5fded01c3591bd539f8"
+        }
+      },
+      "contrasts": {
+        "active_all": {
+          "anchor": 0.6033510328104934,
+          "anchor:body": 0.26057927541149883,
+          "anchor:soft": -0.2862396217190595,
+          "anchor:soft:body": -0.21300696529555863,
+          "body": 1.9373065409634456,
+          "soft": 0.32811597624005895,
+          "soft:body": 0.1711306107745587
+        },
+        "active_always_clear": {
+          "anchor": 0.023754974276712026,
+          "anchor:body": -0.00033668143453957633,
+          "anchor:soft": -0.024149062197686755,
+          "anchor:soft:body": -0.00034200724278909966,
+          "body": 0.0480725204331478,
+          "soft": 0.02406428142553252,
+          "soft:body": 0.0004267880149433356
+        },
+        "active_never_corrected": {
+          "anchor": 0.023754974276712026,
+          "anchor:body": -0.00033668143453957633,
+          "anchor:soft": -0.024149062197686755,
+          "anchor:soft:body": -0.00034200724278909966,
+          "body": 0.0480725204331478,
+          "soft": 0.02406428142553252,
+          "soft:body": 0.0004267880149433356
+        },
+        "fully_free": {
+          "anchor": 0.026167728864701978,
+          "anchor:body": -0.03512808893990815,
+          "anchor:soft": -0.022724341481318078,
+          "anchor:soft:body": -0.01070635675208731,
+          "body": 1.6453336133726708,
+          "soft": 0.032018250936958204,
+          "soft:body": 0.0014124472964462953
+        },
+        "fully_free_always_clear": {
+          "anchor": 0.004655905083910117,
+          "anchor:body": -0.00028638417844417674,
+          "anchor:soft": -0.005153882596100612,
+          "anchor:soft:body": -0.0005651113389730789,
+          "body": 0.058530921954725645,
+          "soft": 0.005359952304374804,
+          "soft:body": 0.0003590416306988864
+        },
+        "fully_free_never_corrected": {
+          "anchor": 0.004655905083910117,
+          "anchor:body": -0.00028638417844417674,
+          "anchor:soft": -0.005153882596100612,
+          "anchor:soft:body": -0.0005651113389730789,
+          "body": 0.058530921954725645,
+          "soft": 0.005359952304374804,
+          "soft:body": 0.0003590416306988864
+        }
+      },
+      "ever_collision_corrected_in_any_cell": 552,
+      "ground_truth": "fixtures/pathb/blacksmith__GROUND_TRUTH.obj",
+      "ground_truth_sha256": "c55998911fa28cca23325a922e8434672bf8884f21e77d74d586ad45ceca0dac",
+      "mask_counts": {
+        "active_all": 872,
+        "active_always_clear": 320,
+        "active_never_corrected": 320,
+        "fully_free": 590,
+        "fully_free_always_clear": 254,
+        "fully_free_never_corrected": 254
+      },
+      "role": "sentinel:under-butt"
+    },
+    "yarl_cloak": {
+      "capture": "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+      "capture_sha256": "7f1df88df028e774591be018dd0e4a1c64dc69e32838c1b668df5101f0275559",
+      "cells": {
+        "authored_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.obj",
+          "output_sha256": "50f286cdf8a6c9bda3abba27deb280fb68a5a7ffe4db34a771fefd556fd71b32",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 6.031838739994827,
+              "indexed_mean": 3.0161079373752315,
+              "indexed_p95": 5.600900348147286,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 6.031838739994827,
+              "indexed_mean": 3.612366000494019,
+              "indexed_p95": 5.61870039575502,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 6.031838739994827,
+              "indexed_mean": 3.612366000494019,
+              "indexed_p95": 5.61870039575502,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 5.40055314000191,
+              "indexed_mean": 2.3888844190000054,
+              "indexed_p95": 4.537676181501206,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 5.40055314000191,
+              "indexed_mean": 3.6480108839253886,
+              "indexed_p95": 5.0599643812299835,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 5.40055314000191,
+              "indexed_mean": 3.6480108839253886,
+              "indexed_p95": 5.0599643812299835,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 16,
+            "fixed": 497,
+            "never_contacted_active": 40,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "3295e7931ffa2ce0ad8b4598d325a6226dc3e9d481ed5986610d690842fd5adc"
+        },
+        "authored_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.obj",
+          "output_sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.3539375059489642,
+              "indexed_p95": 5.614283833971701,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.6493664631217566,
+              "indexed_p95": 5.628915774915939,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.6493664631217566,
+              "indexed_p95": 5.628915774915939,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.060472278060262,
+              "indexed_p95": 4.5515724336623,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.713754323623351,
+              "indexed_p95": 5.142293144905046,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.713754323623351,
+              "indexed_p95": 5.142293144905046,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 0,
+            "fixed": 497,
+            "never_contacted_active": 56,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "da437f5fe6f0576383a2a7dfef398d6c79029482488905b425bf8705b6a0cccb"
+        },
+        "authored_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.obj",
+          "output_sha256": "98f313b0c2a0b503d69676021e94578cb3b6f394ac0632438f0354de0406a44d",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 6.0334456500180655,
+              "indexed_mean": 3.016971819593098,
+              "indexed_p95": 5.604781705998363,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 6.0334456500180655,
+              "indexed_mean": 3.613631254667777,
+              "indexed_p95": 5.622231506623305,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 6.0334456500180655,
+              "indexed_mean": 3.613631254667777,
+              "indexed_p95": 5.622231506623305,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 5.4010461855758205,
+              "indexed_mean": 2.3889561577835003,
+              "indexed_p95": 4.537605181453047,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 5.4010461855758205,
+              "indexed_mean": 3.6483013294984326,
+              "indexed_p95": 5.060230076148904,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 5.4010461855758205,
+              "indexed_mean": 3.6483013294984326,
+              "indexed_p95": 5.060230076148904,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 16,
+            "fixed": 497,
+            "never_contacted_active": 40,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "12e92a7438fc891679309b2a3a7963c4bc2d58b7af5072cde9d69bd92360aa5a"
+        },
+        "authored_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.obj",
+          "output_sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.3539375059489642,
+              "indexed_p95": 5.614283833971701,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.6493664631217566,
+              "indexed_p95": 5.628915774915939,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 6.035137446979875,
+              "indexed_mean": 3.6493664631217566,
+              "indexed_p95": 5.628915774915939,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.060472278060262,
+              "indexed_p95": 4.5515724336623,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.713754323623351,
+              "indexed_p95": 5.142293144905046,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 5.541736218898536,
+              "indexed_mean": 3.713754323623351,
+              "indexed_p95": 5.142293144905046,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 0,
+            "fixed": 497,
+            "never_contacted_active": 56,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "bcc2a3f9496dd7c2e236e018479349f73588d6ca102ae78a310a5d9e50980d1b"
+        },
+        "vanilla_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.obj",
+          "output_sha256": "328628d1a3a28c7095815769516c094463f20ae4b3d3e39c54b0e07abd20426e",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 4.651224627199477,
+              "indexed_mean": 3.3162156505185902,
+              "indexed_p95": 4.604083972308993,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 4.651224627199477,
+              "indexed_mean": 3.441290805351607,
+              "indexed_p95": 4.639467601682046,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 4.651224627199477,
+              "indexed_mean": 3.441290805351607,
+              "indexed_p95": 4.639467601682046,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 4.6381612655134425,
+              "indexed_mean": 3.300349690215089,
+              "indexed_p95": 4.447014766242613,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 4.6381612655134425,
+              "indexed_mean": 3.761170661547901,
+              "indexed_p95": 4.552145340841569,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 4.6381612655134425,
+              "indexed_mean": 3.761170661547901,
+              "indexed_p95": 4.552145340841569,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 13,
+            "fixed": 497,
+            "never_contacted_active": 43,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "71a1ecd83d96b053a55685a32f196acc684048e648896b233c7957a6eecc9f08"
+        },
+        "vanilla_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.obj",
+          "output_sha256": "8b2129088cdd9421ac79b6e02cdb75b018f2d9ea569eacc202f29351b6f0baa0",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 4.69230461527399,
+              "indexed_mean": 3.505931035446286,
+              "indexed_p95": 4.607025793714371,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 4.69230461527399,
+              "indexed_mean": 3.447605738701251,
+              "indexed_p95": 4.635291489226918,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 4.69230461527399,
+              "indexed_mean": 3.447605738701251,
+              "indexed_p95": 4.635291489226918,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 4.62895669744391,
+              "indexed_mean": 3.6894276936866057,
+              "indexed_p95": 4.460602249751863,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 4.62895669744391,
+              "indexed_mean": 3.773903355389512,
+              "indexed_p95": 4.553197195982489,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 4.62895669744391,
+              "indexed_mean": 3.773903355389512,
+              "indexed_p95": 4.553197195982489,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 0,
+            "fixed": 497,
+            "never_contacted_active": 56,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "e51f0394df99f74777830c6858a6aea3d1fda97792f9d2b31ca1c2542f88409a"
+        },
+        "vanilla_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.obj",
+          "output_sha256": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 4.916731732688227,
+              "indexed_mean": 3.3272828816743734,
+              "indexed_p95": 4.424559423625956,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 4.916731732688227,
+              "indexed_mean": 3.3768773809630557,
+              "indexed_p95": 4.435102326410188,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 4.916731732688227,
+              "indexed_mean": 3.3768773809630557,
+              "indexed_p95": 4.435102326410188,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 4.529988451468275,
+              "indexed_mean": 3.3324053840588097,
+              "indexed_p95": 4.424559423625956,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 4.529988451468275,
+              "indexed_mean": 3.5345321853382154,
+              "indexed_p95": 4.482545388939231,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 4.529988451468275,
+              "indexed_mean": 3.5345321853382154,
+              "indexed_p95": 4.482545388939231,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 12,
+            "fixed": 497,
+            "never_contacted_active": 44,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "7694606d843792a0c1e8cd88588e968d76495141762ba6779929d24e3d61294c"
+        },
+        "vanilla_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.obj",
+          "output_sha256": "b7cbbe43facd3dfe4960843a20e7a95ad36a08142f3773442aefd4553f448f11",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 4.91646661153506,
+              "indexed_mean": 3.4473611526768138,
+              "indexed_p95": 4.421521503266735,
+              "n": 56
+            },
+            "active_always_clear": {
+              "indexed_max": 4.91646661153506,
+              "indexed_mean": 3.3794086257668208,
+              "indexed_p95": 4.4318449847452746,
+              "n": 39
+            },
+            "active_never_corrected": {
+              "indexed_max": 4.91646661153506,
+              "indexed_mean": 3.3794086257668208,
+              "indexed_p95": 4.4318449847452746,
+              "n": 39
+            },
+            "fully_free": {
+              "indexed_max": 4.524756318052128,
+              "indexed_mean": 3.578527110409841,
+              "indexed_p95": 4.421521503266735,
+              "n": 27
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 4.524756318052128,
+              "indexed_mean": 3.5364943836070153,
+              "indexed_p95": 4.478300651398701,
+              "n": 10
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 4.524756318052128,
+              "indexed_mean": 3.5364943836070153,
+              "indexed_p95": 4.478300651398701,
+              "n": 10
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.trace.json",
+          "trace_counts": {
+            "active": 56,
+            "ever_contacted_active": 0,
+            "fixed": 497,
+            "never_contacted_active": 56,
+            "support_target_clamps": 0,
+            "vertices": 553
+          },
+          "trace_sha256": "7f88bec09198fbc7683604d427bd0c7106fb0de65921185328c35db2355692b6"
+        }
+      },
+      "contrasts": {
+        "active_all": {
+          "anchor": -0.21395898786245127,
+          "anchor:body": 0.09125039974986571,
+          "anchor:soft": -0.012091633457888662,
+          "anchor:soft:body": -0.017193307926847368,
+          "body": 0.2461472277149337,
+          "soft": 0.011659692348955364,
+          "soft:body": 0.017625249035780666
+        },
+        "active_always_clear": {
+          "anchor": 0.21988690765564378,
+          "anchor:body": 0.01597237323207734,
+          "anchor:soft": -0.03346894787418497,
+          "anchor:soft:body": -0.0006296085930301842,
+          "body": 0.020395462308781642,
+          "soft": 0.03283632078730614,
+          "soft:body": 0.0012622356799094625
+        },
+        "active_never_corrected": {
+          "anchor": 0.21988690765564378,
+          "anchor:body": 0.01597237323207734,
+          "anchor:soft": -0.03346894787418497,
+          "anchor:soft:body": -0.0006296085930301842,
+          "body": 0.020395462308781642,
+          "soft": 0.03283632078730614,
+          "soft:body": 0.0012622356799094625
+        },
+        "fully_free": {
+          "anchor": -0.7504811863665788,
+          "anchor:body": 0.17697606237861718,
+          "anchor:soft": -0.019729157054134472,
+          "anchor:soft:body": -0.035721134584247416,
+          "body": 0.4945759272898913,
+          "soft": 0.019693287662387426,
+          "soft:body": 0.03575700397599535
+        },
+        "fully_free_always_clear": {
+          "anchor": 0.0294300686969704,
+          "anchor:body": 0.02912538542811749,
+          "anchor:soft": -0.11608447339130645,
+          "anchor:soft:body": -0.002620012499941371,
+          "body": 0.036472831483322476,
+          "soft": 0.11593925060478494,
+          "soft:body": 0.002765235286463774
+        },
+        "fully_free_never_corrected": {
+          "anchor": 0.0294300686969704,
+          "anchor:body": 0.02912538542811749,
+          "anchor:soft": -0.11608447339130645,
+          "anchor:soft:body": -0.002620012499941371,
+          "body": 0.036472831483322476,
+          "soft": 0.11593925060478494,
+          "soft:body": 0.002765235286463774
+        }
+      },
+      "ever_collision_corrected_in_any_cell": 17,
+      "ground_truth": "fixtures/pathb/yarl_cloak__GROUND_TRUTH.obj",
+      "ground_truth_sha256": "28576b6ccaeebbc181eac904c91ec7dfb8e6eead1c700d0c4641382c933f9709",
+      "mask_counts": {
+        "active_all": 56,
+        "active_always_clear": 39,
+        "active_never_corrected": 39,
+        "fully_free": 27,
+        "fully_free_always_clear": 10,
+        "fully_free_never_corrected": 10
+      },
+      "role": "sentinel:section-position/anti-imprint (not gravity-validated)"
+    },
+    "yarl_clothes": {
+      "capture": "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+      "capture_sha256": "3a2e940385cb10e413b455557380ba89e949359d7ed5e5f6e403d8f0d6537c76",
+      "cells": {
+        "authored_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.obj",
+          "output_sha256": "cd1832fb2e9d2002bb72da8c3482015351c758703e7d52bd4f76e933b7e96c22",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.230925415149548,
+              "indexed_mean": 3.1801699883770858,
+              "indexed_p95": 7.215120194105729,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 8.290443970878178,
+              "indexed_mean": 2.2172102852103497,
+              "indexed_p95": 5.154397085979658,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 8.290443970878178,
+              "indexed_mean": 2.2172102852103497,
+              "indexed_p95": 5.154397085979658,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 10.230925415149548,
+              "indexed_mean": 3.034532306445791,
+              "indexed_p95": 6.929666061605324,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 8.290443970878178,
+              "indexed_mean": 2.300579389359785,
+              "indexed_p95": 5.243561388352728,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 8.290443970878178,
+              "indexed_mean": 2.300579389359785,
+              "indexed_p95": 5.243561388352728,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 238,
+            "fixed": 1145,
+            "never_contacted_active": 394,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "9ebe3344f545b1166754cf8147f1f69666fb6fa9818ce26d079e963e9f7f6a6a"
+        },
+        "authored_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.obj",
+          "output_sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 11.025001005321451,
+              "indexed_mean": 3.9203754947716476,
+              "indexed_p95": 8.928169044119704,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.2636832893427528,
+              "indexed_p95": 5.149695867105051,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.2636832893427528,
+              "indexed_p95": 5.149695867105051,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 11.025001005321451,
+              "indexed_mean": 3.4690337834879204,
+              "indexed_p95": 8.281547208349807,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.355795133478997,
+              "indexed_p95": 5.27313898572737,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.355795133478997,
+              "indexed_p95": 5.27313898572737,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 0,
+            "fixed": 1145,
+            "never_contacted_active": 632,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "7bb3b1f1d1643982f84a4e6efc6b3fcbcb3e23eb0c3602566e71d99205a71575"
+        },
+        "authored_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.obj",
+          "output_sha256": "0f69ffd03c501bcb8147006332723dec752746519203e318f1cfd1de776dad24",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.230914249072177,
+              "indexed_mean": 2.982625606136655,
+              "indexed_p95": 7.010975512084538,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 7.980974524105318,
+              "indexed_mean": 2.2081965627169717,
+              "indexed_p95": 5.173934762593461,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.980974524105318,
+              "indexed_mean": 2.2081965627169717,
+              "indexed_p95": 5.173934762593461,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 10.230914249072177,
+              "indexed_mean": 3.001376656718103,
+              "indexed_p95": 6.887027730248762,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.980974524105318,
+              "indexed_mean": 2.2907410398334216,
+              "indexed_p95": 5.24423200875722,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.980974524105318,
+              "indexed_mean": 2.2907410398334216,
+              "indexed_p95": 5.24423200875722,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 239,
+            "fixed": 1145,
+            "never_contacted_active": 393,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "73212fc053b7c81a18578e5d84d527cb619d9fe5c3d12e5250137e1322790a4f"
+        },
+        "authored_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "authored",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "authored",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.obj",
+          "output_sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 11.025001005321451,
+              "indexed_mean": 3.9203754947716476,
+              "indexed_p95": 8.928169044119704,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.2636832893427528,
+              "indexed_p95": 5.149695867105051,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.2636832893427528,
+              "indexed_p95": 5.149695867105051,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 11.025001005321451,
+              "indexed_mean": 3.4690337834879204,
+              "indexed_p95": 8.281547208349807,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.355795133478997,
+              "indexed_p95": 5.27313898572737,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 8.533911475227162,
+              "indexed_mean": 2.355795133478997,
+              "indexed_p95": 5.27313898572737,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 0,
+            "fixed": 1145,
+            "never_contacted_active": 632,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "50fdcc6647bf36c3460a05097ae200abff1de963c00cb9c8ff428ab131abb520"
+        },
+        "vanilla_off_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.obj",
+          "output_sha256": "ea8b6eee653371cee9644d7a8def05b9f9171da0d1aeddb7b2fd4580f0bd9268",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.231434587970046,
+              "indexed_mean": 2.8297079144508865,
+              "indexed_p95": 6.362754570352973,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 7.90996399588527,
+              "indexed_mean": 2.2020970211077406,
+              "indexed_p95": 5.115202880537823,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.90996399588527,
+              "indexed_mean": 2.2020970211077406,
+              "indexed_p95": 5.115202880537823,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 10.231434587970046,
+              "indexed_mean": 2.978642658163164,
+              "indexed_p95": 6.7515941671591095,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.90996399588527,
+              "indexed_mean": 2.28388451789761,
+              "indexed_p95": 5.241991986285203,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.90996399588527,
+              "indexed_mean": 2.28388451789761,
+              "indexed_p95": 5.241991986285203,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 240,
+            "fixed": 1145,
+            "never_contacted_active": 392,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "7db493e6c80bcc4bf04cde2e796ebad9ce971df90a5b4b9ecfdec5bf9eace1dc"
+        },
+        "vanilla_off_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "off",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "off"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.obj",
+          "output_sha256": "fcd747277c136cd260cff2bdba253aa324244d4f0ab66c1d9e82018b0a7a4b4b",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 11.137570276052575,
+              "indexed_mean": 3.6840201438941365,
+              "indexed_p95": 8.396914270439455,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 9.21475088621086,
+              "indexed_mean": 2.278746724018073,
+              "indexed_p95": 5.151314133091274,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 9.21475088621086,
+              "indexed_mean": 2.278746724018073,
+              "indexed_p95": 5.151314133091274,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 11.137570276052575,
+              "indexed_mean": 3.5050864345302997,
+              "indexed_p95": 8.386929849764138,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 9.21475088621086,
+              "indexed_mean": 2.3720942960902223,
+              "indexed_p95": 5.27719115757415,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 9.21475088621086,
+              "indexed_mean": 2.3720942960902223,
+              "indexed_p95": 5.27719115757415,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 1,
+            "fixed": 1145,
+            "never_contacted_active": 631,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "4187e244f74c5a74dd659d4c90f1ba383ac2833c51838f4a379a65cf642ef610"
+        },
+        "vanilla_on_continuation": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "continuation",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.obj",
+          "output_sha256": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.020837423404611,
+              "indexed_mean": 2.7008409510550258,
+              "indexed_p95": 6.3334602312964074,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 7.931535351439587,
+              "indexed_mean": 2.189668110794406,
+              "indexed_p95": 5.108695549187248,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 7.931535351439587,
+              "indexed_mean": 2.189668110794406,
+              "indexed_p95": 5.108695549187248,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 10.020837423404611,
+              "indexed_mean": 2.95280735645209,
+              "indexed_p95": 6.580028885672259,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 7.931535351439587,
+              "indexed_mean": 2.277090381738645,
+              "indexed_p95": 5.2428391444942575,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 7.931535351439587,
+              "indexed_mean": 2.277090381738645,
+              "indexed_p95": 5.2428391444942575,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 238,
+            "fixed": 1145,
+            "never_contacted_active": 394,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "13bbe7b4a7d440a2979c3c5645ac9ef79fe1525197377aa8f9a922064822fa21"
+        },
+        "vanilla_on_static": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "static",
+            "--trace-json",
+            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.trace.json"
+          ],
+          "factors": {
+            "anchor": "vanilla",
+            "body": "static",
+            "soft": "on"
+          },
+          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.obj",
+          "output_sha256": "dda6971b0bb99d389d6c2101117d20fc2f335cbbf41b2a0db983877c9153f3a8",
+          "returncode": 0,
+          "scores": {
+            "active_all": {
+              "indexed_max": 10.556976534848573,
+              "indexed_mean": 3.143187466715172,
+              "indexed_p95": 7.6996137841125885,
+              "n": 632
+            },
+            "active_always_clear": {
+              "indexed_max": 8.441803912772176,
+              "indexed_mean": 2.2330295183168367,
+              "indexed_p95": 5.053881689971854,
+              "n": 391
+            },
+            "active_never_corrected": {
+              "indexed_max": 8.441803912772176,
+              "indexed_mean": 2.2330295183168367,
+              "indexed_p95": 5.053881689971854,
+              "n": 391
+            },
+            "fully_free": {
+              "indexed_max": 10.556976534848573,
+              "indexed_mean": 3.4040477079852614,
+              "indexed_p95": 7.997126933144839,
+              "n": 508
+            },
+            "fully_free_always_clear": {
+              "indexed_max": 8.441803912772176,
+              "indexed_mean": 2.3288909513499507,
+              "indexed_p95": 5.105168178766548,
+              "n": 350
+            },
+            "fully_free_never_corrected": {
+              "indexed_max": 8.441803912772176,
+              "indexed_mean": 2.3288909513499507,
+              "indexed_p95": 5.105168178766548,
+              "n": 350
+            }
+          },
+          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.trace.json",
+          "trace_counts": {
+            "active": 632,
+            "ever_contacted_active": 4,
+            "fixed": 1145,
+            "never_contacted_active": 628,
+            "support_target_clamps": 0,
+            "vertices": 1777
+          },
+          "trace_sha256": "97d315728ef6498ac578db50d4bdcad1972680ce8197167c2555d3eea2df0b93"
+        }
+      },
+      "contrasts": {
+        "active_all": {
+          "anchor": 0.41144752698545384,
+          "anchor:body": 0.09532416248153908,
+          "anchor:soft": -0.11803881458359866,
+          "anchor:soft:body": -0.152377524005884,
+          "body": 0.7436535350332374,
+          "soft": 0.21681100570381417,
+          "soft:body": 0.053605332885668044
+        },
+        "active_always_clear": {
+          "anchor": 0.012308013093942805,
+          "anchor:body": -0.004512844918644454,
+          "anchor:soft": -0.012283098380298618,
+          "anchor:soft:body": -0.010575504470319963,
+          "body": 0.05549271029773717,
+          "soft": 0.016789959626987372,
+          "soft:body": 0.006068643223630765
+        },
+        "active_never_corrected": {
+          "anchor": 0.012308013093942805,
+          "anchor:body": -0.004512844918644454,
+          "anchor:soft": -0.012283098380298618,
+          "anchor:soft:body": -0.010575504470319963,
+          "body": 0.05549271029773717,
+          "soft": 0.016789959626987372,
+          "soft:body": 0.006068643223630765
+        },
+        "fully_free": {
+          "anchor": 0.03334809325222965,
+          "anchor:body": -0.018881381022090693,
+          "anchor:soft": -0.023429594632106365,
+          "anchor:soft:body": -0.027089768640412792,
+          "body": 0.4699606829280629,
+          "soft": 0.0400074194959501,
+          "soft:body": 0.010511943776569055
+        },
+        "fully_free_always_clear": {
+          "anchor": 0.010237637268692534,
+          "anchor:body": -0.004935127509782422,
+          "anchor:soft": -0.010039782843218159,
+          "anchor:soft:body": -0.01156188952691739,
+          "body": 0.06507004639217628,
+          "soft": 0.01495895760639998,
+          "soft:body": 0.006642714763735569
+        },
+        "fully_free_never_corrected": {
+          "anchor": 0.010237637268692534,
+          "anchor:body": -0.004935127509782422,
+          "anchor:soft": -0.010039782843218159,
+          "anchor:soft:body": -0.01156188952691739,
+          "body": 0.06507004639217628,
+          "soft": 0.01495895760639998,
+          "soft:body": 0.006642714763735569
+        }
+      },
+      "ever_collision_corrected_in_any_cell": 241,
+      "ground_truth": "fixtures/pathb/yarl_clothes__GROUND_TRUTH.obj",
+      "ground_truth_sha256": "31110901c2a7a5e8de81fea32fcb42c033609ef9aa72ba0ed2e4d3cf380322ab",
+      "mask_counts": {
+        "active_all": 632,
+        "active_always_clear": 391,
+        "active_never_corrected": 391,
+        "fully_free": 508,
+        "fully_free_always_clear": 350,
+        "fully_free_never_corrected": 350
+      },
+      "role": "sentinel:anti-umbrella"
+    }
+  },
+  "protocol": {
+    "common_always_clear_mask": "minimum_observed_gap > clearance+1e-6 in every factorial cell",
+    "common_never_corrected_mask": "contact_corrections == 0 in every factorial cell",
+    "factors": {
+      "anchor": [
+        "vanilla",
+        "authored"
+      ],
+      "body": [
+        "continuation",
+        "static"
+      ],
+      "soft": [
+        "on",
+        "off"
+      ]
+    },
+    "fully_free_threshold": 0.55,
+    "gravity": 0.0,
+    "iterations": 10,
+    "morph_steps": 6,
+    "rest": "base",
+    "scope_warning": "masks are conservative post-treatment subpopulations and global indexed means do not identify a localized imprint cause"
+  },
+  "schema": "pathb-s03e-h3c-factorial-v2",
+  "tool_sha256": {
+    "pathb_gate": "75df32d7ee70c7fca3103ca9bb5bcb12eca37656fe11041fb2617abda58fc439",
+    "runner": "5db61d5122849a15f08b8ffe3afa7a5b87af02b771489ae056c5fdfe2a105260",
+    "shell_spike": "a4dcaaacc9ed5bc5946f5bfaa7a55a932de7e6979a8911fde08a25d543ec3750"
+  }
+}

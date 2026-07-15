@@ -1,0 +1,11 @@
+# Path-B research artifacts use byte hashes for provenance.  Pin their line
+# endings so those hashes survive Windows/Linux checkouts.
+/tools/pathb_*.py text eol=lf
+/tools/shell_spike.py text eol=lf
+
+/fixtures/pathb/*.obj text eol=crlf
+/fixtures/pathb/sculpt_candidates/*.obj text eol=crlf
+/fixtures/pathb/*.txt text eol=lf
+/fixtures/pathb/S03E_*.json text eol=crlf
+/fixtures/pathb/S03E_*.md text eol=crlf
+/fixtures/pathb/captures/*.drcap binary

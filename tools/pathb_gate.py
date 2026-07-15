@@ -38,7 +38,7 @@ SENTINELS = {
         capture="corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
         gt=FX / "yarl_cloak__GROUND_TRUTH.obj",
         base=TMP / "ds_yarl_cloak/cloth_base.obj", hem=None,
-        role="sentinel:gravity"),
+        role="sentinel:section-position/anti-imprint (not gravity-validated)"),
 }
 SECONDARY = {
     "vampire": dict(

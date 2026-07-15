@@ -14,11 +14,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+try:
+    from scipy.spatial import cKDTree
+except ImportError:  # the exact expanding-grid fallback below remains valid
+    cKDTree = None
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +62,18 @@ class CaptureFront:
     ref_body_tris: np.ndarray
     preset_mask: np.ndarray
     raw_diff: np.ndarray
+
+
+@dataclass
+class SurfaceAttachments:
+    """Material bindings from cloth support vertices to the reference body."""
+
+    requested: np.ndarray
+    valid: np.ndarray
+    triangle: np.ndarray
+    barycentric: np.ndarray
+    authored_offset: np.ndarray
+    authored_distance: np.ndarray
 
 
 class BinReader:
@@ -466,6 +484,14 @@ class UniformBodyCollider:
         raw_n = np.cross(self.b - self.a, self.c - self.a)
         lengths = np.linalg.norm(raw_n, axis=1)
         self.normals = raw_n / np.maximum(lengths[:, None], 1.0e-30)
+        self.centroids = tri_v.mean(axis=1)
+        self.triangle_radius = np.linalg.norm(
+            tri_v - self.centroids[:, None, :], axis=2
+        ).max(axis=1)
+        self.max_triangle_radius = (
+            float(self.triangle_radius.max()) if len(self.triangle_radius) else 0.0
+        )
+        self.centroid_tree = cKDTree(self.centroids) if cKDTree is not None and len(tris) else None
         self.grid: dict[tuple[int, int, int], list[int]] = {}
         lo = np.floor(tri_v.min(axis=1) / self.cell_size).astype(np.int32)
         hi = np.floor(tri_v.max(axis=1) / self.cell_size).astype(np.int32)
@@ -475,26 +501,24 @@ class UniformBodyCollider:
                     for iz in range(int(lo[ti, 2]), int(hi[ti, 2]) + 1):
                         self.grid.setdefault((ix, iy, iz), []).append(ti)
 
-    def candidates(self, p: np.ndarray, max_ring: int = 3) -> np.ndarray:
-        center = np.floor(p / self.cell_size).astype(np.int32)
-        found: set[int] = set()
-        for ring in range(1, max_ring + 1):
-            for ix in range(int(center[0]) - ring, int(center[0]) + ring + 1):
-                for iy in range(int(center[1]) - ring, int(center[1]) + ring + 1):
-                    for iz in range(int(center[2]) - ring, int(center[2]) + ring + 1):
-                        found.update(self.grid.get((ix, iy, iz), ()))
-            if found:
-                break
-        return np.fromiter(sorted(found), dtype=np.int32)
+        if self.grid:
+            grid_keys = np.asarray(list(self.grid), dtype=np.int32)
+            self.grid_min = grid_keys.min(axis=0)
+            self.grid_max = grid_keys.max(axis=0)
+        else:
+            self.grid_min = np.zeros(3, dtype=np.int32)
+            self.grid_max = np.zeros(3, dtype=np.int32)
 
-    def closest(self, p: np.ndarray):
-        candidates = self.candidates(p)
+    def _closest_candidates(self, p: np.ndarray, candidates: np.ndarray):
         if len(candidates) == 0:
             return None
+        candidates = np.unique(candidates.astype(np.int32))
         cps = closest_points_triangles(
             p, self.a[candidates], self.b[candidates], self.c[candidates]
         )
         d2 = np.einsum("ij,ij->i", cps - p, cps - p)
+        # unique() sorts triangle IDs, so argmin has a deterministic smallest-ID
+        # tie break when two surface pieces are exactly equidistant.
         local = int(np.argmin(d2))
         tri = int(candidates[local])
         cp = cps[local]
@@ -502,6 +526,66 @@ class UniformBodyCollider:
         dist = float(np.sqrt(d2[local]))
         sign = float(np.dot(p - cp, n))
         return cp, n, (-dist if sign < 0.0 else dist), tri
+
+    def _closest_grid_exact(self, p: np.ndarray):
+        """Dependency-free exact fallback using a proven expanding cube.
+
+        A triangle is inserted into every grid cell touched by its AABB.  Once
+        the current best distance is no larger than the distance from ``p`` to
+        the exterior of the searched cell cube, no unseen triangle can win.
+        """
+        if not self.grid:
+            return None
+        center = np.floor(p / self.cell_size).astype(np.int32)
+        max_ring = int(
+            max(
+                np.max(np.abs(center - self.grid_min)),
+                np.max(np.abs(center - self.grid_max)),
+            )
+        )
+        found: set[int] = set()
+        for ring in range(max_ring + 1):
+            for ix in range(int(center[0]) - ring, int(center[0]) + ring + 1):
+                for iy in range(int(center[1]) - ring, int(center[1]) + ring + 1):
+                    for iz in range(int(center[2]) - ring, int(center[2]) + ring + 1):
+                        if max(abs(ix - int(center[0])), abs(iy - int(center[1])), abs(iz - int(center[2]))) != ring:
+                            continue
+                        found.update(self.grid.get((ix, iy, iz), ()))
+            if not found:
+                continue
+            result = self._closest_candidates(
+                p, np.fromiter(sorted(found), dtype=np.int32)
+            )
+            if result is None:
+                continue
+            best = abs(float(result[2]))
+            cube_lo = (center - ring) * self.cell_size
+            cube_hi = (center + ring + 1) * self.cell_size
+            exterior_distance = float(np.min(np.minimum(p - cube_lo, cube_hi - p)))
+            if best <= exterior_distance + 1.0e-12 or len(found) == len(self.tris):
+                return result
+        # Defensive exact fallback for a point beyond the populated grid.
+        return self._closest_candidates(p, np.arange(len(self.tris), dtype=np.int32))
+
+    def closest(self, p: np.ndarray):
+        if self.centroid_tree is None:
+            return self._closest_grid_exact(p)
+        count = len(self.tris)
+        k = min(32, count)
+        while True:
+            centroid_distance, candidates = self.centroid_tree.query(p, k=k)
+            centroid_distance = np.atleast_1d(centroid_distance)
+            candidates = np.atleast_1d(candidates).astype(np.int32)
+            result = self._closest_candidates(p, candidates)
+            if result is None:
+                return None
+            best = abs(float(result[2]))
+            # For every unseen triangle: distance(surface,p) >=
+            # distance(centroid,p) - radius.  The global maximum radius gives a
+            # conservative bound and makes this query globally exact.
+            if k >= count or float(centroid_distance[-1]) - self.max_triangle_radius >= best:
+                return result
+            k = min(k * 2, count)
 
     def project(
         self,
@@ -535,6 +619,232 @@ class UniformBodyCollider:
             if result is not None:
                 out[oi] = result[2]
         return out
+
+
+def barycentric_coordinates(point: np.ndarray, triangle: np.ndarray) -> np.ndarray | None:
+    """Barycentric coordinates of a point in the plane of one triangle."""
+    a, b, c = triangle
+    v0 = b - a
+    v1 = c - a
+    v2 = point - a
+    d00 = float(v0 @ v0)
+    d01 = float(v0 @ v1)
+    d11 = float(v1 @ v1)
+    d20 = float(v2 @ v0)
+    d21 = float(v2 @ v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) <= 1.0e-20:
+        return None
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    bary = np.array([1.0 - v - w, v, w], dtype=np.float64)
+    # Closest points on edges can leave the analytic solve a few ulps outside.
+    bary = np.clip(bary, 0.0, 1.0)
+    total = float(bary.sum())
+    return bary / total if total > 1.0e-20 else None
+
+
+def build_surface_attachments(
+    cloth_base: np.ndarray,
+    requested: np.ndarray,
+    body_base: np.ndarray,
+    body_tris: np.ndarray,
+    collider: UniformBodyCollider,
+) -> SurfaceAttachments:
+    """Bind requested cloth vertices to exact closest reference-body material."""
+    count = len(cloth_base)
+    valid = np.zeros(count, dtype=bool)
+    triangle = np.full(count, -1, dtype=np.int32)
+    barycentric = np.zeros((count, 3), dtype=np.float64)
+    authored_offset = np.zeros((count, 3), dtype=np.float64)
+    authored_distance = np.full(count, np.nan, dtype=np.float64)
+    for vi in np.flatnonzero(requested):
+        closest = collider.closest(cloth_base[vi])
+        if closest is None:
+            continue
+        point, _normal, _gap, triangle_index = closest
+        bary = barycentric_coordinates(point, body_base[body_tris[triangle_index]])
+        if bary is None:
+            continue
+        valid[vi] = True
+        triangle[vi] = triangle_index
+        barycentric[vi] = bary
+        authored_offset[vi] = cloth_base[vi] - point
+        authored_distance[vi] = float(np.linalg.norm(authored_offset[vi]))
+    missing = np.flatnonzero(np.logical_and(requested, ~valid))
+    if len(missing):
+        raise RuntimeError(
+            f"surface attachment failed for {len(missing)} requested vertices; "
+            f"first={missing[:8].tolist()}"
+        )
+    return SurfaceAttachments(
+        requested=requested.copy(),
+        valid=valid,
+        triangle=triangle,
+        barycentric=barycentric,
+        authored_offset=authored_offset,
+        authored_distance=authored_distance,
+    )
+
+
+def triangle_corot_rotation(reference: np.ndarray, current: np.ndarray) -> np.ndarray:
+    """Proper Kabsch rotation of a material body triangle (stretch/shear removed)."""
+    reference_centered = reference - reference.mean(axis=0)
+    current_centered = current - current.mean(axis=0)
+    covariance = reference_centered.T @ current_centered
+    u, _singular, vt = np.linalg.svd(covariance)
+    rotation = vt.T @ u.T
+    if np.linalg.det(rotation) < 0.0:
+        vt[-1] *= -1.0
+        rotation = vt.T @ u.T
+    if not np.isfinite(rotation).all() or np.linalg.det(rotation) <= 0.0:
+        raise RuntimeError("invalid co-rotational body-triangle frame")
+    return rotation
+
+
+def transport_surface_attachments(
+    attachments: SurfaceAttachments,
+    body_reference: np.ndarray,
+    body_current: np.ndarray,
+    body_tris: np.ndarray,
+    authored_fallback: np.ndarray,
+) -> np.ndarray:
+    """Transport support targets without copying body stretch/shear into offset."""
+    # This is both an invariant and a numerical guard: a static body must make
+    # surface-corot exactly identical to authored, not merely close enough for
+    # an equidistant nearest-face tie to change contact sign.
+    if np.array_equal(body_reference, body_current):
+        return authored_fallback.copy()
+    target = authored_fallback.copy()
+    indices = np.flatnonzero(attachments.valid)
+    if len(indices) == 0:
+        return target
+    triangles = attachments.triangle[indices]
+    current_triangles = body_current[body_tris[triangles]]
+    support_points = np.sum(
+        attachments.barycentric[indices, :, None] * current_triangles,
+        axis=1,
+    )
+    for triangle_index in np.unique(triangles):
+        local = np.flatnonzero(triangles == triangle_index)
+        rotation = triangle_corot_rotation(
+            body_reference[body_tris[triangle_index]],
+            body_current[body_tris[triangle_index]],
+        )
+        cloth_indices = indices[local]
+        target[cloth_indices] = support_points[local] + (
+            attachments.authored_offset[cloth_indices] @ rotation.T
+        )
+    return target
+
+
+def clamp_targets_to_contact_floor(
+    targets: np.ndarray,
+    indices: np.ndarray,
+    collider: UniformBodyCollider,
+    contact_floor: np.ndarray,
+    tolerance: float = 1.0e-6,
+) -> tuple[int, float]:
+    """Keep kinematic support targets from worsening authored body contact."""
+    moved = 0
+    worst = 0.0
+    for vi in indices:
+        result = collider.closest(targets[vi])
+        if result is None:
+            raise RuntimeError(f"no body surface found while clamping support vertex {vi}")
+        point, normal, gap, _triangle = result
+        floor = float(contact_floor[vi])
+        if gap >= floor - tolerance:
+            continue
+        corrected = point + normal * floor
+        delta = corrected - targets[vi]
+        targets[vi] = corrected
+        moved += 1
+        worst = max(worst, float(np.linalg.norm(delta)))
+    return moved, worst
+
+
+def attachment_selftest() -> None:
+    """Rigid-motion and authored-closure tests for surface-corot bindings."""
+    body = np.array(
+        [[-2.0, -1.0, 0.0], [2.0, -1.0, 0.0], [0.0, 2.0, 0.0]],
+        dtype=np.float64,
+    )
+    tris = np.array([[0, 1, 2]], dtype=np.int32)
+    cloth = np.array(
+        [[0.0, 0.0, 0.5], [0.8, -0.2, 1.2], [-0.7, 0.4, 0.2]],
+        dtype=np.float64,
+    )
+    requested = np.ones(len(cloth), dtype=bool)
+    collider = UniformBodyCollider(body, tris)
+    bindings = build_surface_attachments(cloth, requested, body, tris, collider)
+    closure = transport_surface_attachments(bindings, body, body, tris, cloth)
+    closure_error = float(np.linalg.norm(closure - cloth, axis=1).max())
+    if closure_error > 1.0e-9:
+        raise RuntimeError(f"surface-corot t=0 closure failed: {closure_error}")
+    authored_gap = collider.gaps(cloth)
+    clamped = closure.copy()
+    clamp_count, clamp_worst = clamp_targets_to_contact_floor(
+        clamped,
+        np.arange(len(cloth), dtype=np.int32),
+        collider,
+        np.minimum(authored_gap, 0.02),
+    )
+    if clamp_count != 0 or clamp_worst != 0.0 or not np.array_equal(clamped, cloth):
+        raise RuntimeError(
+            f"surface-corot static clamp is not a no-op: count={clamp_count} "
+            f"worst={clamp_worst}"
+        )
+
+    angle = np.deg2rad(37.0)
+    rotation = np.array(
+        [[np.cos(angle), -np.sin(angle), 0.0],
+         [np.sin(angle), np.cos(angle), 0.0],
+         [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    translation = np.array([4.0, -3.0, 2.5], dtype=np.float64)
+    moved_body = body @ rotation.T + translation
+    transported = transport_surface_attachments(bindings, body, moved_body, tris, cloth)
+    expected = cloth @ rotation.T + translation
+    rigid_error = float(np.linalg.norm(transported - expected, axis=1).max())
+    if rigid_error > 1.0e-9:
+        raise RuntimeError(f"surface-corot rigid-motion test failed: {rigid_error}")
+    print(
+        f"attachment selftest PASS closure={closure_error:.3g} "
+        f"rigidMotion={rigid_error:.3g} staticClamp=no-op "
+        f"valid={int(bindings.valid.sum())}"
+    )
+
+
+def attachment_report(capture_path: Path) -> None:
+    """Report the inferred support population without running the solver."""
+    cap = read_capture_front(capture_path)
+    drape = fitted_drape_signal(cap)
+    inverse_mass = np.clip((drape - 0.05) / 0.50, 0.0, 1.0)
+    inverse_mass = inverse_mass * inverse_mass * (3.0 - 2.0 * inverse_mass)
+    fixed = inverse_mass <= 1.0e-12
+    soft_anchor = 0.18 * (1.0 - inverse_mass) ** 2
+    requested = np.logical_or(fixed, soft_anchor > 0.0)
+    collider = UniformBodyCollider(cap.ref_body_verts, cap.ref_body_tris)
+    bindings = build_surface_attachments(
+        cap.base_verts,
+        requested,
+        cap.ref_body_verts,
+        cap.ref_body_tris,
+        collider,
+    )
+    distances = bindings.authored_distance[bindings.valid]
+    print(
+        f"attachment report shape={cap.shape_name!r} verts={len(cap.base_verts)} "
+        f"fixed={int(fixed.sum())} requested={int(requested.sum())} "
+        f"valid={int(bindings.valid.sum())} "
+        f"uniqueBodyTris={len(np.unique(bindings.triangle[bindings.valid]))} "
+        f"distance[min/p50/p95/max]={distances.min():.3f}/"
+        f"{np.percentile(distances,50):.3f}/{np.percentile(distances,95):.3f}/"
+        f"{distances.max():.3f} gt4={(distances > 4.0).sum()} "
+        f"gt8={(distances > 8.0).sum()}"
+    )
 
 
 class GravityShadow:
@@ -1145,6 +1455,8 @@ def solve_shell(
     anchor_target_mode: str = "vanilla",
     soft_anchor_mode: str = "on",
     body_mode: str = "continuation",
+    trace_json: Path | None = None,
+    surface_corot_clamp: bool = True,
 ) -> None:
     cap = read_capture_front(capture_path)
     vanilla_path = dataset / "cloth_vanilla.obj"
@@ -1244,29 +1556,81 @@ def solve_shell(
     base_collider = UniformBodyCollider(cap.ref_body_verts, cap.ref_body_tris)
     authored_gap = base_collider.gaps(cap.base_verts)
     contact_floor = np.minimum(authored_gap, clearance)
+    surface_attachments: SurfaceAttachments | None = None
+    attachment_indices = np.empty(0, dtype=np.int32)
+    if anchor_target_mode == "surface-corot":
+        if not np.array_equal(cap.ref_body_tris, cap.body_tris):
+            raise RuntimeError("surface-corot requires identical reference/morphed body topology")
+        attachment_mask = np.logical_or(fixed, soft_anchor > 0.0)
+        surface_attachments = build_surface_attachments(
+            cap.base_verts,
+            attachment_mask,
+            cap.ref_body_verts,
+            cap.ref_body_tris,
+            base_collider,
+        )
+        attachment_indices = np.flatnonzero(surface_attachments.valid).astype(np.int32)
+        distances = surface_attachments.authored_distance[attachment_indices]
+        print(
+            f"surfaceCorot requested={int(attachment_mask.sum())} "
+            f"valid={len(attachment_indices)} "
+            f"uniqueBodyTris={len(np.unique(surface_attachments.triangle[attachment_indices]))} "
+            f"authoredDistance min/p50/p95/max={distances.min():.3f}/"
+            f"{np.percentile(distances,50):.3f}/{np.percentile(distances,95):.3f}/"
+            f"{distances.max():.3f}"
+        )
 
     x = cap.base_verts.copy()
     plumb_support = np.zeros(len(x), dtype=np.float64)
+    # S0.3e causal instrumentation.  A vertex is "contacted" only when the
+    # unilateral collider actually applies a correction.  This is distinct
+    # from the old authored-gap proxy and lets factorial analysis use one
+    # common never-contacted, non-fixed population across all cells.
+    contact_count = np.zeros(len(x), dtype=np.int64)
+    contact_step_count = np.zeros(len(x), dtype=np.int64)
+    minimum_observed_gap = np.full(len(x), np.inf, dtype=np.float64)
+    support_clamp_total = 0
+    support_clamp_worst = 0.0
+    final_anchor_target = cap.base_verts.copy()
     contact_triangles_global: set[int] = set()
     body_tri_adjacency = triangle_adjacency(cap.body_tris) if shadow_source == "contact" else []
     for step in range(1, morph_steps + 1):
         t = step / morph_steps
-        # S0.3c factor "body/contact": continuation (morph the obstacle) vs
-        # static (the obstacle never grows) - isolates how much of the imprint
-        # arrives through CONTACT rather than through the anchors/rest.
+        contacted_this_step = np.zeros(len(x), dtype=bool)
+        # S0.3c factor "body geometry": both modes retain collision.  Static
+        # keeps the reference obstacle while continuation morphs it; this is
+        # not a contact-off/contact-on experiment.
         if body_mode == "static":
             body = cap.ref_body_verts
         else:
             body = cap.ref_body_verts + (cap.body_verts - cap.ref_body_verts) * t
         collider = UniformBodyCollider(body, cap.body_tris)
-        # S0.3c factor "hard-anchor target": vanilla (base + rawDiff*t, the
-        # current behaviour, which injects the vanilla conform) vs authored
-        # (base only - the anchors hold the AUTHORED pose and never carry the
-        # body imprint). Hard anchors stay pinned in both cases.
-        if anchor_target_mode == "authored":
+        # Anchor targets: vanilla copies rawDiff; authored freezes the source;
+        # surface-corot follows a material body point and transports only its
+        # local rigid rotation + the authored cloth offset (no sculpt target).
+        if anchor_target_mode == "surface-corot":
+            assert surface_attachments is not None
+            anchor_target = transport_surface_attachments(
+                surface_attachments,
+                cap.ref_body_verts,
+                body,
+                cap.body_tris,
+                cap.base_verts,
+            )
+            if surface_corot_clamp:
+                clamp_count, clamp_worst = clamp_targets_to_contact_floor(
+                    anchor_target,
+                    np.flatnonzero(fixed).astype(np.int32),
+                    collider,
+                    contact_floor,
+                )
+                support_clamp_total += clamp_count
+                support_clamp_worst = max(support_clamp_worst, clamp_worst)
+        elif anchor_target_mode == "authored":
             anchor_target = cap.base_verts
         else:
             anchor_target = cap.base_verts + cap.raw_diff * t
+        final_anchor_target = anchor_target
         x[fixed] = anchor_target[fixed]
         if gravity != 0.0:
             x[:, 2] -= gravity * inv_mass
@@ -1354,6 +1718,7 @@ def solve_shell(
                 if result is None:
                     continue
                 cp, n, gap, body_tri = result
+                minimum_observed_gap[vi] = min(minimum_observed_gap[vi], gap)
                 floor = contact_floor[vi]
                 if gap >= floor:
                     continue
@@ -1362,6 +1727,8 @@ def solve_shell(
                 x[vi] = target
                 contact_triangles_global.add(int(body_tri))
                 plumb_support[vi] = 1.0
+                contact_count[vi] += 1
+                contacted_this_step[vi] = True
                 moved += 1
                 worst = max(worst, float(np.linalg.norm(delta)))
             moved_total += moved
@@ -1415,6 +1782,7 @@ def solve_shell(
                 plumb_worst = max(plumb_worst, plumb_step)
             x[fixed] = anchor_target[fixed]
 
+        contact_step_count += contacted_this_step.astype(np.int64)
         mean_strain, p95_ratio, max_ratio = edge_metrics(x, edges, rest_len)
         angle_err = np.abs(wrap_angle(signed_dihedrals_local(x[hinges]) - rest_angles))
         gaps = collider.gaps(x, active)
@@ -1425,6 +1793,7 @@ def solve_shell(
             f"shadowTris={shadow_triangle_count} plumbMoves={plumb_moved_total} "
             f"plumbWorst={plumb_worst:.3f} bandActive={band_active_total} "
             f"bandWorst={band_worst_ratio:.3f} minGap={np.nanmin(gaps):.3f} "
+            f"supportClamps={support_clamp_total} supportClampWorst={support_clamp_worst:.3f} "
             f"meanAbsStrain={mean_strain:.4f} p95Stretch={p95_ratio:.3f} maxStretch={max_ratio:.3f} "
             f"meanBendDeg={np.degrees(angle_err).mean():.3f}"
         )
@@ -1440,6 +1809,90 @@ def solve_shell(
         f"surface result->reference mean/p95/max={surf[0]:.4f}/{surf[1]:.4f}/{surf[2]:.4f} "
         f"reference->result={reverse_surf[0]:.4f}/{reverse_surf[1]:.4f}/{reverse_surf[2]:.4f}"
     )
+    if trace_json is not None:
+        def finite_list(values: np.ndarray) -> list[float | None]:
+            return [float(value) if np.isfinite(value) else None for value in values]
+
+        final_collider = UniformBodyCollider(
+            cap.ref_body_verts if body_mode == "static" else cap.body_verts,
+            cap.body_tris,
+        )
+        final_gap = final_collider.gaps(x)
+        observed = np.isfinite(minimum_observed_gap)
+        trace = {
+            "schema": "pathb-s03e-contact-trace-v1",
+            "capture": str(capture_path),
+            "capture_sha256": sha256(capture_path),
+            "output": str(output),
+            "output_sha256": sha256(output),
+            "parameters": {
+                "rest": rest_mode,
+                "bend_rest": bend_rest_mode,
+                "morph_steps": morph_steps,
+                "iterations": iterations,
+                "gravity_per_step": gravity,
+                "anchor_target": anchor_target_mode,
+                "soft_anchor": soft_anchor_mode,
+                "body_mode": body_mode,
+                "surface_corot_clamp": surface_corot_clamp,
+                "clearance": clearance,
+            },
+            "counts": {
+                "vertices": int(len(x)),
+                "fixed": int(fixed.sum()),
+                "active": int(len(active)),
+                "ever_contacted_active": int(np.logical_and(contact_count > 0, ~fixed).sum()),
+                "never_contacted_active": int(np.logical_and(contact_count == 0, ~fixed).sum()),
+                "support_target_clamps": int(support_clamp_total),
+            },
+            "vertices": {
+                "fixed": fixed.astype(np.uint8).tolist(),
+                "drape": drape.tolist(),
+                "inverse_mass": inv_mass.tolist(),
+                "soft_anchor": soft_anchor.tolist(),
+                "authored_gap": finite_list(authored_gap),
+                "contact_floor": finite_list(contact_floor),
+                "contact_corrections": contact_count.tolist(),
+                "contacted_morph_steps": contact_step_count.tolist(),
+                "minimum_observed_gap": finite_list(
+                    np.where(observed, minimum_observed_gap, np.nan)
+                ),
+                "final_gap": finite_list(final_gap),
+            },
+        }
+        if surface_attachments is not None:
+            attachment_distance = surface_attachments.authored_distance[attachment_indices]
+            raw_target = cap.base_verts + cap.raw_diff
+            target_delta = np.linalg.norm(
+                final_anchor_target[attachment_indices] - raw_target[attachment_indices], axis=1
+            )
+            trace["surface_attachment"] = {
+                "requested": int(surface_attachments.requested.sum()),
+                "valid": int(surface_attachments.valid.sum()),
+                "unique_body_triangles": int(
+                    len(np.unique(surface_attachments.triangle[attachment_indices]))
+                ),
+                "authored_distance_min": float(attachment_distance.min()),
+                "authored_distance_p50": float(np.percentile(attachment_distance, 50)),
+                "authored_distance_p95": float(np.percentile(attachment_distance, 95)),
+                "authored_distance_max": float(attachment_distance.max()),
+                "vs_raw_target_rms": float(np.sqrt(np.mean(target_delta * target_delta))),
+                "vs_raw_target_max": float(target_delta.max()),
+                "contact_floor_clamps": int(support_clamp_total),
+                "contact_floor_worst": float(support_clamp_worst),
+                "vertex_requested": surface_attachments.requested.astype(np.uint8).tolist(),
+                "vertex_valid": surface_attachments.valid.astype(np.uint8).tolist(),
+                "vertex_triangle": surface_attachments.triangle.tolist(),
+                "vertex_authored_distance": finite_list(
+                    surface_attachments.authored_distance
+                ),
+            }
+        trace_json.parent.mkdir(parents=True, exist_ok=True)
+        trace_json.write_text(
+            json.dumps(trace, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"trace={trace_json} sha256={sha256(trace_json)}")
 
 
 def inspect_dataset(capture_path: Path, dataset: Path) -> None:
@@ -1517,7 +1970,15 @@ def contact_check(capture_path: Path) -> None:
 
     # Validate the uniform-grid broad phase against a brute-force exact query on
     # deterministic cloth samples. This catches a too-small search neighborhood.
-    sample = np.linspace(0, len(cap.base_verts) - 1, 32, dtype=np.int32)
+    regular_sample = np.linspace(0, len(cap.base_verts) - 1, 32, dtype=np.int32)
+    finite_indices = indices[finite]
+    far_count = min(32, len(finite_indices))
+    far_sample = (
+        finite_indices[np.argsort(np.abs(gaps[finite]))[-far_count:]]
+        if far_count
+        else np.empty(0, dtype=np.int32)
+    )
+    sample = np.unique(np.concatenate((regular_sample, far_sample))).astype(np.int32)
     tri_v = cap.ref_body_verts[cap.ref_body_tris]
     worst_dist_error = 0.0
     tri_mismatches = 0
@@ -1534,7 +1995,8 @@ def contact_check(capture_path: Path) -> None:
         if fast[3] != brute_tri and abs(abs(fast[2]) - brute_dist) > 1.0e-7:
             tri_mismatches += 1
     print(
-        f"broadphase sample=32 worstDistanceError={worst_dist_error:.9g} "
+        f"broadphase sample={len(sample)} (regular+farthest) "
+        f"worstDistanceError={worst_dist_error:.9g} "
         f"materialTriMismatches={tri_mismatches}"
     )
 
@@ -1553,6 +2015,14 @@ def main() -> int:
     ap.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     ap.add_argument("--inspect", action="store_true", help="validate and report the frozen dataset")
     ap.add_argument("--contact-check", action="store_true", help="validate offline body contact queries")
+    ap.add_argument(
+        "--attachment-selftest", action="store_true",
+        help="validate surface-corot authored closure and rigid transport",
+    )
+    ap.add_argument(
+        "--attachment-report", action="store_true",
+        help="report inferred surface-corot support bindings without solving",
+    )
     ap.add_argument("--solve", action="store_true", help="run the experimental quasi-static shell solve")
     ap.add_argument("--output", type=Path, default=DEFAULT_DATASET / "shell_base.obj")
     ap.add_argument("--rest", choices=("base", "uniform", "lowpass"), default="base")
@@ -1594,17 +2064,36 @@ def main() -> int:
     ap.add_argument("--gravity", type=float, default=0.0)
     ap.add_argument("--clearance", type=float, default=0.02)
     # S0.3c causal ablation factors (default = current behaviour)
-    ap.add_argument("--anchor-target", choices=("vanilla", "authored"), default="vanilla")
+    ap.add_argument(
+        "--anchor-target",
+        choices=("vanilla", "authored", "surface-corot"),
+        default="vanilla",
+    )
+    ap.add_argument(
+        "--surface-corot-clamp", choices=("on", "off"), default="on",
+        help="clamp surface-corot hard targets to authored contact floors",
+    )
     ap.add_argument("--soft-anchor", choices=("on", "off"), default="on")
     ap.add_argument("--body-mode", choices=("continuation", "static"), default="continuation")
+    ap.add_argument(
+        "--trace-json", type=Path,
+        help="write per-vertex S0.3e contact/fixed history for causal analysis",
+    )
     args = ap.parse_args()
 
-    if not args.inspect and not args.contact_check and not args.solve:
-        ap.error("choose --inspect, --contact-check and/or --solve")
+    if not any((args.inspect, args.contact_check, args.attachment_selftest, args.attachment_report, args.solve)):
+        ap.error(
+            "choose --inspect, --contact-check, --attachment-selftest, "
+            "--attachment-report and/or --solve"
+        )
     if args.inspect:
         inspect_dataset(args.capture.resolve(), args.dataset.resolve())
     if args.contact_check:
         contact_check(args.capture.resolve())
+    if args.attachment_selftest:
+        attachment_selftest()
+    if args.attachment_report:
+        attachment_report(args.capture.resolve())
     if args.solve:
         solve_shell(
             args.capture.resolve(),
@@ -1638,6 +2127,8 @@ def main() -> int:
             anchor_target_mode=args.anchor_target,
             soft_anchor_mode=args.soft_anchor,
             body_mode=args.body_mode,
+            trace_json=args.trace_json.resolve() if args.trace_json else None,
+            surface_corot_clamp=args.surface_corot_clamp == "on",
         )
     return 0
 

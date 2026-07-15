@@ -1,0 +1,1425 @@
+{
+  "garments": {
+    "blacksmith": {
+      "base": {
+        "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset/cloth_base.obj",
+        "sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7"
+      },
+      "candidates": {
+        "production": {
+          "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj",
+          "sha256": "ec4894ccb8ba3c095447b17a774789dc13fb9dc82f3b33b6da7ed4a88961b151"
+        },
+        "shell_base": {
+          "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj",
+          "sha256": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507"
+        }
+      },
+      "capture": {
+        "path": "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+        "sha256": "4c182319a0e9589b2cb667037057045e0a1dcd77b67f78f15baa4265ca48a780"
+      },
+      "diagnostics": {
+        "axis": [
+          0.00012618275506000404,
+          0.009654863852935347,
+          0.999953382754363
+        ],
+        "axis_eigenvalues": [
+          40.127482540705785,
+          135.93907852779537,
+          789.1827376280123
+        ],
+        "axis_orientation": "world_+Z",
+        "axis_relative_eigengap": 0.8277470197379414,
+        "axis_up_cos": 0.999953382754363,
+        "component": 0,
+        "component_selection": "largest",
+        "component_sizes": [
+          1974,
+          79
+        ],
+        "component_vertices": 1974,
+        "levels": {
+          "0.150000": {
+            "authored_arc_weight": 168.87209363877992,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.8679969954905205,
+                "delta_axis": -0.11049777655566528,
+                "delta_center": [
+                  -0.001830381811186126,
+                  0.003140733017084507,
+                  -0.11053302168774692
+                ],
+                "delta_center_norm": 0.11059278179376472,
+                "delta_down": 0.11053302168774692,
+                "delta_perp": 0.0045830951482077,
+                "delta_xy": 0.0036351755747591826,
+                "delta_z": -0.11053302168774692,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.01928351704742655,
+                "shape_axial_rms": 0.022674017378889348,
+                "shape_perp_rms": 0.046273227922810106,
+                "width_candidate": 15.025579448613437,
+                "width_ratio": 0.9725288956336752,
+                "width_sculpt": 14.612810187416072
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.4622950810430042,
+                "delta_axis": -0.43276529257901203,
+                "delta_center": [
+                  -0.008342672697712303,
+                  -0.03262045407934533,
+                  -0.4324694543694143
+                ],
+                "delta_center_norm": 0.43377819582669525,
+                "delta_down": 0.4324694543694143,
+                "delta_perp": 0.02962641918397935,
+                "delta_xy": 0.033670375882722654,
+                "delta_z": -0.4324694543694143,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.025662829402379666,
+                "shape_axial_rms": 0.028997795401946146,
+                "shape_perp_rms": 0.08857821267272452,
+                "width_candidate": 14.013341436914558,
+                "width_ratio": 1.042778430340844,
+                "width_sculpt": 14.612810187416072
+              }
+            },
+            "level": 0.15,
+            "quadrature_samples": 224
+          },
+          "0.266667": {
+            "authored_arc_weight": 88.99545906812548,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.8793945907284384,
+                "delta_axis": -0.16639781773427342,
+                "delta_center": [
+                  -0.029235505465285708,
+                  0.48369136785187417,
+                  -0.17107207793017665
+                ],
+                "delta_center_norm": 0.5138849189863195,
+                "delta_down": 0.17107207793017665,
+                "delta_perp": 0.48619900885835604,
+                "delta_xy": 0.4845740955872773,
+                "delta_z": -0.17107207793017665,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.025705831563902434,
+                "shape_axial_rms": 0.02027314752039547,
+                "shape_perp_rms": 0.04746612303814871,
+                "width_candidate": 16.884323078053626,
+                "width_ratio": 1.0057692623429972,
+                "width_sculpt": 16.98173316737484
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.660588323106539,
+                "delta_axis": -0.6781310382864059,
+                "delta_center": [
+                  0.016737205925857732,
+                  0.07153694123631427,
+                  -0.678855476033732
+                ],
+                "delta_center_norm": 0.6828194676227658,
+                "delta_down": 0.678855476033732,
+                "delta_perp": 0.07987941084684072,
+                "delta_xy": 0.07346882348079659,
+                "delta_z": -0.678855476033732,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.03820385653518286,
+                "shape_axial_rms": 0.022683526915752213,
+                "shape_perp_rms": 0.07210834416855393,
+                "width_candidate": 14.60244004980631,
+                "width_ratio": 1.1629380507266722,
+                "width_sculpt": 16.98173316737484
+              }
+            },
+            "level": 0.26666666666666666,
+            "quadrature_samples": 112
+          },
+          "0.383333": {
+            "authored_arc_weight": 83.46203023593378,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.7199819636438425,
+                "delta_axis": 1.0552242238257576,
+                "delta_center": [
+                  -0.38967273156378485,
+                  -0.06045205247997565,
+                  1.055906273583048
+                ],
+                "delta_center_norm": 1.1271367915942863,
+                "delta_down": -1.055906273583048,
+                "delta_perp": 0.3961555053470661,
+                "delta_xy": 0.39433398074908943,
+                "delta_z": 1.055906273583048,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.02076673982979625,
+                "shape_axial_rms": 0.038497624443332656,
+                "shape_perp_rms": 0.06372517389712515,
+                "width_candidate": 17.189003476860165,
+                "width_ratio": 1.0641297983823081,
+                "width_sculpt": 18.291330804224
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 3.1800904670542676,
+                "delta_axis": -1.5716824132089982,
+                "delta_center": [
+                  -0.021422202037756164,
+                  -0.8355192742640956,
+                  -1.5636857799811068
+                ],
+                "delta_center_norm": 1.7730382361703512,
+                "delta_down": 1.5636857799811068,
+                "delta_perp": 0.8206576502608196,
+                "delta_xy": 0.8357938552100915,
+                "delta_z": -1.5636857799811068,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.062230682846691254,
+                "shape_axial_rms": 0.05141825548408165,
+                "shape_perp_rms": 0.08247244092861278,
+                "width_candidate": 15.56765215339786,
+                "width_ratio": 1.1749575738196114,
+                "width_sculpt": 18.291330804224
+              }
+            },
+            "level": 0.3833333333333333,
+            "quadrature_samples": 112
+          },
+          "0.500000": {
+            "authored_arc_weight": 80.4750258297702,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 2.227354932702214,
+                "delta_axis": 0.6856239372550034,
+                "delta_center": [
+                  -0.6912679177397125,
+                  0.19839462014754528,
+                  0.683827568456401
+                ],
+                "delta_center_norm": 0.9923869722949212,
+                "delta_down": -0.683827568456401,
+                "delta_perp": 0.7174619986059386,
+                "delta_xy": 0.7191743595260379,
+                "delta_z": 0.683827568456401,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.04264722456132909,
+                "shape_axial_rms": 0.07952529782198035,
+                "shape_perp_rms": 0.07694161168454824,
+                "width_candidate": 17.274799972979096,
+                "width_ratio": 1.0603015579000907,
+                "width_sculpt": 18.31649732376218
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 3.2039779712771352,
+                "delta_axis": -3.420202652915767,
+                "delta_center": [
+                  -0.024198588635883894,
+                  -0.16463373747029308,
+                  -3.418769456765851
+                ],
+                "delta_center_norm": 3.4228167403062173,
+                "delta_down": 3.418769456765851,
+                "delta_perp": 0.13374696523072233,
+                "delta_xy": 0.1664026418221962,
+                "delta_z": -3.418769456765851,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.08693802103071158,
+                "shape_axial_rms": 0.09807910611477379,
+                "shape_perp_rms": 0.10060643609814826,
+                "width_candidate": 16.221398450528127,
+                "width_ratio": 1.1291564891660646,
+                "width_sculpt": 18.31649732376218
+              }
+            },
+            "level": 0.5,
+            "quadrature_samples": 116
+          },
+          "0.616667": {
+            "authored_arc_weight": 114.36254738732043,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 2.3301768552244266,
+                "delta_axis": -0.18278450975725083,
+                "delta_center": [
+                  0.04248077790825461,
+                  -0.45231231174040865,
+                  -0.178431174279865
+                ],
+                "delta_center_norm": 0.488086803548851,
+                "delta_down": 0.178431174279865,
+                "delta_perp": 0.45256883541770315,
+                "delta_xy": 0.45430281073711515,
+                "delta_z": -0.178431174279865,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.06624691722985183,
+                "shape_axial_rms": 0.05580962008588983,
+                "shape_perp_rms": 0.0780392418823743,
+                "width_candidate": 21.968313327286413,
+                "width_ratio": 1.040849426001261,
+                "width_sculpt": 22.865706316921916
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.82841210105582,
+                "delta_axis": -1.268101964189073,
+                "delta_center": [
+                  0.03279537736227828,
+                  -0.6462072984743157,
+                  -1.261925886421622
+                ],
+                "delta_center_norm": 1.4181383402894105,
+                "delta_down": 1.261925886421622,
+                "delta_perp": 0.6348493999513737,
+                "delta_xy": 0.6470389550697914,
+                "delta_z": -1.261925886421622,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.084949234695388,
+                "shape_axial_rms": 0.05648999573219594,
+                "shape_perp_rms": 0.09706570821210991,
+                "width_candidate": 21.52787175275178,
+                "width_ratio": 1.0621443020255419,
+                "width_sculpt": 22.865706316921916
+              }
+            },
+            "level": 0.6166666666666666,
+            "quadrature_samples": 248
+          },
+          "0.733333": {
+            "authored_arc_weight": 103.17442539616692,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.9957146868599535,
+                "delta_axis": -0.39693116338405526,
+                "delta_center": [
+                  0.0029408183480806246,
+                  -0.03020691995082192,
+                  -0.3966583818862972
+                ],
+                "delta_center_norm": 0.3978177702744403,
+                "delta_down": 0.3966583818862972,
+                "delta_perp": 0.026544865430206992,
+                "delta_xy": 0.0303497351795987,
+                "delta_z": -0.3966583818862972,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.02289075605802401,
+                "shape_axial_rms": 0.0122889228654455,
+                "shape_perp_rms": 0.04052484397270583,
+                "width_candidate": 19.287220064666524,
+                "width_ratio": 1.028644804886225,
+                "width_sculpt": 19.839698720216578
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.1155304907793138,
+                "delta_axis": -0.4049784522210451,
+                "delta_center": [
+                  -0.008730076789189786,
+                  -0.04783102770969294,
+                  -0.4045344068552339
+                ],
+                "delta_center_norm": 0.4074458341696801,
+                "delta_down": 0.4045344068552339,
+                "delta_perp": 0.04477232425140724,
+                "delta_xy": 0.04862120373366505,
+                "delta_z": -0.4045344068552339,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.023000201088410208,
+                "shape_axial_rms": 0.0145159862373221,
+                "shape_perp_rms": 0.046558976703233716,
+                "width_candidate": 19.260446625164953,
+                "width_ratio": 1.030074696933289,
+                "width_sculpt": 19.839698720216578
+              }
+            },
+            "level": 0.7333333333333333,
+            "quadrature_samples": 254
+          },
+          "0.850000": {
+            "authored_arc_weight": 122.11619884478574,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 2.835802885731406,
+                "delta_axis": -0.31119473015537735,
+                "delta_center": [
+                  0.002320161888096299,
+                  -0.06826730781725177,
+                  -0.3105503883609515
+                ],
+                "delta_center_norm": 0.317973823103318,
+                "delta_down": 0.3105503883609515,
+                "delta_perp": 0.06530843821790591,
+                "delta_xy": 0.06830672344507807,
+                "delta_z": -0.3105503883609515,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.05979377879678347,
+                "shape_axial_rms": 0.08758374266275527,
+                "shape_perp_rms": 0.13295462101888197,
+                "width_candidate": 15.587287870332144,
+                "width_ratio": 1.0762099878371794,
+                "width_sculpt": 16.77519488934477
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.8371818808887816,
+                "delta_axis": -0.3121526821951626,
+                "delta_center": [
+                  0.0028780004062525337,
+                  -0.07919485427019479,
+                  -0.3114029465610031
+                ],
+                "delta_center_norm": 0.3213283413520985,
+                "delta_down": 0.3114029465610031,
+                "delta_perp": 0.07624044828341792,
+                "delta_xy": 0.07924713136269211,
+                "delta_z": -0.3114029465610031,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.057342084841429705,
+                "shape_axial_rms": 0.0875293442568655,
+                "shape_perp_rms": 0.13285134838749907,
+                "width_candidate": 15.578383190847354,
+                "width_ratio": 1.076825154692598,
+                "width_sculpt": 16.77519488934477
+              }
+            },
+            "level": 0.85,
+            "quadrature_samples": 330
+          }
+        },
+        "weld_tolerance": 0.003
+      },
+      "ground_truth": {
+        "path": "fixtures/pathb/blacksmith__GROUND_TRUTH.obj",
+        "sha256": "c55998911fa28cca23325a922e8434672bf8884f21e77d74d586ad45ceca0dac"
+      },
+      "producer_journal": {
+        "production": {
+          "command": [
+            "build/algo/RelWithDebInfo/drape-harness.exe",
+            "--replay",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--result-obj",
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj": "ec4894ccb8ba3c095447b17a774789dc13fb9dc82f3b33b6da7ed4a88961b151"
+          },
+          "returncode": 4
+        },
+        "shell_base": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset/cloth_base.obj": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
+            "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507"
+          },
+          "returncode": 0
+        }
+      },
+      "role": "sentinel:under-butt"
+    },
+    "yarl_cloak": {
+      "base": {
+        "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset/cloth_base.obj",
+        "sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524"
+      },
+      "candidates": {
+        "production": {
+          "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj",
+          "sha256": "ad4bd649a3aff6e3e321a6c4832b211ce965ae14f350855fcd7fc68179495a9f"
+        },
+        "shell_base": {
+          "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj",
+          "sha256": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b"
+        }
+      },
+      "capture": {
+        "path": "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+        "sha256": "7f1df88df028e774591be018dd0e4a1c64dc69e32838c1b668df5101f0275559"
+      },
+      "diagnostics": {
+        "axis": [
+          -0.011400661045544682,
+          0.2900570547993494,
+          0.9569414453815093
+        ],
+        "axis_eigenvalues": [
+          56.25044289622331,
+          113.96131932468498,
+          337.15787591296
+        ],
+        "axis_orientation": "world_+Z",
+        "axis_relative_eigengap": 0.661994194808295,
+        "axis_up_cos": 0.9569414453815093,
+        "component": 0,
+        "component_selection": "largest",
+        "component_sizes": [
+          397
+        ],
+        "component_vertices": 397,
+        "levels": {
+          "0.150000": {
+            "authored_arc_weight": 31.371600366268225,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.9116960611152893,
+                "delta_axis": 3.2139751455550645,
+                "delta_center": [
+                  -0.9223048178610014,
+                  0.2301131075589673,
+                  3.277853985565592
+                ],
+                "delta_center_norm": 3.412905649151218,
+                "delta_down": -3.277853985565592,
+                "delta_perp": 1.1481675547421644,
+                "delta_xy": 0.9505778344354868,
+                "delta_z": 3.277853985565592,
+                "sector_coverage_candidate": 5,
+                "sector_coverage_common": 4,
+                "sector_coverage_sculpt": 5,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.16352568510134832,
+                "shape_perp_rms": 0.3458871086024039,
+                "width_candidate": 4.310284414336605,
+                "width_ratio": 0.6921740112505972,
+                "width_sculpt": 2.983466852702299
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.2336327071422715,
+                "delta_axis": 1.7210738299763988,
+                "delta_center": [
+                  -0.5712711060533473,
+                  -2.5800297515200477,
+                  2.573738241392469
+                ],
+                "delta_center_norm": 3.688771168091891,
+                "delta_down": -2.573738241392469,
+                "delta_perp": 3.2626580578289817,
+                "delta_xy": 2.642518532638894,
+                "delta_z": 2.573738241392469,
+                "sector_coverage_candidate": 5,
+                "sector_coverage_common": 4,
+                "sector_coverage_sculpt": 5,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.30377336000017163,
+                "shape_perp_rms": 0.3467047671829825,
+                "width_candidate": 4.441110806848504,
+                "width_ratio": 0.6717839257920754,
+                "width_sculpt": 2.983466852702299
+              }
+            },
+            "level": 0.15,
+            "quadrature_samples": 46
+          },
+          "0.266667": {
+            "authored_arc_weight": 44.60966006653295,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.4008540597360608,
+                "delta_axis": 4.1672137364933395,
+                "delta_center": [
+                  -0.17342331301958613,
+                  -0.04592271934297898,
+                  4.3665752225198275
+                ],
+                "delta_center_norm": 4.37025899868356,
+                "delta_down": -4.3665752225198275,
+                "delta_perp": 1.316621961671554,
+                "delta_xy": 0.17940050627170306,
+                "delta_z": 4.3665752225198275,
+                "sector_coverage_candidate": 5,
+                "sector_coverage_common": 4,
+                "sector_coverage_sculpt": 5,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.12521577408824128,
+                "shape_perp_rms": 0.1444793149157892,
+                "width_candidate": 6.876877251617628,
+                "width_ratio": 0.909306206932153,
+                "width_sculpt": 6.253187169206435
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.9581059959246119,
+                "delta_axis": 1.9192940720239604,
+                "delta_center": [
+                  -0.12456517539565559,
+                  -1.094659831632665,
+                  2.3359713013166896
+                ],
+                "delta_center_norm": 2.582742447571301,
+                "delta_down": -2.3359713013166896,
+                "delta_perp": 1.7282560040631363,
+                "delta_xy": 1.1017243892695692,
+                "delta_z": 2.3359713013166896,
+                "sector_coverage_candidate": 4,
+                "sector_coverage_common": 4,
+                "sector_coverage_sculpt": 5,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.2632071643098529,
+                "shape_perp_rms": 0.17675429468580647,
+                "width_candidate": 5.970503059642009,
+                "width_ratio": 1.0473467824638174,
+                "width_sculpt": 6.253187169206435
+              }
+            },
+            "level": 0.26666666666666666,
+            "quadrature_samples": 46
+          },
+          "0.383333": {
+            "authored_arc_weight": 53.66565491063071,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.9753310739667332,
+                "delta_axis": 4.012887365163938,
+                "delta_center": [
+                  0.20086433711018115,
+                  1.4191101253027156,
+                  3.76570004925388
+                ],
+                "delta_center_norm": 4.029232791811622,
+                "delta_down": -3.76570004925388,
+                "delta_perp": 0.36256293952595536,
+                "delta_xy": 1.433255046968055,
+                "delta_z": 3.76570004925388,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.023954842375885372,
+                "shape_perp_rms": 0.09218048545084256,
+                "width_candidate": 8.68515232108285,
+                "width_ratio": 0.9357996042096915,
+                "width_sculpt": 8.127562104570215
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.547463397731994,
+                "delta_axis": 1.701419916248308,
+                "delta_center": [
+                  0.12290443130061934,
+                  -1.5044890735366536,
+                  2.2354646545855843
+                ],
+                "delta_center_norm": 2.697386715605672,
+                "delta_down": -2.2354646545855843,
+                "delta_perp": 2.093099463025958,
+                "delta_xy": 1.5095008683748767,
+                "delta_z": 2.2354646545855843,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.1110891550270144,
+                "shape_perp_rms": 0.11890566114649476,
+                "width_candidate": 7.210958812435653,
+                "width_ratio": 1.1271125402288853,
+                "width_sculpt": 8.127562104570215
+              }
+            },
+            "level": 0.3833333333333333,
+            "quadrature_samples": 44
+          },
+          "0.500000": {
+            "authored_arc_weight": 55.4431461293917,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.8650055872269738,
+                "delta_axis": 2.6449049745253292,
+                "delta_center": [
+                  0.1600784577486899,
+                  2.168035718903795,
+                  2.108672300877629
+                ],
+                "delta_center_norm": 3.0286140169335622,
+                "delta_down": -2.108672300877629,
+                "delta_perp": 1.475459433294462,
+                "delta_xy": 2.173937439550157,
+                "delta_z": 2.108672300877629,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.06343580858387296,
+                "shape_perp_rms": 0.06063881194680342,
+                "width_candidate": 8.994545869112853,
+                "width_ratio": 0.956647009619158,
+                "width_sculpt": 8.604605408569162
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.5250650464103064,
+                "delta_axis": 1.932580400893446,
+                "delta_center": [
+                  0.2488431997259989,
+                  0.12752600693185556,
+                  1.9838492407747879
+                ],
+                "delta_center_norm": 2.0034579183543038,
+                "delta_down": -1.9838492407747879,
+                "delta_perp": 0.5281823782549816,
+                "delta_xy": 0.2796172750275938,
+                "delta_z": 1.9838492407747879,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.09071981832438053,
+                "shape_perp_rms": 0.13533713319520507,
+                "width_candidate": 7.880210752612464,
+                "width_ratio": 1.091925797253144,
+                "width_sculpt": 8.604605408569162
+              }
+            },
+            "level": 0.5,
+            "quadrature_samples": 40
+          },
+          "0.616667": {
+            "authored_arc_weight": 64.07898208050656,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.8694742676220497,
+                "delta_axis": 1.5303038603817978,
+                "delta_center": [
+                  -0.03121405191436999,
+                  1.3425524925979797,
+                  1.1918505391778353
+                ],
+                "delta_center_norm": 1.7955303450948576,
+                "delta_down": -1.1918505391778353,
+                "delta_perp": 0.9392014241136057,
+                "delta_xy": 1.3429153035161827,
+                "delta_z": 1.1918505391778353,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 7,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.052483805301334494,
+                "shape_perp_rms": 0.06830812081209663,
+                "width_candidate": 14.826875952041027,
+                "width_ratio": 0.9041768018524958,
+                "width_sculpt": 13.406117279780135
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.1197897522100297,
+                "delta_axis": 1.913737789980941,
+                "delta_center": [
+                  0.19262729403581313,
+                  1.258812086526925,
+                  1.6205866613774589
+                ],
+                "delta_center_norm": 2.061071146425656,
+                "delta_down": -1.6205866613774589,
+                "delta_perp": 0.7652593951250999,
+                "delta_xy": 1.2734650146721072,
+                "delta_z": 1.6205866613774589,
+                "sector_coverage_candidate": 7,
+                "sector_coverage_common": 7,
+                "sector_coverage_sculpt": 7,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.06373658078494393,
+                "shape_perp_rms": 0.10224194902409928,
+                "width_candidate": 14.684493285003912,
+                "width_ratio": 0.9129438121961431,
+                "width_sculpt": 13.406117279780135
+              }
+            },
+            "level": 0.6166666666666666,
+            "quadrature_samples": 86
+          },
+          "0.733333": {
+            "authored_arc_weight": 68.39881477136603,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.068685887078365,
+                "delta_axis": 1.331231469698999,
+                "delta_center": [
+                  0.08681883268584295,
+                  0.3217259211396595,
+                  1.29464806297581
+                ],
+                "delta_center_norm": 1.3368465450488742,
+                "delta_down": -1.29464806297581,
+                "delta_perp": 0.1223987707951148,
+                "delta_xy": 0.3332342690091984,
+                "delta_z": 1.29464806297581,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.026509246522871933,
+                "shape_perp_rms": 0.03827417881514984,
+                "width_candidate": 14.759161299326642,
+                "width_ratio": 0.943455169116209,
+                "width_sculpt": 13.924607019669624
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 1.344656469792317,
+                "delta_axis": 1.4774546573529073,
+                "delta_center": [
+                  0.0438129175243433,
+                  0.9054784360475647,
+                  1.2699980245355817
+                ],
+                "delta_center_norm": 1.5603543675118863,
+                "delta_down": -1.2699980245355817,
+                "delta_perp": 0.5018301382735224,
+                "delta_xy": 0.9065377928631209,
+                "delta_z": 1.2699980245355817,
+                "sector_coverage_candidate": 6,
+                "sector_coverage_common": 6,
+                "sector_coverage_sculpt": 6,
+                "sector_shape_rms": null,
+                "shape_axial_rms": 0.0317488288414435,
+                "shape_perp_rms": 0.06125666087324279,
+                "width_candidate": 14.832730018218616,
+                "width_ratio": 0.9387757346467192,
+                "width_sculpt": 13.924607019669624
+              }
+            },
+            "level": 0.7333333333333333,
+            "quadrature_samples": 106
+          },
+          "0.850000": {
+            "authored_arc_weight": 148.86803176802107,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.8490833317083961,
+                "delta_axis": 0.05002012800505408,
+                "delta_center": [
+                  0.09346562921089535,
+                  0.13723169459420959,
+                  0.011788262341880795
+                ],
+                "delta_center_norm": 0.1664551740680595,
+                "delta_down": -0.011788262341880795,
+                "delta_perp": 0.1587618082801591,
+                "delta_xy": 0.16603723029786718,
+                "delta_z": 0.011788262341880795,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.03403225446232963,
+                "shape_axial_rms": 0.022827599809436872,
+                "shape_perp_rms": 0.038188843802393894,
+                "width_candidate": 17.89856975848137,
+                "width_ratio": 1.0154991386815557,
+                "width_sculpt": 18.175982173369572
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 0.8813152751742722,
+                "delta_axis": 0.10867890135958688,
+                "delta_center": [
+                  0.02648769677978413,
+                  0.15442001522472815,
+                  0.0670785700672667
+                ],
+                "delta_center_norm": 0.1704308473985043,
+                "delta_down": -0.0670785700672667,
+                "delta_perp": 0.13128431035064872,
+                "delta_xy": 0.15667526665910947,
+                "delta_z": 0.0670785700672667,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.0370099101007122,
+                "shape_axial_rms": 0.02407827068539176,
+                "shape_perp_rms": 0.032564824567662534,
+                "width_candidate": 17.67628142352395,
+                "width_ratio": 1.0282695629172667,
+                "width_sculpt": 18.175982173369572
+              }
+            },
+            "level": 0.85,
+            "quadrature_samples": 154
+          }
+        },
+        "weld_tolerance": 0.003
+      },
+      "ground_truth": {
+        "path": "fixtures/pathb/yarl_cloak__GROUND_TRUTH.obj",
+        "sha256": "28576b6ccaeebbc181eac904c91ec7dfb8e6eead1c700d0c4641382c933f9709"
+      },
+      "producer_journal": {
+        "production": {
+          "command": [
+            "build/algo/RelWithDebInfo/drape-harness.exe",
+            "--replay",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--result-obj",
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj": "ad4bd649a3aff6e3e321a6c4832b211ce965ae14f350855fcd7fc68179495a9f"
+          },
+          "returncode": 4
+        },
+        "shell_base": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset/cloth_base.obj": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
+            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b"
+          },
+          "returncode": 0
+        }
+      },
+      "role": "sentinel:section-position/anti-imprint (not gravity-validated)"
+    },
+    "yarl_clothes": {
+      "base": {
+        "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset/cloth_base.obj",
+        "sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d"
+      },
+      "candidates": {
+        "production": {
+          "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj",
+          "sha256": "b8c318b0f97a63a5b9df850d9181a8f3ac9498c02bc2240453c57d4927968146"
+        },
+        "shell_base": {
+          "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj",
+          "sha256": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6"
+        }
+      },
+      "capture": {
+        "path": "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+        "sha256": "3a2e940385cb10e413b455557380ba89e949359d7ed5e5f6e403d8f0d6537c76"
+      },
+      "diagnostics": {
+        "axis": [
+          0.007773344023967593,
+          0.08199904718895312,
+          0.9966020928047407
+        ],
+        "axis_eigenvalues": [
+          43.949557016814516,
+          199.44073538951136,
+          767.2494629753221
+        ],
+        "axis_orientation": "world_+Z",
+        "axis_relative_eigengap": 0.740057510609263,
+        "axis_up_cos": 0.9966020928047407,
+        "component": 0,
+        "component_selection": "largest",
+        "component_sizes": [
+          1550
+        ],
+        "component_vertices": 1550,
+        "levels": {
+          "0.150000": {
+            "authored_arc_weight": 224.76233961147437,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.9047930829378116,
+                "delta_axis": -0.6405322300004734,
+                "delta_center": [
+                  -0.007917978667446354,
+                  0.40224539664689996,
+                  -0.6757505577719591
+                ],
+                "delta_center_norm": 0.7864495341971498,
+                "delta_down": 0.6757505577719591,
+                "delta_perp": 0.4563127569655866,
+                "delta_xy": 0.40232331961968104,
+                "delta_z": -0.6757505577719591,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.01462285334245809,
+                "shape_axial_rms": 0.030881026781979834,
+                "shape_perp_rms": 0.03690074441276507,
+                "width_candidate": 18.784063473886274,
+                "width_ratio": 0.9963519029473776,
+                "width_sculpt": 18.71553738729092
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.6596706958462613,
+                "delta_axis": -1.0348959225181171,
+                "delta_center": [
+                  -0.02156666696088691,
+                  0.03506031846784641,
+                  -1.0411408902270658
+                ],
+                "delta_center_norm": 1.0419542698015474,
+                "delta_down": 1.0411408902270658,
+                "delta_perp": 0.12107489381804522,
+                "delta_xy": 0.04116244714383029,
+                "delta_z": -1.0411408902270658,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.055362605652049805,
+                "shape_axial_rms": 0.02652480281576406,
+                "shape_perp_rms": 0.06581796087014778,
+                "width_candidate": 16.36379418376795,
+                "width_ratio": 1.1437162541347397,
+                "width_sculpt": 18.71553738729092
+              }
+            },
+            "level": 0.15,
+            "quadrature_samples": 280
+          },
+          "0.266667": {
+            "authored_arc_weight": 185.44969405014606,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 1.9907156435462248,
+                "delta_axis": 1.0590577839232238,
+                "delta_center": [
+                  -0.13622947753533868,
+                  0.24048074183723944,
+                  1.0439447782939837
+                ],
+                "delta_center_norm": 1.0799121065491466,
+                "delta_down": -1.0439447782939837,
+                "delta_perp": 0.21120314434933313,
+                "delta_xy": 0.27638642829223786,
+                "delta_z": 1.0439447782939837,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.03759941362311424,
+                "shape_axial_rms": 0.057837616573314224,
+                "shape_perp_rms": 0.08697155770911909,
+                "width_candidate": 18.8465504679613,
+                "width_ratio": 1.011206507318538,
+                "width_sculpt": 19.057754473709704
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 3.4633009080499924,
+                "delta_axis": -0.5418519115299711,
+                "delta_center": [
+                  -0.27615734746251047,
+                  -0.8462281473947666,
+                  -0.4719188802312715
+                ],
+                "delta_center_norm": 1.0075080086626833,
+                "delta_down": 0.4719188802312715,
+                "delta_perp": 0.8493932502032036,
+                "delta_xy": 0.8901488403636262,
+                "delta_z": -0.4719188802312715,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.07318100906640498,
+                "shape_axial_rms": 0.04622776168570298,
+                "shape_perp_rms": 0.10874384563075985,
+                "width_candidate": 16.290889690559265,
+                "width_ratio": 1.1698412324744834,
+                "width_sculpt": 19.057754473709704
+              }
+            },
+            "level": 0.26666666666666666,
+            "quadrature_samples": 188
+          },
+          "0.383333": {
+            "authored_arc_weight": 168.2974929879928,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 2.845825591365342,
+                "delta_axis": 1.7754838763625553,
+                "delta_center": [
+                  0.17216686211003068,
+                  -0.1357843022745655,
+                  1.791366645136435
+                ],
+                "delta_center_norm": 1.8047363415358961,
+                "delta_down": -1.791366645136435,
+                "delta_perp": 0.32362056059058625,
+                "delta_xy": 0.21926879657854853,
+                "delta_z": 1.791366645136435,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.08611523432032803,
+                "shape_axial_rms": 0.07393748247126965,
+                "shape_perp_rms": 0.13454559186777698,
+                "width_candidate": 18.586558193351063,
+                "width_ratio": 0.9917945618362697,
+                "width_sculpt": 18.434047339418946
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 3.481785423604171,
+                "delta_axis": -1.6955540258719883,
+                "delta_center": [
+                  0.1829830048758969,
+                  -1.2498163797677257,
+                  -1.5999290739295375
+                ],
+                "delta_center_norm": 2.0384545137957195,
+                "delta_down": 1.5999290739295375,
+                "delta_perp": 1.1315446744001922,
+                "delta_xy": 1.2631404368513885,
+                "delta_z": -1.5999290739295375,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.11397023499449423,
+                "shape_axial_rms": 0.07270665648748836,
+                "shape_perp_rms": 0.152157348363132,
+                "width_candidate": 16.583431738749187,
+                "width_ratio": 1.1115942483934476,
+                "width_sculpt": 18.434047339418946
+              }
+            },
+            "level": 0.3833333333333333,
+            "quadrature_samples": 138
+          },
+          "0.500000": {
+            "authored_arc_weight": 155.60592085005646,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 3.171430777488182,
+                "delta_axis": -0.6712181650820932,
+                "delta_center": [
+                  0.013518989289561745,
+                  -0.026872520594220184,
+                  -0.6714010903482048
+                ],
+                "delta_center_norm": 0.6720746383812265,
+                "delta_down": 0.6714010903482048,
+                "delta_perp": 0.03391893894396318,
+                "delta_xy": 0.030081479925330685,
+                "delta_z": -0.6714010903482048,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.11872872900823543,
+                "shape_axial_rms": 0.07378988066682025,
+                "shape_perp_rms": 0.15835429089078906,
+                "width_candidate": 18.20527719935142,
+                "width_ratio": 0.9771138385256474,
+                "width_sculpt": 17.788628285681714
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 4.003810369651301,
+                "delta_axis": -3.91236111593522,
+                "delta_center": [
+                  0.21588571521562322,
+                  0.0023039590677083055,
+                  -3.9275737233321877
+                ],
+                "delta_center_norm": 3.9335031844999198,
+                "delta_down": 3.9275737233321877,
+                "delta_perp": 0.40728098530269197,
+                "delta_xy": 0.2158980089337251,
+                "delta_z": -3.9275737233321877,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.16306761933677877,
+                "shape_axial_rms": 0.06754264675249545,
+                "shape_perp_rms": 0.20547045798715152,
+                "width_candidate": 16.1902554528273,
+                "width_ratio": 1.0987243738995662,
+                "width_sculpt": 17.788628285681714
+              }
+            },
+            "level": 0.5,
+            "quadrature_samples": 136
+          },
+          "0.616667": {
+            "authored_arc_weight": 115.13236517289587,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 2.1555957133266355,
+                "delta_axis": -0.007314367050003826,
+                "delta_center": [
+                  0.18774825566790532,
+                  0.25273580185870925,
+                  -0.029598466616846508
+                ],
+                "delta_center_norm": 0.31622912938812964,
+                "delta_down": 0.029598466616846508,
+                "delta_perp": 0.31614452756331596,
+                "delta_xy": 0.31484090116677327,
+                "delta_z": -0.029598466616846508,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.06396815451006861,
+                "shape_axial_rms": 0.08129439775635143,
+                "shape_perp_rms": 0.06041889762573981,
+                "width_candidate": 20.96395365314689,
+                "width_ratio": 0.9764602867014441,
+                "width_sculpt": 20.4704681945476
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 2.6318208899234192,
+                "delta_axis": -0.48071670268968025,
+                "delta_center": [
+                  0.19563072046026586,
+                  0.006894980343439605,
+                  -0.4844489018092162
+                ],
+                "delta_center_norm": 0.5225032612394823,
+                "delta_down": 0.4844489018092162,
+                "delta_perp": 0.20474645237721759,
+                "delta_xy": 0.19575218911097547,
+                "delta_z": -0.4844489018092162,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.04663658926058756,
+                "shape_axial_rms": 0.1107889524873137,
+                "shape_perp_rms": 0.06523525420487754,
+                "width_candidate": 20.133662922515043,
+                "width_ratio": 1.0167284648267312,
+                "width_sculpt": 20.4704681945476
+              }
+            },
+            "level": 0.6166666666666666,
+            "quadrature_samples": 208
+          },
+          "0.733333": {
+            "authored_arc_weight": 92.88139635221917,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.11335028234135408,
+                "delta_axis": 0.011316504938158441,
+                "delta_center": [
+                  0.0029605024738281194,
+                  0.019184403263292626,
+                  0.00975353073773988
+                ],
+                "delta_center_norm": 0.021724117135529623,
+                "delta_down": -0.00975353073773988,
+                "delta_perp": 0.018543839443406738,
+                "delta_xy": 0.019411488955414398,
+                "delta_z": 0.00975353073773988,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.0184282023576305,
+                "shape_axial_rms": 0.0033862942226660394,
+                "shape_perp_rms": 0.005057841562254325,
+                "width_candidate": 18.580399553134416,
+                "width_ratio": 0.9995715275736957,
+                "width_sculpt": 18.572438364256183
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 0.1209446734519685,
+                "delta_axis": 0.009200611439265021,
+                "delta_center": [
+                  0.008138608387343926,
+                  0.01636001119639552,
+                  0.007822421769503762
+                ],
+                "delta_center_norm": 0.019876548874710066,
+                "delta_down": -0.007822421769503762,
+                "delta_perp": 0.017618908715139076,
+                "delta_xy": 0.018272572693212405,
+                "delta_z": 0.007822421769503762,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.018243783965946534,
+                "shape_axial_rms": 0.0033480544540953503,
+                "shape_perp_rms": 0.005580749716111975,
+                "width_candidate": 18.5763217946667,
+                "width_ratio": 0.999790947290134,
+                "width_sculpt": 18.572438364256183
+              }
+            },
+            "level": 0.7333333333333333,
+            "quadrature_samples": 260
+          },
+          "0.850000": {
+            "authored_arc_weight": 88.6713891467287,
+            "candidates": {
+              "production": {
+                "correspondence_centered_rms": 0.313361188681146,
+                "delta_axis": -0.03360150551110431,
+                "delta_center": [
+                  -0.007621208863346857,
+                  0.09639284912215595,
+                  -0.04158769614855373
+                ],
+                "delta_center_norm": 0.10525778193259588,
+                "delta_down": 0.04158769614855373,
+                "delta_perp": 0.09975038588776053,
+                "delta_xy": 0.09669366156282157,
+                "delta_z": -0.04158769614855373,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.0051807630029503116,
+                "shape_axial_rms": 0.009458700398117179,
+                "shape_perp_rms": 0.014824321979610216,
+                "width_candidate": 16.994328644531457,
+                "width_ratio": 1.0053950200392314,
+                "width_sculpt": 17.086013388121987
+              },
+              "shell_base": {
+                "correspondence_centered_rms": 0.2880880294052892,
+                "delta_axis": -0.06309469242438365,
+                "delta_center": [
+                  -0.0010046439499706017,
+                  0.07945929806002772,
+                  -0.06983977879946224
+                ],
+                "delta_center_norm": 0.10579406439123298,
+                "delta_down": 0.06983977879946224,
+                "delta_perp": 0.08492022049128686,
+                "delta_xy": 0.07946564891611052,
+                "delta_z": -0.06983977879946224,
+                "sector_coverage_candidate": 8,
+                "sector_coverage_common": 8,
+                "sector_coverage_sculpt": 8,
+                "sector_shape_rms": 0.004383969202326125,
+                "shape_axial_rms": 0.010236610214368792,
+                "shape_perp_rms": 0.013285373069313431,
+                "width_candidate": 17.053892559891047,
+                "width_ratio": 1.0018834895387159,
+                "width_sculpt": 17.086013388121987
+              }
+            },
+            "level": 0.85,
+            "quadrature_samples": 180
+          }
+        },
+        "weld_tolerance": 0.003
+      },
+      "ground_truth": {
+        "path": "fixtures/pathb/yarl_clothes__GROUND_TRUTH.obj",
+        "sha256": "31110901c2a7a5e8de81fea32fcb42c033609ef9aa72ba0ed2e4d3cf380322ab"
+      },
+      "producer_journal": {
+        "production": {
+          "command": [
+            "build/algo/RelWithDebInfo/drape-harness.exe",
+            "--replay",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--result-obj",
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj": "b8c318b0f97a63a5b9df850d9181a8f3ac9498c02bc2240453c57d4927968146"
+          },
+          "returncode": 4
+        },
+        "shell_base": {
+          "command": [
+            "C:\\Users\\T-Gamer\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+            "tools/shell_spike.py",
+            "--capture",
+            "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
+            "--dataset",
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset",
+            "--solve",
+            "--output",
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj",
+            "--rest",
+            "base",
+            "--morph-steps",
+            "6",
+            "--iterations",
+            "10",
+            "--gravity",
+            "0",
+            "--anchor-target",
+            "vanilla",
+            "--soft-anchor",
+            "on",
+            "--body-mode",
+            "continuation"
+          ],
+          "outputs": {
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset/cloth_base.obj": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
+            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6"
+          },
+          "returncode": 0
+        }
+      },
+      "role": "sentinel:anti-umbrella"
+    }
+  },
+  "protocol": {
+    "axis_orientation": "world_+Z",
+    "delta_convention": "sculpt-candidate; delta_down=-delta_z",
+    "gravity": 0.0,
+    "iterations": 10,
+    "levels": 7,
+    "morph_steps": 6,
+    "no_per_garment_tuning": true,
+    "rest": "base"
+  },
+  "schema": "pathb-s03e-sections-v1",
+  "tool_sha256": {
+    "band_descriptor": "ee036f0e3b8934ac4ddcf832a63ae8d60724cd9ba162242e5024f2210d345113",
+    "band_distribution": "40e1fc1960ba4a70701f9b1b3d6e84793cb61d105f599b6edee3fda71fc980cf",
+    "harness": "1e04ca1d812d49ea09bda0926cfe8fc54d3d9128499b65875c64363005931af5",
+    "pathb_gate": "75df32d7ee70c7fca3103ca9bb5bcb12eca37656fe11041fb2617abda58fc439",
+    "runner": "08f5c2f8b7f581c1496a1fe36505350c6a683525e55293d1ca190b677d3aad8c",
+    "shell_spike": "a4dcaaacc9ed5bc5946f5bfaa7a55a932de7e6979a8911fde08a25d543ec3750"
+  }
+}

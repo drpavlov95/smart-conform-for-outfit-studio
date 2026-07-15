@@ -64,7 +64,7 @@ pipeline de medição ✓.
 
 - **falmer_cloth**: **BENCHED** por decisão do usuário — não usar em nenhum
   gate/teste até re-esculpir (ground truth contaminado). Fixtures preservadas
-  para quando voltar. yarl Cloak assume o papel de sentinela de gravidade.
+  para quando voltar.
 - **blacksmith / yarl_clothes / yarl_cloak / vampire**: ground truths LIMPOS
   (todos os candidatos concordam dentro de 1e-4). Auto-resolvidos com o
   candidato representativo (menor mtime / snapshot congelado) — o usuário pode
@@ -72,3 +72,16 @@ pipeline de medição ✓.
 
 S0.1a: sculpts escolhidos copiados como `<garment>__GROUND_TRUTH.obj` e
 registrados em `fixtures/pathb/MANIFEST.md`.
+
+## Correção de papel físico — S0.3e (2026-07-15)
+
+“Ground truth limpo” significa apenas que o OBJ é um hand-sculpt independente
+e estável; não significa que ele represente um equilíbrio gravitacional.
+Medição material em world-Z mostrou que o sculpt do Yarl Cloak está **acima**
+da produção e do shell em todas as sete bandas (`dDown<0`). Portanto:
+
+- Yarl Cloak passa a ser sentinela de **posição de seção/anti-imprint**;
+- ele **não** valida força gravitacional para baixo;
+- a vaga de sentinela de gravidade fica aberta;
+- Falmer continua benchado até existir um novo sculpt limpo confirmado pelo
+  usuário.

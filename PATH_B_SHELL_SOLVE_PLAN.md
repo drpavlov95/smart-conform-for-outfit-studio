@@ -1,6 +1,53 @@
-# Path B — Static Shell Solve: plano de pesquisa e implementação (v2.1)
+# Path B — Static Shell Solve: plano de pesquisa e implementação (v2.2)
 
-Data: 2026-07-14 · Branch: `wip/path-b-shell-solve` · Autor: Opus (planejamento)
+## Adendo v2.2 — S0.3e corrige o preflight (2026-07-15)
+
+Este adendo **supera somente as conclusões contraditórias** da v2.1; o plano e
+os resultados históricos abaixo permanecem preservados. A Fase 1 continua
+**BLOQUEADA** e não há autorização científica para escolher agora entre solver
+energético, plumb posicional ou abandono do ground truth.
+
+Correções verificadas e implementadas:
+
+1. S0.3d havia caracterizado o `MERGED` de produção, não o shell-base do Path B.
+   A frase “a forma já está certa; só a posição difere” foi retraída.
+2. O eixo PCA agora tem sinal determinístico em `+Z`, e toda banda reporta
+   `delta = sculpt-candidate` em XYZ e `dDown=-dZ`. No Yarl Cloak, `dDown` é
+   negativo em todas as bandas: o sculpt está **acima** do candidato. O sweep
+   anterior em `-Z` era direcionalmente incompatível e não rejeita gravidade.
+3. A métrica de seção agora integra o contorno material com quadratura e pesos
+   autorais, mede correspondência material após centro/escala e expõe cobertura
+   setorial. No Cloak, 6/7 bandas não cobrem os oito setores; o antigo
+   `shape_rms` não podia sustentar uma conclusão universal.
+4. A “região livre” de S0.3c não era histórico de contato e continha hard
+   anchors. O novo fatorial grava correções de colisão por vértice e separa
+   máscaras comuns `never_corrected` e `always_clear`; a máscara primária é
+   móvel, `drape>=0.55` e ficou acima da folga nas oito células.
+5. `UniformBodyCollider.closest` parava no primeiro anel ocupado. A consulta de
+   closest point/distância agora usa bound global exato (KD de centroides;
+   fallback de grade provado), preservando a convenção pseudoassinada existente;
+   o `--contact-check` inclui os vértices mais distantes contra brute force.
+6. O terceiro target físico `surface-corot` foi implementado apenas no spike e
+   testado sem tuning. Após provar equivalência estática byte a byte, ele falhou
+   os gates implementados de média e, com clamp, excedeu flips
+   (`13/16/50` em Blacksmith/Clothes/Cloak). Sem clamp, Blacksmith cai para zero
+   flip, mas as três médias ainda falham e Clothes/Cloak ficam em `15/50` flips.
+   Portanto a configuração baseline está **REJEITADA para este binding amplo e
+   support mask atuais**, sem sweep, RM_Thin ou port C++.
+
+Artefatos rastreados:
+
+- `fixtures/pathb/S03E_SECTION_RESULTS.json`
+- `fixtures/pathb/S03E_H3C_RESULTS.json`
+- `fixtures/pathb/S03E_SURFACE_COROT_SCOREBOARD.md`
+- `fixtures/pathb/S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md`
+- `PATH_B_HANDOFF.md`
+
+O Yarl Cloak permanece um ground truth geométrico limpo, mas seu papel correto
+é **posição de seção/anti-imprint**, não sentinela de gravidade. A vaga de
+ground truth gravitacional está aberta; Falmer continua benchado.
+
+Data original: 2026-07-14 · Atualização v2.2: 2026-07-15 · Branch: `wip/path-b-shell-solve` · Autor: Opus (planejamento)
 v2 após peer-review do Codex (2026-07-14); v2.1 após segunda rodada (mesmo dia).
 Revisor: Codex · Implementador pretendido: Sonnet
 
@@ -216,7 +263,7 @@ Baselines MEDIDOS em S0.2c (`fixtures/pathb/BASELINES.md`, `pathb_metrics.py`):
 | gate | métrica | critério do candidato (vs baseline acima) |
 |---|---|---|
 | A. Blacksmith | indexed + surf fwd + surf rev, mean E p95, vs sculpt | nenhuma das 3 (mean OU p95) pior que baseline×1.05; meta: melhorar surf fwd (<0.7563) |
-| B. yarl Cloak (gravidade) | indexed + surf fwd + surf rev, mean E p95, vs sculpt | melhor que baseline em indexed (<2.046) E surf fwd (<1.2265); surf REV e p95 sem piora >5% (colapso aparece no rev) |
+| B. yarl Cloak (gravidade — **SUPERADO: não é gravity-validated**) | indexed + surf fwd + surf rev, mean E p95, vs sculpt | melhor que baseline em indexed (<2.046) E surf fwd (<1.2265); surf REV e p95 sem piora >5% (colapso aparece no rev) |
 | B2. cloak queda/imprint | perfil das costas (y<0): pano NÃO segue o crescimento do corpo abaixo do ombro | bulge local ≤ +0.8u vs sculpt |
 | B3. tiras/hem | **ADIADO** — sem tattered com GT limpo (falmer benched); IDs prontos, reabre ao re-esculpir | — |
 | C. yarl Clothes (anti-guarda-chuva) | indexed + surf fwd + surf rev vs sculpt (já 0.8388/0.259/0.3023 = bem casado) | SEM regressão >5% em nenhuma; painel não abre (surf rev não sobe) |

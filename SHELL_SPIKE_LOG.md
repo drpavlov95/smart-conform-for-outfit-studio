@@ -762,3 +762,161 @@ queria substituir. As opções honestas:
     e reavaliar o alvo.
 NÃO implementar nada antes dessa decisão — a regra do plano é não inventar
 família fora do preflight.
+
+## 2026-07-15 — S0.3e: preflight corrigido + suporte co-rotacional falsificado
+
+### Retratação formal dos marcos S0.3c/S0.3d/gravidade
+
+Peer review seguido de reprodução encontrou três erros que mudavam o veredito:
+
+1. **S0.3d mediu produção, não Path B.** Os números publicados eram
+   `prod_* -> sculpt`; contra o shell-base, Blacksmith chega a `dCenter=3.17`,
+   Yarl Clothes a `3.94` e Yarl Cloak a `shape_rms=0.464` na métrica antiga.
+   Logo “o shell já tem a forma correta” não estava demonstrado.
+2. **Sinal PCA não era gravidade.** O eixo do Cloak usado no marco tinha
+   `Z=+0.957`; `dC_axis>0` significava sculpt mais alto. Em world-Z, o sculpt
+   está `2.17–4.50u` acima da produção nas bandas críticas, enquanto o spike
+   aplicou força em `-Z`. A piora monotônica era esperada. O sweep permanece
+   registrado, mas seu significado passa de “gravidade rejeitada” para
+   **direcionalmente incompatível/inconclusivo**.
+3. **A região S0.3c não era livre.** `authored gap>2` não era histórico de
+   contato e incluía hard anchors — 305/361 pontos no Cloak. `body-mode` também
+   mantinha colisão nos dois níveis; comparava corpo estático vs continuado,
+   não contato off/on.
+
+Portanto as frases “Fase 0.3 completa”, “resultado universal”, “contato não é o
+vilão” e a encruzilhada obrigatória `(a)/(b)/(c)` no marco anterior ficam
+**SUPERADAS por este marco**. H3a e H3b preservam apenas seus escopos estreitos:
+piso global uniforme de compressão e piso/teto de arco total testado.
+
+### Infra S0.3e implementada
+
+- `pathb_band_distribution.py`: eixo material orientado em world `+Z`; delta
+  `sculpt-candidate` em XYZ; `dDown=-dZ`; integração de cada iso-segmento com
+  quadratura Gauss 2 pontos ponderada por comprimento material autoral;
+  correspondência material após centro/escala; cobertura setorial explícita;
+  múltiplos `--candidate`; JSON fail-closed; selftest de sinal, translação,
+  escala, diagonal e subdivisão.
+- `UniformBodyCollider.closest`: closest point/distância unsigned com bound
+  global exato por KD de centroides e raio máximo de triângulo, mantendo a
+  convenção pseudoassinada existente; fallback de grade de cubo expansível
+  provado. No
+  caso distante auditado do Cloak, a busca antiga errava 43/175 bindings
+  (`1.833u` no pior); a nova consulta deu erro `0` vs brute force nas amostras
+  regulares + mais distantes.
+- `shell_spike.py --trace-json`: grava fixed/drape/inverse-mass, gap de
+  superfície autoral, contagem real de correções de colisão, passos corrigidos,
+  gap mínimo e final por vértice.
+- `pathb_s03e_h3c.py`: fatorial 2×2×2 reproduzível, comandos/hashes, todas as
+  células avaliadas sobre máscaras comuns `never_corrected` e `always_clear`.
+- `pathb_s03e_sections.py`: gera produção + shell fail-closed e caracteriza os
+  dois lado a lado, sem tuning por garment.
+
+Selftests: band-distribution PASS; attachment closure `0`; movimento rígido
+`9.93e-16`; amostra de closest-distance do Cloak `worstDistanceError=0`. Com corpo estático,
+`surface-corot` e `authored` geram OBJ byte a byte idêntico
+(`3d10426b7a7c673e...`), inclusive com clamp habilitado.
+
+### Seções corrigidas — produção e shell não têm uma única falha posicional
+
+`dDown>0` significa “o sculpt está mais baixo”; `dDown<0`, “mais alto”.
+
+| garment/candidato | faixa dDown | width ratio | shapeP máx | shapeA máx | cobertura incompleta |
+|---|---:|---:|---:|---:|---:|
+| Blacksmith produção | -1.056…+0.397 | 0.973…1.076 | 0.133 | 0.088 | 0/7 |
+| Blacksmith shell | +0.311…+3.419 | 1.030…1.175 | 0.133 | 0.098 | 0/7 |
+| Yarl Clothes produção | -1.791…+0.676 | 0.976…1.011 | 0.158 | 0.081 | 0/7 |
+| Yarl Clothes shell | -0.008…+3.928 | 1.000…1.170 | 0.205 | 0.111 | 0/7 |
+| Yarl Cloak produção | **-4.367…-0.012** | 0.692…1.015 | 0.346 | 0.164 | **6/7** |
+| Yarl Cloak shell | **-2.574…-0.067** | 0.672…1.127 | 0.347 | 0.304 | **6/7** |
+
+Conclusão: há sinais mistos por banda; forma/escala também diferem, sobretudo
+no shell e no Cloak aberto. O Cloak pede correção para **cima** em todas as
+bandas medidas e deixa de ser sentinela de gravidade.
+
+### H3c refeito com histórico real
+
+Máscara primária = móvel + `drape>=0.55` +
+`minimum_observed_gap > clearance+1e-6` em todas as oito células
+(`fully_free_always_clear`). Ela coincide neste corpus com a máscara
+`fully_free_never_corrected`. Tamanhos: Blacksmith `254`, Clothes `350`, Cloak
+`10` (o Cloak é pouco informativo por estar 497/553 hard-fixed). Como a máscara
+é definida após observar as oito células, ela descreve essa subpopulação
+conservadora; não identifica causalidade no restante do pano.
+
+Efeitos principais na máscara primária, `Δ indexed` (+ = pior):
+
+| fator | Blacksmith | Yarl Clothes | Yarl Cloak |
+|---|---:|---:|---:|
+| anchor authored−vanilla | +0.0047 | +0.0102 | +0.0294 |
+| soft off−on | +0.0054 | +0.0150 | +0.1159 |
+| body static−continuation | +0.0585 | +0.0651 | +0.0365 |
+
+Leitura permitida: nenhum desses switches fecha o erro **médio global** do pano
+móvel sempre afastado. Leitura proibida: concluir daí que anchor/contato não
+causam um bump localizado — não há ROI/métrica localizada nesse fatorial. Em
+tecido fully-free incluindo vértices contatados, continuação corporal ainda é
+uma alavanca grande (`+1.645/+0.470/+0.495` ao trocar para estático).
+
+### S0.3e surface-corot — hipótese física testada e REJEITADA no suporte atual
+
+Foi implementado no spike um terceiro target de anchor:
+
+- closest point exato no corpo-base + barycentria material;
+- offset autoral completo;
+- rotação própria Kabsch/co-rotacional por triângulo, sem copiar stretch/shear;
+- clamp unilateral dos hard targets ao contact floor;
+- nenhum sculpt ou posição-alvo entra na lei.
+
+O classificador, porém, chama de suporte uma fração enorme do garment:
+
+| garment | fixed / total | bindings pedidos | distância p95/máx | bindings >4u / >8u |
+|---|---:|---:|---:|---:|
+| Blacksmith | 1444/2316 | 1726 | 5.726 / 17.101 | 137 / 48 |
+| Yarl Clothes | 1145/1777 | 1269 | 2.721 / 14.587 | 42 / 35 |
+| Yarl Cloak | 497/553 | 526 | 11.453 / 15.747 | 176 / 68 |
+
+Gate implementado de três médias + flips, uma configuração universal, sem
+sweep (p95, degenerados, seams e NaN são reportados, mas nem todos têm threshold
+no runner atual):
+
+| garment | indexed | surf fwd/rev | flips candidato/baseline | veredito |
+|---|---:|---:|---:|---|
+| Blacksmith | 1.9378 | 1.0010 / 1.0478 | 13 / 1 | FAIL |
+| Yarl Clothes | 1.3224 | 0.5440 / 0.6241 | 16 / 7 | FAIL |
+| Yarl Cloak | 2.4608 | 1.4769 / 0.9908 | 50 / 10 | FAIL |
+
+O controle estático inicialmente revelou um clamp instável; após adicionar
+tolerância e retorno exato no estado autoral, a equivalência estática passou
+byte a byte. O rerun acima é o resultado corrigido. A ablação sem clamp também
+falha as três médias: Blacksmith `1.9210 / 0.9995 / 1.0460` com `0` flips;
+Clothes `1.3215 / 0.5443 / 0.6238` com `15`; Cloak permanece
+`2.4608 / 1.4769 / 0.9908` com `50`.
+
+Regra de parada aplicada: **sem tuning, sem RM_Thin, sem port C++** depois do
+hard-fail dos gates implementados, reproduzido com clamp on/off. O modo
+permanece no spike somente para reprodução. A hipótese estreita “transporte
+co-rotacional com binding independente ao triângulo mais próximo, support mask
+amplo e parâmetros baseline atuais passa os gates” morreu. Isso não falsifica a
+família inteira sem sweep. A classificação/condição de contorno de suporte passa
+a ser o próximo objeto de pesquisa, não mais uma lei escalar ou um target de
+anchor.
+
+### Estado final deste checkpoint
+
+- Produção `MERGED`, DLL e flags live: **intocados**.
+- A correção do closest muda legitimamente o default **offline** pré-S0.3e em
+  Yarl Clothes (`4cb5cca466a4` antigo → `50cbe35e44be` exato); Blacksmith e
+  Cloak permanecem `1bc183425f8b` / `eacf522f53e3`. Depois dessa correção, a
+  adição do modo `surface-corot` deixa o default corrigido byte-idêntico.
+- Artefatos rastreados:
+  - `S03E_H3C_RESULTS.json` SHA-256 `3e3eb3f267301ef1a525a7e75a6b38d37f536b3ee566dc31c591b549d09e4ef6`;
+  - `S03E_SECTION_RESULTS.json` SHA-256 `f5b52bf3278e9aeaef2d00bf5a3ae185daa2d25d40f32ac4c5845c09eb74c399`;
+  - `S03E_SURFACE_COROT_SCOREBOARD.md` SHA-256 `e710f5ca51c61313f1aefccb3c7a8684ea2d5b32d4dd6f73897b39e9977c770f`;
+  - `S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md` SHA-256 `683479894751fa03b051090775e02c352de20efc7cd8aba6f8577d1ccae5cc01`.
+- Handoff operacional: `PATH_B_HANDOFF.md`.
+
+Próximo passo permitido: preflight da **classificação/fronteira de suporte**
+(por que Cloak tem 90% fixed; distinguir fitted material de fronteira realmente
+presa) e/ou aquisição de ground truth gravitacional limpo. Não construir solver
+energético nem plumb mirado antes disso.
