@@ -561,3 +561,39 @@ nos garments com estrutura fitted/larga (blacksmith, clothes), que é onde H3b
 (suporte de baixa freq) e a integração das outras leis precisam fechar o gap.
 Além disso o shell-base tem topologia mais limpa (0 flips no blacksmith vs 1 da
 produção). PENDENTE: S0.3a descriptor de banda (H3b) + S0.3c ablação de anchors.
+
+## 2026-07-14 — marco 7: preflight de necessidade — H3a E H3b REJEITADOS
+
+Ferramenta nova: `tools/pathb_band_descriptor.py` — circunferência por banda
+CORRETA (iso-linha material: mesma fração de aresta em base/mesh; invariante a
+diagonais e subdivisão — selftest de cilindro passa; seams unidos; eixo PCA por
+componente). Substitui o descriptor antigo (somava diagonais, por Z global).
+
+**H3a (piso de compressão de aresta) = REJEITADO.** O sculpt tem MAIS arestas
+<0.95×rest_base que o defeito em TODOS os sentinelas (blacksmith 958 vs 859
+prod / 546 shell; clothes 857 vs 793; cloak 232 vs 231). O sculpt faz PREGAS ⇒
+um piso de compressão briga com o alvo.
+
+**H3b (piso de circunferência por banda) = REJEITADO.** Nenhum defeito COLAPSA
+(bandas <0.9× = 0 em todos). Os garments EXPANDEM (guarda-chuva), não colapsam
+— um piso não ativa. E crucialmente a circunferência por banda do SCULPT ≈ a do
+DEFEITO (blacksmith defeito 1.10→1.55 vs sculpt 1.10→1.68 ao longo de s; o
+sculpt expande TANTO ou MAIS). Nem piso nem teto de circunferência separam
+sculpt de defeito.
+
+**Conclusão do preflight (fecha a §2.4 do plano):** as duas leis materiais
+escalares propostas (compressão, circunferência) NÃO capturam a diferença
+sculpt-vs-defeito. A diferença NÃO está no comprimento de arco por banda (quase
+iguais) — está na DISTRIBUIÇÃO/POSIÇÃO do pano dentro da banda (o sculpt pendura
+reto/plumb; o defeito segue o corpo). Isso reconfirma o marco 1 ("propriedade
+global de pattern/silhueta, não identificável por leis locais") e aponta para o
+mecanismo de SUPORTE/PLUMB (tension-seeded, marco 4 — melhorou métrica mas
+falhou visual) + tratamento de ANCHORS/REST (H3c) como os únicos leverS vivos.
+
+**Sinal a favor do Path B:** shell-base JÁ SUPERA a produção no yarl_cloak
+(gravidade pura). O gap está nos garments fitted/largos, onde o suporte-plumb
+precisa entrar SEM as leis escalares rejeitadas.
+
+PENDENTE: S0.3c ablação de anchors (quanto do imprint entra por anchor-vanilla
+vs rest vs contato). Depois: Fase 1 REFORMULADA — não implementar compressão
+nem circunferência; investigar suporte-plumb dentro do loop + rest autoral.
