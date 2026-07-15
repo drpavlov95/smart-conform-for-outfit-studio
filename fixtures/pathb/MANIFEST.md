@@ -52,20 +52,38 @@ Ground truth chosen per garment (S0.0c). SHA-256 full for verification.
 ## S0.3e corrected-preflight artifacts (2026-07-15)
 
 - `S03E_H3C_RESULTS.json`
-  SHA-256 `3e3eb3f267301ef1a525a7e75a6b38d37f536b3ee566dc31c591b549d09e4ef6`
+  SHA-256 `4714aa2eaf413814338fc2610b29d0c94fed5f5f4fd0a00e871e152cd5aa1cb3`
   — complete 2×2×2 cells, commands/output/trace hashes and common
   `never_corrected`/`always_clear` masks.
 - `S03E_SECTION_RESULTS.json`
-  SHA-256 `f5b52bf3278e9aeaef2d00bf5a3ae185daa2d25d40f32ac4c5845c09eb74c399`
+  SHA-256 `94dcf7128d8a3a7682c45dd6bba93abfe19cde04ef86ab521f75c6c749b16511`
   — production + corrected shell, explicit world XYZ/dDown and paired
   material-section metrics.
 - `S03E_SURFACE_COROT_SCOREBOARD.md`
-  SHA-256 `e710f5ca51c61313f1aefccb3c7a8684ea2d5b32d4dd6f73897b39e9977c770f`
+  SHA-256 `5c3591cc11bd689f3894dbd875f10511ad43a8d48d2d33c3889ec544ab9d6e0b`
   — clamp on; FAIL in the three implemented mean gates and excess flips.
 - `S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md`
-  SHA-256 `683479894751fa03b051090775e02c352de20efc7cd8aba6f8577d1ccae5cc01`
+  SHA-256 `078ffd3e372e0cda30a80365de7afe517c11ca6ec156acdceba5c0adbacd2adc`
   — clamp off; the three means still fail. Together these block RM_Thin and C++.
 
 Ground-truth cleanliness and physical role are distinct: Yarl Cloak remains a
 clean hand-sculpt but its sculpt is above both candidates in every measured
 band, so it cannot validate downward gravity. The gravity-sentinel slot is open.
+
+## S04 coherent support-boundary artifacts (2026-07-15)
+
+- `S04_SUPPORT_PREFLIGHT.json`
+  SHA-256 `587da6ee2a060809cb7ff262133f94e4e4c76b28d43bcc69d1506dd7081e5a13`
+  — deterministic six-step, clamp-on/body-vanilla/soft-on support masks;
+  schema/contract/tool/environment/capture/mask provenance is embedded.
+- `S04_COHERENT_V1_STRICT_SCOREBOARD.md`
+  SHA-256 `99505aeaabba77b497f2b4f0839c2655093033f0afd86ac6adef6f3f17993f2a`
+  — final `coherent-v1 + surface-corot + clamp` package; strict Heavy FAIL 3/3.
+- `S04_SHELL_VANILLA_CONTROL_STRICT_SCOREBOARD.md`
+  SHA-256 `df9416a2c227988a7e603672b5938db4383d5f0d31bcb7b1a4f4398c2d46518b`
+  — paired vanilla-shell control with identical tools/captures/GT/bases.
+
+The S04 preflight retains `998 / 590 / 11` vertices for Blacksmith / Yarl
+Clothes / Yarl Cloak; all are hard-fixed. Target safety, static closure,
+determinism and selected contact floors pass, but the Heavy accuracy/integrity
+gate rejects the package. RM_Thin and C++ were intentionally not run.

@@ -51,9 +51,31 @@ coherent support-boundary model.
 
 The production DLL, `MERGED` behavior and live flags were not changed. Yarl
 Cloak is now a section-position/anti-imprint sentinel, not a gravity sentinel.
-Falmer remains benched. Next research, if resumed, starts with support-mask /
-boundary-condition classification or a clean gravity ground truth — not an
-energy solver or sculpt-targeted plumb.
+Falmer remains benched. At S0.3e the next allowed research was support-mask /
+boundary-condition classification or a clean gravity ground truth; the S04
+result below completes and supersedes the first option.
+
+### S04 support-boundary result (2026-07-15)
+
+The permitted support-mask step was completed on the isolated Path-B branch.
+`coherent-v1` is garment-agnostic and fail-closed across all six morph steps;
+it excludes disconnected/point support, target flips, seam regressions,
+excessive expansion/contraction and face-area collapse. The final masks are
+`998 / 590 / 11` for Blacksmith / Yarl Clothes / Yarl Cloak, and every retained
+vertex is hard-fixed. Static closure, repeat determinism and selected-support
+contact floors pass.
+
+The strict Heavy gate nevertheless fails 3/3. Versus an exactly paired
+vanilla-shell control, Clothes is 1.59-3.75% worse in all three means,
+Blacksmith is mixed and still outside baseline, and Cloak is effectively a
+no-op because only 2.1% of its broad mask remains. RM_Thin, C++, DLL and live
+deployment were therefore not attempted. Authoritative details and hashes are
+in `PATH_B_HANDOFF.md` and `fixtures/pathb/S04_*`.
+
+This closes support-target classification as the immediate Path-B lever. A new
+Path-B family needs a clean gravity/free-hang ground truth and localized defect
+metrics first. The belt and production-universality review below stays
+independent and remains pending.
 
 ## User-confirmed Blacksmith reference
 

@@ -4,7 +4,7 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | blacksmith | sentinel:under-butt | 1.5441 | 3.9001 | 0.7563 | 2.7564 | 0.7915 | 1.977 | 1 | 3 | 0.0001 | 0 |
 | yarl_clothes | sentinel:anti-umbrella | 0.8388 | 3.0751 | 0.259 | 0.9616 | 0.3023 | 1.2969 | 7 | 0 | 0.0 | 0 |
-| yarl_cloak | sentinel:gravity | 2.0463 | 5.3611 | 1.2265 | 3.4131 | 0.9154 | 3.1823 | 10 | 0 | 0.0001 | 0 |
+| yarl_cloak | sentinel:section-position/anti-imprint (not gravity-validated) | 2.0463 | 5.3611 | 1.2265 | 3.4131 | 0.9154 | 3.1823 | 10 | 0 | 0.0001 | 0 |
 | vampire | secondary | 1.1858 | 2.8337 | 0.5099 | 1.7602 | 0.5591 | 1.834 | 34 | 0 | 0.0 | 0 |
 
 ## Notas de baseline (S0.2c, 2026-07-14)

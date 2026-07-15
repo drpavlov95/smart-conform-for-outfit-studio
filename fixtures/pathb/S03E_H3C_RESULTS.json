@@ -11,10 +11,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -30,14 +30,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_continuation.obj",
           "output_sha256": "c21a14484c49d914cb7411ee9baf075925f44c0816ab51cf1e6a3d5ce5de08a9",
           "returncode": 0,
           "scores": {
@@ -78,7 +78,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_continuation.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 550,
@@ -87,7 +87,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "120b0d183a3f6f8e885fee213a9f1d6f88af7964911695c0757206385e335658"
+          "trace_sha256": "7192545f4c45088ee1b80f8ef78232c912140f6fcd8dba6f991a38e4e148bf02"
         },
         "authored_off_static": {
           "command": [
@@ -96,10 +96,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -115,14 +115,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_static.obj",
           "output_sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
           "returncode": 0,
           "scores": {
@@ -163,7 +163,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_off_static.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 0,
@@ -172,7 +172,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "d806d7f9d60c088c6ab8f111582d7292416574d42b67c315a7882f8ed553e7d7"
+          "trace_sha256": "e0f3f14631aedfcb180aa60020e788c977c5b9908bb629142d25566c26812d4a"
         },
         "authored_on_continuation": {
           "command": [
@@ -181,10 +181,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -200,14 +200,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_continuation.obj",
           "output_sha256": "ff6b94013b8be1f6c56778075e8cff74253fb73939bf0f9ab440f7f975ec55d0",
           "returncode": 0,
           "scores": {
@@ -248,7 +248,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_continuation.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 550,
@@ -257,7 +257,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "c8936c2f7b1fe03199b87a06fedb5067f07d044daa68313b4288c7f605675498"
+          "trace_sha256": "43c40b00b486d3f853732f45dbe2a141469c5f4e207db273365e4757b1259d78"
         },
         "authored_on_static": {
           "command": [
@@ -266,10 +266,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -285,14 +285,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_static.obj",
           "output_sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
           "returncode": 0,
           "scores": {
@@ -333,7 +333,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/authored_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/authored_on_static.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 0,
@@ -342,7 +342,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "1aa5e9f30b89c2a79e47c8e74664f61535a0edbaf46a3d50e6e161c710524b86"
+          "trace_sha256": "fc246cc2724302489e841dac5b2c0041539281526578bf826ea97d88ba6ff4aa"
         },
         "vanilla_off_continuation": {
           "command": [
@@ -351,10 +351,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -370,14 +370,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_continuation.obj",
           "output_sha256": "99dc1669fc3133a94eda861a9a3fc96487b1eb62e34e25a9551a858699c8451c",
           "returncode": 0,
           "scores": {
@@ -418,7 +418,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_continuation.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 550,
@@ -427,7 +427,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "421fe372e814789b494ac312c3abb9c28293198a5310ef43527f8e7352c62807"
+          "trace_sha256": "b159bf936cc101f3160792a0fc7f8c0ccfe05397a2626234ab75ce5b719ce279"
         },
         "vanilla_off_static": {
           "command": [
@@ -436,10 +436,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -455,14 +455,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_static.obj",
           "output_sha256": "050e3b3da1d8434275bd3d5771c9a73e93964d76ebb9b3e8f5d3fa8b1c19a4e6",
           "returncode": 0,
           "scores": {
@@ -503,7 +503,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_off_static.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 30,
@@ -512,7 +512,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "ba962d70eedb29ae1a43c634d08c8a7f64ac21c8ade5bbe7d89ed068bf1f8a94"
+          "trace_sha256": "50243028f37a0b9cf777599914bc4b88a8ebdc514c83f637761761b40c90647d"
         },
         "vanilla_on_continuation": {
           "command": [
@@ -521,10 +521,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -540,14 +540,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_continuation.obj",
           "output_sha256": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507",
           "returncode": 0,
           "scores": {
@@ -588,7 +588,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_continuation.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 552,
@@ -597,7 +597,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "8771dcadb15318fb72aa69801c647c9c8a5a9820c4661ed0093bbe716746e505"
+          "trace_sha256": "bbb5e3e6f3c648e75d83dab0ae15b4ccc717ffb6379341b6763d859ef02e5f85"
         },
         "vanilla_on_static": {
           "command": [
@@ -606,10 +606,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -625,14 +625,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_static.obj",
           "output_sha256": "2d4b7fa6e1e0691cc7e02a5306d80924599f6b3ed6727a01392bed3ae92fe0df",
           "returncode": 0,
           "scores": {
@@ -673,7 +673,7 @@
               "n": 254
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/blacksmith/vanilla_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/blacksmith/vanilla_on_static.trace.json",
           "trace_counts": {
             "active": 872,
             "ever_contacted_active": 10,
@@ -682,7 +682,7 @@
             "support_target_clamps": 0,
             "vertices": 2316
           },
-          "trace_sha256": "1144ef57241d8ecd6f183f8b4b3ab21a96b0a63bda02e5fded01c3591bd539f8"
+          "trace_sha256": "48b0897d5c94c3e1f9ce9dceddf839f066d601e425f0716fa0c6d66b84d4f4e7"
         }
       },
       "contrasts": {
@@ -765,10 +765,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -784,14 +784,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_continuation.obj",
           "output_sha256": "50f286cdf8a6c9bda3abba27deb280fb68a5a7ffe4db34a771fefd556fd71b32",
           "returncode": 0,
           "scores": {
@@ -832,7 +832,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_continuation.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 16,
@@ -841,7 +841,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "3295e7931ffa2ce0ad8b4598d325a6226dc3e9d481ed5986610d690842fd5adc"
+          "trace_sha256": "98744e343becbc749d71d1f240c3028d3d27a7444566d3f2ddc8c380ba6595b8"
         },
         "authored_off_static": {
           "command": [
@@ -850,10 +850,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -869,14 +869,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_static.obj",
           "output_sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
           "returncode": 0,
           "scores": {
@@ -917,7 +917,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_off_static.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 0,
@@ -926,7 +926,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "da437f5fe6f0576383a2a7dfef398d6c79029482488905b425bf8705b6a0cccb"
+          "trace_sha256": "b63e877bb0389d164969d6687807a0438eb44743a34962b43f761164b233c177"
         },
         "authored_on_continuation": {
           "command": [
@@ -935,10 +935,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -954,14 +954,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_continuation.obj",
           "output_sha256": "98f313b0c2a0b503d69676021e94578cb3b6f394ac0632438f0354de0406a44d",
           "returncode": 0,
           "scores": {
@@ -1002,7 +1002,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_continuation.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 16,
@@ -1011,7 +1011,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "12e92a7438fc891679309b2a3a7963c4bc2d58b7af5072cde9d69bd92360aa5a"
+          "trace_sha256": "6bd2fcf5e8f8de2711bb7baf023cbde9d133a97b18e7f1c02bc8659ebb4642d6"
         },
         "authored_on_static": {
           "command": [
@@ -1020,10 +1020,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1039,14 +1039,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_static.obj",
           "output_sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
           "returncode": 0,
           "scores": {
@@ -1087,7 +1087,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/authored_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/authored_on_static.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 0,
@@ -1096,7 +1096,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "bcc2a3f9496dd7c2e236e018479349f73588d6ca102ae78a310a5d9e50980d1b"
+          "trace_sha256": "296951a655a4b7cae5994896528200016b32cc2dd0de61af6cbee95dd4ada988"
         },
         "vanilla_off_continuation": {
           "command": [
@@ -1105,10 +1105,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1124,14 +1124,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_continuation.obj",
           "output_sha256": "328628d1a3a28c7095815769516c094463f20ae4b3d3e39c54b0e07abd20426e",
           "returncode": 0,
           "scores": {
@@ -1172,7 +1172,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_continuation.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 13,
@@ -1181,7 +1181,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "71a1ecd83d96b053a55685a32f196acc684048e648896b233c7957a6eecc9f08"
+          "trace_sha256": "b3be37b17439a0bc554d751924b16f9611571530264f5f22e69193534d8a3860"
         },
         "vanilla_off_static": {
           "command": [
@@ -1190,10 +1190,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1209,14 +1209,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_static.obj",
           "output_sha256": "8b2129088cdd9421ac79b6e02cdb75b018f2d9ea569eacc202f29351b6f0baa0",
           "returncode": 0,
           "scores": {
@@ -1257,7 +1257,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_off_static.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 0,
@@ -1266,7 +1266,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "e51f0394df99f74777830c6858a6aea3d1fda97792f9d2b31ca1c2542f88409a"
+          "trace_sha256": "4ad3f0979a5d22ba7cadc41faa12e9813c6cab92e2098d85c1f4ca0eeb627751"
         },
         "vanilla_on_continuation": {
           "command": [
@@ -1275,10 +1275,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1294,14 +1294,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_continuation.obj",
           "output_sha256": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b",
           "returncode": 0,
           "scores": {
@@ -1342,7 +1342,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_continuation.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 12,
@@ -1351,7 +1351,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "7694606d843792a0c1e8cd88588e968d76495141762ba6779929d24e3d61294c"
+          "trace_sha256": "ef1d9e6fc9dd16905095fc59641d53d165fcff0eedab71a628f39daa3b2a6fc4"
         },
         "vanilla_on_static": {
           "command": [
@@ -1360,10 +1360,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1379,14 +1379,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_static.obj",
           "output_sha256": "b7cbbe43facd3dfe4960843a20e7a95ad36a08142f3773442aefd4553f448f11",
           "returncode": 0,
           "scores": {
@@ -1427,7 +1427,7 @@
               "n": 10
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_cloak/vanilla_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_cloak/vanilla_on_static.trace.json",
           "trace_counts": {
             "active": 56,
             "ever_contacted_active": 0,
@@ -1436,7 +1436,7 @@
             "support_target_clamps": 0,
             "vertices": 553
           },
-          "trace_sha256": "7f88bec09198fbc7683604d427bd0c7106fb0de65921185328c35db2355692b6"
+          "trace_sha256": "5897bc60c6a7902ef23da12dbff1bfdc43ccab22e9e70535ee4d240913de7e33"
         }
       },
       "contrasts": {
@@ -1519,10 +1519,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1538,14 +1538,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_continuation.obj",
           "output_sha256": "cd1832fb2e9d2002bb72da8c3482015351c758703e7d52bd4f76e933b7e96c22",
           "returncode": 0,
           "scores": {
@@ -1586,7 +1586,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_continuation.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 238,
@@ -1595,7 +1595,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "9ebe3344f545b1166754cf8147f1f69666fb6fa9818ce26d079e963e9f7f6a6a"
+          "trace_sha256": "2b409c2e41f8057627c60912b080948b20afd12397aca8e57eb4b310b1fbe0a8"
         },
         "authored_off_static": {
           "command": [
@@ -1604,10 +1604,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1623,14 +1623,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_static.obj",
           "output_sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
           "returncode": 0,
           "scores": {
@@ -1671,7 +1671,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_off_static.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 0,
@@ -1680,7 +1680,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "7bb3b1f1d1643982f84a4e6efc6b3fcbcb3e23eb0c3602566e71d99205a71575"
+          "trace_sha256": "d9373bbdb615ef20d95b832fdd5e253f2dec0340aef6ab542988939ee749b116"
         },
         "authored_on_continuation": {
           "command": [
@@ -1689,10 +1689,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1708,14 +1708,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_continuation.obj",
           "output_sha256": "0f69ffd03c501bcb8147006332723dec752746519203e318f1cfd1de776dad24",
           "returncode": 0,
           "scores": {
@@ -1756,7 +1756,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_continuation.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 239,
@@ -1765,7 +1765,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "73212fc053b7c81a18578e5d84d527cb619d9fe5c3d12e5250137e1322790a4f"
+          "trace_sha256": "ad943940cb53dd2be8cdb45df945b1a07a0473cf95fe66d889394c04b4c6dd5e"
         },
         "authored_on_static": {
           "command": [
@@ -1774,10 +1774,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1793,14 +1793,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_static.trace.json"
           ],
           "factors": {
             "anchor": "authored",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_static.obj",
           "output_sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
           "returncode": 0,
           "scores": {
@@ -1841,7 +1841,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/authored_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/authored_on_static.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 0,
@@ -1850,7 +1850,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "50fdcc6647bf36c3460a05097ae200abff1de963c00cb9c8ff428ab131abb520"
+          "trace_sha256": "1f207f501b110d08285eda295c3f85d0fe116397d0fca79ada2d1c801de5e8c6"
         },
         "vanilla_off_continuation": {
           "command": [
@@ -1859,10 +1859,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1878,14 +1878,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_continuation.obj",
           "output_sha256": "ea8b6eee653371cee9644d7a8def05b9f9171da0d1aeddb7b2fd4580f0bd9268",
           "returncode": 0,
           "scores": {
@@ -1926,7 +1926,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_continuation.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 240,
@@ -1935,7 +1935,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "7db493e6c80bcc4bf04cde2e796ebad9ce971df90a5b4b9ecfdec5bf9eace1dc"
+          "trace_sha256": "b4bbdc484fe20be9fe9b4d6d30189126ccef1bdf5567b080c4c8b66a9cb5541e"
         },
         "vanilla_off_static": {
           "command": [
@@ -1944,10 +1944,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1963,14 +1963,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "off"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_static.obj",
           "output_sha256": "fcd747277c136cd260cff2bdba253aa324244d4f0ab66c1d9e82018b0a7a4b4b",
           "returncode": 0,
           "scores": {
@@ -2011,7 +2011,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_off_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_off_static.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 1,
@@ -2020,7 +2020,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "4187e244f74c5a74dd659d4c90f1ba383ac2833c51838f4a379a65cf642ef610"
+          "trace_sha256": "becad6a707d1d1b86d3a1d28c4bc3106eccc7ea1c570decd475c937fc3aa000a"
         },
         "vanilla_on_continuation": {
           "command": [
@@ -2029,10 +2029,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_continuation.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -2048,14 +2048,14 @@
             "--body-mode",
             "continuation",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_continuation.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "continuation",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_continuation.obj",
           "output_sha256": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6",
           "returncode": 0,
           "scores": {
@@ -2096,7 +2096,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_continuation.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_continuation.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 238,
@@ -2105,7 +2105,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "13bbe7b4a7d440a2979c3c5645ac9ef79fe1525197377aa8f9a922064822fa21"
+          "trace_sha256": "4b54a69cc502f83789834f60f0ad2d59d8863c3c669609fa71047bae545dbf58"
         },
         "vanilla_on_static": {
           "command": [
@@ -2114,10 +2114,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.obj",
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_static.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -2133,14 +2133,14 @@
             "--body-mode",
             "static",
             "--trace-json",
-            "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.trace.json"
+            "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_static.trace.json"
           ],
           "factors": {
             "anchor": "vanilla",
             "body": "static",
             "soft": "on"
           },
-          "output": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.obj",
+          "output": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_static.obj",
           "output_sha256": "dda6971b0bb99d389d6c2101117d20fc2f335cbbf41b2a0db983877c9153f3a8",
           "returncode": 0,
           "scores": {
@@ -2181,7 +2181,7 @@
               "n": 350
             }
           },
-          "trace": "tmp/pathb/s03e_h3c_final_v2/yarl_clothes/vanilla_on_static.trace.json",
+          "trace": "tmp/pathb/s03e_h3c_s04_final/yarl_clothes/vanilla_on_static.trace.json",
           "trace_counts": {
             "active": 632,
             "ever_contacted_active": 4,
@@ -2190,7 +2190,7 @@
             "support_target_clamps": 0,
             "vertices": 1777
           },
-          "trace_sha256": "97d315728ef6498ac578db50d4bdcad1972680ce8197167c2555d3eea2df0b93"
+          "trace_sha256": "0b11d6652c36338190049949fdc35ba812f4587e3f6d77ed41c3bdd1b7a4e1c3"
         }
       },
       "contrasts": {
@@ -2289,8 +2289,8 @@
   },
   "schema": "pathb-s03e-h3c-factorial-v2",
   "tool_sha256": {
-    "pathb_gate": "75df32d7ee70c7fca3103ca9bb5bcb12eca37656fe11041fb2617abda58fc439",
+    "pathb_gate": "98d31b3cc6214a6eb97c504ed4a1ea3dc35c17821f4b41af57005ee192b9ed31",
     "runner": "5db61d5122849a15f08b8ffe3afa7a5b87af02b771489ae056c5fdfe2a105260",
-    "shell_spike": "a4dcaaacc9ed5bc5946f5bfaa7a55a932de7e6979a8911fde08a25d543ec3750"
+    "shell_spike": "1d9332b9af5735035b089b5d08f9f8bcc7e444967490275d0754b9d2c392a197"
   }
 }

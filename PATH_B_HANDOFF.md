@@ -12,6 +12,9 @@ hash from this document.
   live flags and deployed Outfit Studio copies were not changed.
 - Phase 1 remains blocked. Do not port `surface-corot`, start an energy solver,
   add sculpt-targeted plumb or tune per garment from this checkpoint.
+- S04 completed the permitted support-boundary preflight.  Its final
+  `coherent-v1 + surface-corot + clamp` package is safe and deterministic, but
+  fails all three Heavy sentinels; RM_Thin and a C++ port remain blocked.
 - Falmer remains benched because its saved OSD ground truth is contaminated.
 - Yarl Cloak is a clean geometry reference for section-position/anti-imprint,
   but **not** a validated gravity reference.
@@ -100,16 +103,69 @@ passes the gates. There was no support/solver-strength sweep, so this does
 **not** reject the whole binding family or a coherent material support-boundary
 model.
 
+## S04 coherent support boundary
+
+S04 separated support-target eligibility from mobility.  It did not change
+`fixed`, inverse mass or the shell constraints.  The garment-agnostic
+classifier consumes only capture geometry/topology, the raw target and the
+co-rotational target; sculpt/ground truth, garment names and hand-picked IDs
+are excluded.
+
+The frozen v2 contract is continuation over six morph steps, `soft-anchor=on`,
+`body-vanilla` fallback, contact-floor clamp on and clearance `0.02`.  Every
+selected component must contain fixed support and at least one complete
+material face after exact-seam welding.  At every morph step it rejects new
+flips, seam regressions, expansion worse than `max(2x, raw)`, contraction worse
+than `min(0.5x, raw)` and face-area collapse worse than `min(0.1x, raw)`.
+
+| garment | broad | coherent-v1 | fixed selected | coverage of broad |
+|---|---:|---:|---:|---:|
+| Blacksmith | 1726 | 998 | 998 | 57.8% |
+| Yarl Clothes | 1269 | 590 | 590 | 46.5% |
+| Yarl Cloak | 526 | 11 | 11 | 2.1% |
+
+All 18 per-step target checks pass, but the coverage result matters: every
+retained vertex is hard-fixed and the Cloak treatment is nearly a no-op.  The
+classifier is a conservative safety filter, not evidence of a useful universal
+soft support frontier.
+
+The loader is fail-closed on schema, capture/tool/environment hashes, solve
+contract, approval, ID type/order/range, selected count and byte-mask hash.
+Static `body-vanilla` controls close byte-for-byte to authored for all three
+garments.  Repeated continuation solves are byte-deterministic and selected
+hard supports have zero final contact-floor violations.
+
+The strict Heavy gate compares all mean+p95 accuracy metrics and integrity to
+production baseline x1.05:
+
+| garment | coherent indexed/fwd/rev | vanilla-shell indexed/fwd/rev | result |
+|---|---:|---:|---|
+| Blacksmith | 1.8650 / 0.9930 / 1.0424 | 1.8508 / 0.9969 / 1.0488 | FAIL; mixed, <1% delta |
+| Yarl Clothes | 1.2320 / 0.5013 / 0.6000 | 1.1980 / 0.4832 / 0.5906 | FAIL; all means worse |
+| Yarl Cloak | 1.9342 / 1.1943 / 0.9422 | 1.9344 / 1.1940 / 0.9439 | FAIL; effectively no-op |
+
+All three Heavy sentinels fail.  The paired control shows that Clothes gets
+1.59-3.75% worse, Blacksmith is mixed and still far outside baseline, and
+Cloak has insufficient selected coverage to matter.  Integrity is identical
+to the vanilla-shell control.  This falsifies the package that could have been
+shipped; it does not justify RM_Thin, tuning, live deployment or a C++ port.
+
 ## Tracked artifacts
 
 - `fixtures/pathb/S03E_H3C_RESULTS.json`
-  `3e3eb3f267301ef1a525a7e75a6b38d37f536b3ee566dc31c591b549d09e4ef6`
+  `4714aa2eaf413814338fc2610b29d0c94fed5f5f4fd0a00e871e152cd5aa1cb3`
 - `fixtures/pathb/S03E_SECTION_RESULTS.json`
-  `f5b52bf3278e9aeaef2d00bf5a3ae185daa2d25d40f32ac4c5845c09eb74c399`
+  `94dcf7128d8a3a7682c45dd6bba93abfe19cde04ef86ab521f75c6c749b16511`
 - `fixtures/pathb/S03E_SURFACE_COROT_SCOREBOARD.md`
-  `e710f5ca51c61313f1aefccb3c7a8684ea2d5b32d4dd6f73897b39e9977c770f`
+  `5c3591cc11bd689f3894dbd875f10511ad43a8d48d2d33c3889ec544ab9d6e0b`
 - `fixtures/pathb/S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md`
-  `683479894751fa03b051090775e02c352de20efc7cd8aba6f8577d1ccae5cc01`
+  `078ffd3e372e0cda30a80365de7afe517c11ca6ec156acdceba5c0adbacd2adc`
+- `fixtures/pathb/S04_SUPPORT_PREFLIGHT.json`
+  `587da6ee2a060809cb7ff262133f94e4e4c76b28d43bcc69d1506dd7081e5a13`
+- `fixtures/pathb/S04_COHERENT_V1_STRICT_SCOREBOARD.md`
+  `99505aeaabba77b497f2b4f0839c2655093033f0afd86ac6adef6f3f17993f2a`
+- `fixtures/pathb/S04_SHELL_VANILLA_CONTROL_STRICT_SCOREBOARD.md`
+  `df9416a2c227988a7e603672b5938db4383d5f0d31bcb7b1a4f4398c2d46518b`
 
 The JSON artifacts embed exact commands, tool hashes and paths/hashes/summaries
 for generated OBJs and traces. The raw per-vertex traces remain under `tmp/`
@@ -139,27 +195,47 @@ py -3 tools/pathb_s03e_h3c.py --jobs 3 --workdir tmp/pathb/s03e_h3c_final_v2 --j
 py -3 tools/pathb_s03e_sections.py --workdir tmp/pathb/s03e_sections_final_v2 --json-out fixtures/pathb/S03E_SECTION_RESULTS.json
 py -3 tools/pathb_gate.py "shell:--rest base --morph-steps 6 --iterations 10 --gravity 0 --anchor-target surface-corot --surface-corot-clamp on --soft-anchor on --body-mode continuation" --label S03E_SURFACE_COROT_CLAMP_ON --out fixtures/pathb/S03E_SURFACE_COROT_SCOREBOARD.md
 py -3 tools/pathb_gate.py "shell:--rest base --morph-steps 6 --iterations 10 --gravity 0 --anchor-target surface-corot --surface-corot-clamp off --soft-anchor on --body-mode continuation" --label S03E_SURFACE_COROT_CLAMP_OFF --out fixtures/pathb/S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md
+
+py -3 tools/pathb_support_classifier.py
+py -3 tools/pathb_support_preflight.py --selftest --json-out fixtures/pathb/S04_SUPPORT_PREFLIGHT.json
+py -3 tools/pathb_gate.py "shell:--rest base --morph-steps 6 --iterations 10 --gravity 0 --anchor-target surface-corot --surface-corot-mask-json fixtures/pathb/S04_SUPPORT_PREFLIGHT.json --surface-corot-classifier coherent-v1 --surface-corot-fallback body-vanilla --surface-corot-clamp on --soft-anchor on --body-mode continuation" --label S04_COHERENT_V1 --out fixtures/pathb/S04_COHERENT_V1_STRICT_SCOREBOARD.md --strict
+py -3 tools/pathb_gate.py "shell:--rest base --morph-steps 6 --iterations 10 --gravity 0 --anchor-target vanilla --soft-anchor on --body-mode continuation" --label S04_SHELL_VANILLA_CONTROL --out fixtures/pathb/S04_SHELL_VANILLA_CONTROL_STRICT_SCOREBOARD.md --strict
 ```
 
 The two static hashes must match each other (the recorded Cloak run is
 `3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524`).
-The two gate commands intentionally exit nonzero because the candidate fails;
-that is a recorded scientific result, not a harness crash.
+All four scoreboard commands intentionally exit nonzero because the tested
+candidates/control fail; that is a recorded scientific result, not a harness
+crash.
+
+## Final validation
+
+- `pathb_support_classifier.py` selftest and `shell_spike.py
+  --attachment-selftest: PASS.
+- S04 preflight regenerated byte-for-byte with SHA-256 `587da6ee...`.
+- Static closure and continuation determinism: PASS for all three sentinels.
+- Selected hard-support final contact-floor violations: `0 / 0 / 0`.
+- Exact closest-point contact check: worst distance error `0` on all three.
+- Strict production baseline smoke: PASS `3/3`; final candidate: FAIL `3/3`.
+- Production corpus: all 18 tracked shapes match golden.
+- Three independent read-only peer reviews found no remaining integration
+  blocker; they agree that the Heavy failure is the scientific result.
 
 ## Next permitted research step
 
-Preflight the **support boundary/classifier** before adding another solver law:
+The support-boundary step is complete and rejected at Heavy.  Do not rescue it
+with per-garment thresholds, broader coverage or RM_Thin: the paired test says
+the approved package is neutral-to-worse before contraction testing.
 
-1. Measure binding coherence on material adjacency: triangle-ID discontinuity,
-   lever-arm distribution and local target-gradient energy.
-2. Propose garment-agnostic boundary candidates (connected material boundary,
-   stable proximity over the morph, or a coherent body patch), without names or
-   hand-picked vertex IDs.
-3. Require the static byte-identical control, lower lever arms and no new flips
-   before rerunning the three heavy sentinels.
-4. Only after one universal heavy candidate passes may RM_Thin run. Only after
-   heavy + thin + visual review may a C++ port be discussed.
+Path B needs new information before another solver family is justified:
 
-Separately, obtain a clean user-confirmed gravity sculpt before making claims
-about gravity. The broader universality/belt review remains documented in
-`UNIVERSALITY_HANDOFF.md` and is not superseded by this Path-B checkpoint.
+1. obtain a clean, user-confirmed gravity/free-hang sculpt and freeze its exact
+   provenance;
+2. define localized metrics for the visible under-butt/imprint defect instead
+   of relying only on global distance;
+3. preflight a genuinely different physical lever against raw and sculpt before
+   implementing it, with the same three-garment Heavy gate.
+
+The production universality/belt review can proceed independently on its own
+branch.  It remains documented in `UNIVERSALITY_HANDOFF.md`; this checkpoint
+does not authorize changes to the current `MERGED` DLL.

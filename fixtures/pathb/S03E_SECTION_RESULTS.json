@@ -2,16 +2,16 @@
   "garments": {
     "blacksmith": {
       "base": {
-        "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset/cloth_base.obj",
+        "path": "tmp/pathb/s03e_sections_s04_final/blacksmith/dataset/cloth_base.obj",
         "sha256": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7"
       },
       "candidates": {
         "production": {
-          "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/blacksmith/production.obj",
           "sha256": "ec4894ccb8ba3c095447b17a774789dc13fb9dc82f3b33b6da7ed4a88961b151"
         },
         "shell_base": {
-          "path": "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/blacksmith/shell_base.obj",
           "sha256": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507"
         }
       },
@@ -426,10 +426,10 @@
             "--replay",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--result-obj",
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj"
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/production.obj"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/production.obj": "ec4894ccb8ba3c095447b17a774789dc13fb9dc82f3b33b6da7ed4a88961b151"
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/production.obj": "ec4894ccb8ba3c095447b17a774789dc13fb9dc82f3b33b6da7ed4a88961b151"
           },
           "returncode": 4
         },
@@ -440,10 +440,10 @@
             "--capture",
             "corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset",
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj",
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/shell_base.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -460,8 +460,8 @@
             "continuation"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/dataset/cloth_base.obj": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
-            "tmp/pathb/s03e_sections_final_v2/blacksmith/shell_base.obj": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507"
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/dataset/cloth_base.obj": "94b698802a928ff080948267edeb6823bedbb294f2e2af3133a1aad435d285e7",
+            "tmp/pathb/s03e_sections_s04_final/blacksmith/shell_base.obj": "1bc183425f8b2974e7e1be317749cc5fc1b67268634b2e328dbda1571c99e507"
           },
           "returncode": 0
         }
@@ -470,16 +470,16 @@
     },
     "yarl_cloak": {
       "base": {
-        "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset/cloth_base.obj",
+        "path": "tmp/pathb/s03e_sections_s04_final/yarl_cloak/dataset/cloth_base.obj",
         "sha256": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524"
       },
       "candidates": {
         "production": {
-          "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/yarl_cloak/production.obj",
           "sha256": "ad4bd649a3aff6e3e321a6c4832b211ce965ae14f350855fcd7fc68179495a9f"
         },
         "shell_base": {
-          "path": "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/yarl_cloak/shell_base.obj",
           "sha256": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b"
         }
       },
@@ -893,10 +893,10 @@
             "--replay",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--result-obj",
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj"
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/production.obj"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/production.obj": "ad4bd649a3aff6e3e321a6c4832b211ce965ae14f350855fcd7fc68179495a9f"
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/production.obj": "ad4bd649a3aff6e3e321a6c4832b211ce965ae14f350855fcd7fc68179495a9f"
           },
           "returncode": 4
         },
@@ -907,10 +907,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Cloak__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset",
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj",
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/shell_base.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -927,8 +927,8 @@
             "continuation"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/dataset/cloth_base.obj": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
-            "tmp/pathb/s03e_sections_final_v2/yarl_cloak/shell_base.obj": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b"
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/dataset/cloth_base.obj": "3d10426b7a7c673ee3e779d9b5581ec079369895dfed05957c947acf2cca2524",
+            "tmp/pathb/s03e_sections_s04_final/yarl_cloak/shell_base.obj": "eacf522f53e344af24543c394ccb898dcc25b9b15895d5d7bb85e380e0adce8b"
           },
           "returncode": 0
         }
@@ -937,16 +937,16 @@
     },
     "yarl_clothes": {
       "base": {
-        "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset/cloth_base.obj",
+        "path": "tmp/pathb/s03e_sections_s04_final/yarl_clothes/dataset/cloth_base.obj",
         "sha256": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d"
       },
       "candidates": {
         "production": {
-          "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/yarl_clothes/production.obj",
           "sha256": "b8c318b0f97a63a5b9df850d9181a8f3ac9498c02bc2240453c57d4927968146"
         },
         "shell_base": {
-          "path": "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj",
+          "path": "tmp/pathb/s03e_sections_s04_final/yarl_clothes/shell_base.obj",
           "sha256": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6"
         }
       },
@@ -1360,10 +1360,10 @@
             "--replay",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--result-obj",
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj"
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/production.obj"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/production.obj": "b8c318b0f97a63a5b9df850d9181a8f3ac9498c02bc2240453c57d4927968146"
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/production.obj": "b8c318b0f97a63a5b9df850d9181a8f3ac9498c02bc2240453c57d4927968146"
           },
           "returncode": 4
         },
@@ -1374,10 +1374,10 @@
             "--capture",
             "corpus/yarl_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Yarl_Clothes_2__No_Physics___Clothes__RM_Heavy.drcap",
             "--dataset",
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset",
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/dataset",
             "--solve",
             "--output",
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj",
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/shell_base.obj",
             "--rest",
             "base",
             "--morph-steps",
@@ -1394,8 +1394,8 @@
             "continuation"
           ],
           "outputs": {
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/dataset/cloth_base.obj": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
-            "tmp/pathb/s03e_sections_final_v2/yarl_clothes/shell_base.obj": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6"
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/dataset/cloth_base.obj": "95ae65d42af4e00686704ed0e69328f66e05bebd2ac9c02672ea3a592e8b917d",
+            "tmp/pathb/s03e_sections_s04_final/yarl_clothes/shell_base.obj": "50cbe35e44be22187674fc52d839cdaeec5a63bee5b0506fcc2690f904e999d6"
           },
           "returncode": 0
         }
@@ -1418,8 +1418,8 @@
     "band_descriptor": "ee036f0e3b8934ac4ddcf832a63ae8d60724cd9ba162242e5024f2210d345113",
     "band_distribution": "40e1fc1960ba4a70701f9b1b3d6e84793cb61d105f599b6edee3fda71fc980cf",
     "harness": "1e04ca1d812d49ea09bda0926cfe8fc54d3d9128499b65875c64363005931af5",
-    "pathb_gate": "75df32d7ee70c7fca3103ca9bb5bcb12eca37656fe11041fb2617abda58fc439",
+    "pathb_gate": "98d31b3cc6214a6eb97c504ed4a1ea3dc35c17821f4b41af57005ee192b9ed31",
     "runner": "08f5c2f8b7f581c1496a1fe36505350c6a683525e55293d1ca190b677d3aad8c",
-    "shell_spike": "a4dcaaacc9ed5bc5946f5bfaa7a55a932de7e6979a8911fde08a25d543ec3750"
+    "shell_spike": "1d9332b9af5735035b089b5d08f9f8bcc7e444967490275d0754b9d2c392a197"
   }
 }

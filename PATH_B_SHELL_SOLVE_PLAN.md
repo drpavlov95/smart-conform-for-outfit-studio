@@ -1,4 +1,21 @@
-# Path B — Static Shell Solve: plano de pesquisa e implementação (v2.2)
+# Path B — Static Shell Solve: plano de pesquisa e implementação (v2.3)
+
+## Adendo v2.3 — S04 fecha a hipótese de support boundary (2026-07-15)
+
+O próximo passo autorizado pela v2.2 foi concluído. Um classificador
+garment-agnostic `coherent-v1` foi implementado com contrato fail-closed em
+seis morph steps, fechamento de componentes/seams, gates de flip, expansão,
+contração, área e static byte-closure. O pacote final
+`coherent-v1 + surface-corot + clamp` falhou o gate Heavy estrito em
+Blacksmith, Yarl Clothes e Yarl Cloak. O controle vanilla-shell pareado mostra
+resultado misto no Blacksmith, piora de todas as means em Clothes e tratamento
+quase nulo no Cloak.
+
+Decisão: **não executar RM_Thin, não tunar a máscara, não portar C++ e não
+alterar produção**. A Fase 1 continua bloqueada. Antes de outra família física,
+é necessário um ground truth gravitacional/free-hang limpo e métricas locais do
+defeito visual. Artefatos e reprodução completos: `PATH_B_HANDOFF.md` e
+`fixtures/pathb/S04_*`.
 
 ## Adendo v2.2 — S0.3e corrige o preflight (2026-07-15)
 
@@ -47,7 +64,7 @@ O Yarl Cloak permanece um ground truth geométrico limpo, mas seu papel correto
 é **posição de seção/anti-imprint**, não sentinela de gravidade. A vaga de
 ground truth gravitacional está aberta; Falmer continua benchado.
 
-Data original: 2026-07-14 · Atualização v2.2: 2026-07-15 · Branch: `wip/path-b-shell-solve` · Autor: Opus (planejamento)
+Data original: 2026-07-14 · Atualização v2.3: 2026-07-15 · Branch: `wip/path-b-shell-solve` · Autor: Opus (planejamento)
 v2 após peer-review do Codex (2026-07-14); v2.1 após segunda rodada (mesmo dia).
 Revisor: Codex · Implementador pretendido: Sonnet
 
@@ -67,8 +84,9 @@ Revisor: Codex · Implementador pretendido: Sonnet
 6. Protocolo numérico definido: gravidade normalizada por morph steps
    (`g_step = G_total/morph_steps`; grade G_total ∈ {0, 0.5u, 1.0u}),
    compliances explícitas, critério de convergência reportado.
-7. Capturas escolhidas viram fixtures RASTREADAS (não só sculpts/hashes);
-   RM_Thin não existe em captura — aquisição vira pré-requisito do gate G.
+7. Capturas escolhidas viram fixtures RASTREADAS (não só sculpts/hashes).
+   Histórico v2.1 dizia que RM_Thin não existia; S0.1d confirmou e rastreou as
+   capturas existentes. S04 não as roda porque o Heavy falha primeiro.
 8. Regra de parada endurecida: sem célula passando TODOS os gates ⇒ SEM port
    C++, ponto. Célula parcial é documentada, não desbloqueia a Fase 3.
 
@@ -271,7 +289,7 @@ Baselines MEDIDOS em S0.2c (`fixtures/pathb/BASELINES.md`, `pathb_metrics.py`):
 | D. determinismo | SHA-256 de 2 runs | — | idêntico, sempre |
 | E. corpus | check_corpus com feature OFF | verde | verde inalterado |
 | F. convergência | mesmas conclusões em morphSteps {3,6,12} × iterations {5,10,20} | — | ranking de candidatos estável |
-| G. contração | RM_Thin + 1 painel inclinado (falmer Strap ou lemoria) | medir | sem inversão/colapso; gates I e D valem. NÃO existe captura RM_Thin hoje: a AQUISIÇÃO (sessão live com o usuário, `captures/enable_capture.flag`) é PRÉ-REQUISITO deste gate e do port C++ |
+| G. contração | RM_Thin + 1 painel inclinado (falmer Strap ou lemoria) | medir | sem inversão/colapso; gates I e D valem. Capturas RM_Thin já estão rastreadas; este gate só roda depois de Heavy PASS. |
 
 **Protocolo numérico (v2.1):** gravidade normalizada por continuação —
 `g_step = G_total / morph_steps`, com G_total ∈ {0, 0.5u, 1.0u} (3 vs 12 steps

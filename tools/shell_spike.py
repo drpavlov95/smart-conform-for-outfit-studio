@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,8 +23,10 @@ from pathlib import Path
 import numpy as np
 
 try:
+    import scipy
     from scipy.spatial import cKDTree
 except ImportError:  # the exact expanding-grid fallback below remains valid
+    scipy = None
     cKDTree = None
 
 
@@ -707,16 +710,25 @@ def transport_surface_attachments(
     body_reference: np.ndarray,
     body_current: np.ndarray,
     body_tris: np.ndarray,
-    authored_fallback: np.ndarray,
+    fallback_target: np.ndarray,
+    authored_target: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Transport support targets without copying body stretch/shear into offset."""
+    """Transport selected supports while preserving the requested fallback.
+
+    On a static body, selected vertices close exactly to ``authored_target``;
+    unselected vertices remain on ``fallback_target``.  Keeping those fields
+    separate is essential for S04's paired static control.
+    """
+    if authored_target is None:
+        authored_target = fallback_target
+    target = fallback_target.copy()
+    indices = np.flatnonzero(attachments.valid)
     # This is both an invariant and a numerical guard: a static body must make
     # surface-corot exactly identical to authored, not merely close enough for
     # an equidistant nearest-face tie to change contact sign.
     if np.array_equal(body_reference, body_current):
-        return authored_fallback.copy()
-    target = authored_fallback.copy()
-    indices = np.flatnonzero(attachments.valid)
+        target[indices] = authored_target[indices]
+        return target
     if len(indices) == 0:
         return target
     triangles = attachments.triangle[indices]
@@ -778,7 +790,7 @@ def attachment_selftest() -> None:
     requested = np.ones(len(cloth), dtype=bool)
     collider = UniformBodyCollider(body, tris)
     bindings = build_surface_attachments(cloth, requested, body, tris, collider)
-    closure = transport_surface_attachments(bindings, body, body, tris, cloth)
+    closure = transport_surface_attachments(bindings, body, body, tris, cloth, cloth)
     closure_error = float(np.linalg.norm(closure - cloth, axis=1).max())
     if closure_error > 1.0e-9:
         raise RuntimeError(f"surface-corot t=0 closure failed: {closure_error}")
@@ -805,14 +817,30 @@ def attachment_selftest() -> None:
     )
     translation = np.array([4.0, -3.0, 2.5], dtype=np.float64)
     moved_body = body @ rotation.T + translation
-    transported = transport_surface_attachments(bindings, body, moved_body, tris, cloth)
+    transported = transport_surface_attachments(
+        bindings, body, moved_body, tris, cloth, cloth
+    )
     expected = cloth @ rotation.T + translation
     rigid_error = float(np.linalg.norm(transported - expected, axis=1).max())
     if rigid_error > 1.0e-9:
         raise RuntimeError(f"surface-corot rigid-motion test failed: {rigid_error}")
+    partial_requested = np.array([True, False, True], dtype=bool)
+    partial = build_surface_attachments(
+        cloth, partial_requested, body, tris, collider
+    )
+    displaced_fallback = cloth + np.array([7.0, 0.0, 0.0])
+    partial_static = transport_surface_attachments(
+        partial, body, body, tris, displaced_fallback, cloth
+    )
+    if not np.array_equal(partial_static[partial_requested], cloth[partial_requested]):
+        raise RuntimeError("surface-corot static selected vertices missed authored closure")
+    if not np.array_equal(
+        partial_static[~partial_requested], displaced_fallback[~partial_requested]
+    ):
+        raise RuntimeError("surface-corot static fallback leaked outside selected mask")
     print(
         f"attachment selftest PASS closure={closure_error:.3g} "
-        f"rigidMotion={rigid_error:.3g} staticClamp=no-op "
+        f"rigidMotion={rigid_error:.3g} staticClamp=no-op partialFallback=isolated "
         f"valid={int(bindings.valid.sum())}"
     )
 
@@ -845,6 +873,173 @@ def attachment_report(capture_path: Path) -> None:
         f"{distances.max():.3f} gt4={(distances > 4.0).sum()} "
         f"gt8={(distances > 8.0).sum()}"
     )
+
+
+def load_surface_corot_mask(
+    artifact_path: Path,
+    classifier: str,
+    capture_path: Path,
+    vertex_count: int,
+    eligible: np.ndarray,
+    *,
+    surface_corot_fallback: str,
+    surface_corot_clamp: bool,
+    body_mode: str,
+    soft_anchor_mode: str,
+    morph_steps: int,
+    clearance: float,
+) -> np.ndarray:
+    """Load an offline-preflighted support mask, fail-closed on provenance.
+
+    The classifier itself lives in the S04 measurement runner.  The solve uses
+    its frozen mask so the field tested by the gate is exactly the field that
+    passed preflight, without duplicating or subtly drifting the classifier.
+    """
+    data = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if data.get("schema") != "pathb-support-preflight-v2":
+        raise ValueError(f"{artifact_path}: unsupported support-preflight schema")
+    if data.get("all_coherent_v1_gates_pass") is not True:
+        raise ValueError(f"{artifact_path}: coherent-v1 global gate is not PASS")
+    contract = data.get("solve_contract")
+    if not isinstance(contract, dict):
+        raise ValueError(f"{artifact_path}: missing solve_contract")
+    if contract.get("anchor_target") != "surface-corot":
+        raise ValueError(f"{artifact_path}: invalid anchor_target contract")
+    expected_mode = (
+        contract.get("candidate_body_mode")
+        if body_mode == "continuation"
+        else contract.get("static_control_body_mode")
+        if body_mode == "static"
+        else None
+    )
+    contract_mismatches = []
+    if expected_mode != body_mode:
+        contract_mismatches.append(f"body_mode={body_mode!r}")
+    if contract.get("surface_corot_fallback") != surface_corot_fallback:
+        contract_mismatches.append(
+            f"fallback={surface_corot_fallback!r}"
+        )
+    if contract.get("surface_corot_clamp") is not surface_corot_clamp:
+        contract_mismatches.append(f"clamp={surface_corot_clamp!r}")
+    if contract.get("morph_steps") != morph_steps:
+        contract_mismatches.append(f"morph_steps={morph_steps}")
+    if contract.get("soft_anchor") != soft_anchor_mode:
+        contract_mismatches.append(f"soft_anchor={soft_anchor_mode!r}")
+    try:
+        recorded_clearance = float(contract.get("clearance"))
+    except (TypeError, ValueError):
+        recorded_clearance = float("nan")
+    if not np.isfinite(recorded_clearance) or abs(recorded_clearance - clearance) > 1.0e-12:
+        contract_mismatches.append(f"clearance={clearance!r}")
+    if contract_mismatches:
+        raise ValueError(
+            f"{artifact_path}: solve contract mismatch: "
+            + ", ".join(contract_mismatches)
+        )
+
+    recorded_tools = data.get("tools")
+    current_tools = {
+        "pathb_support_classifier.py": REPO_ROOT / "tools/pathb_support_classifier.py",
+        "pathb_support_preflight.py": REPO_ROOT / "tools/pathb_support_preflight.py",
+        "shell_spike.py": Path(__file__).resolve(),
+    }
+    if not isinstance(recorded_tools, dict):
+        raise ValueError(f"{artifact_path}: missing tool provenance")
+    for name, path in current_tools.items():
+        if not path.is_file() or recorded_tools.get(name) != sha256(path):
+            raise ValueError(f"{artifact_path}: stale tool hash for {name}")
+    recorded_environment = data.get("environment")
+    current_environment = {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "scipy": scipy.__version__ if scipy is not None else None,
+    }
+    if recorded_environment != current_environment:
+        raise ValueError(
+            f"{artifact_path}: runtime environment differs from preflight"
+        )
+    raw_entries = data.get("garments")
+    if isinstance(raw_entries, dict):
+        entries = list(raw_entries.values())
+    elif isinstance(raw_entries, list):
+        entries = raw_entries
+    else:
+        raise ValueError(f"{artifact_path}: missing garments list/map")
+
+    capture_digest = sha256(capture_path)
+    matches = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_digest = entry.get("capture_sha256")
+        if entry_digest is None and isinstance(entry.get("capture"), dict):
+            entry_digest = entry["capture"].get("sha256")
+        if entry_digest == capture_digest:
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ValueError(
+            f"{artifact_path}: expected one garment for capture {capture_digest}, "
+            f"found {len(matches)}"
+        )
+    entry = matches[0]
+    recorded_count = int(entry.get("vertex_count", entry.get("counts", {}).get("vertices", -1)))
+    if recorded_count != vertex_count:
+        raise ValueError(
+            f"{artifact_path}: vertex count {recorded_count} != capture {vertex_count}"
+        )
+    classifiers = entry.get("classifiers")
+    if not isinstance(classifiers, dict) or classifier not in classifiers:
+        raise ValueError(f"{artifact_path}: classifier {classifier!r} not found")
+    record = classifiers[classifier]
+    if not isinstance(record, dict):
+        raise ValueError(f"{artifact_path}: malformed classifier {classifier!r}")
+    if record.get("approved_for_solve") is not True:
+        raise ValueError(
+            f"{artifact_path}: classifier {classifier!r} is not approved for solve"
+        )
+    diagnostics = entry.get("diagnostics")
+    if (
+        not isinstance(diagnostics, dict)
+        or diagnostics.get("coherent_v1_gate_pass") is not True
+    ):
+        raise ValueError(f"{artifact_path}: garment classifier gate is not PASS")
+    if record.get("fallback") != surface_corot_fallback:
+        raise ValueError(f"{artifact_path}: classifier fallback does not match solve")
+    if record.get("surface_corot_clamp") is not surface_corot_clamp:
+        raise ValueError(f"{artifact_path}: classifier clamp does not match solve")
+    if record.get("morph_steps") != morph_steps:
+        raise ValueError(f"{artifact_path}: classifier morph_steps does not match solve")
+    if record.get("soft_anchor") != soft_anchor_mode:
+        raise ValueError(f"{artifact_path}: classifier soft_anchor does not match solve")
+    ids = record.get("selected_vertex_ids")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(vertex_id) is not int for vertex_id in ids)
+        or ids != sorted(ids)
+    ):
+        raise ValueError(
+            f"{artifact_path}: classifier {classifier!r} has invalid selected_vertex_ids"
+        )
+    selected = np.asarray(ids, dtype=np.int64)
+    if len(selected) != len(np.unique(selected)):
+        raise ValueError(f"{artifact_path}: duplicate support vertex IDs")
+    if len(selected) and (int(selected.min()) < 0 or int(selected.max()) >= vertex_count):
+        raise ValueError(f"{artifact_path}: support vertex ID out of range")
+    mask = np.zeros(vertex_count, dtype=bool)
+    mask[selected] = True
+    if record.get("selected_count") != int(mask.sum()):
+        raise ValueError(f"{artifact_path}: selected_count does not match mask")
+    mask_digest = hashlib.sha256(mask.astype(np.uint8).tobytes()).hexdigest()
+    if record.get("mask_u8_sha256") != mask_digest:
+        raise ValueError(f"{artifact_path}: mask_u8_sha256 does not match mask")
+    outside = np.flatnonzero(np.logical_and(mask, ~eligible))
+    if len(outside):
+        raise ValueError(
+            f"{artifact_path}: {len(outside)} selected vertices are outside fixed|soft; "
+            f"first={outside[:8].tolist()}"
+        )
+    return mask
 
 
 class GravityShadow:
@@ -1457,6 +1652,9 @@ def solve_shell(
     body_mode: str = "continuation",
     trace_json: Path | None = None,
     surface_corot_clamp: bool = True,
+    surface_corot_mask_json: Path | None = None,
+    surface_corot_classifier: str = "coherent-v1",
+    surface_corot_fallback: str = "authored",
 ) -> None:
     cap = read_capture_front(capture_path)
     vanilla_path = dataset / "cloth_vanilla.obj"
@@ -1562,6 +1760,25 @@ def solve_shell(
         if not np.array_equal(cap.ref_body_tris, cap.body_tris):
             raise RuntimeError("surface-corot requires identical reference/morphed body topology")
         attachment_mask = np.logical_or(fixed, soft_anchor > 0.0)
+        if surface_corot_mask_json is not None:
+            attachment_mask = load_surface_corot_mask(
+                surface_corot_mask_json,
+                surface_corot_classifier,
+                capture_path,
+                len(cap.base_verts),
+                attachment_mask,
+                surface_corot_fallback=surface_corot_fallback,
+                surface_corot_clamp=surface_corot_clamp,
+                body_mode=body_mode,
+                soft_anchor_mode=soft_anchor_mode,
+                morph_steps=morph_steps,
+                clearance=clearance,
+            )
+            print(
+                f"surfaceCorot classifier={surface_corot_classifier} "
+                f"mask={surface_corot_mask_json} maskSha={sha256(surface_corot_mask_json)[:12]} "
+                f"fallback={surface_corot_fallback} selected={int(attachment_mask.sum())}"
+            )
         surface_attachments = build_surface_attachments(
             cap.base_verts,
             attachment_mask,
@@ -1610,17 +1827,30 @@ def solve_shell(
         # local rigid rotation + the authored cloth offset (no sculpt target).
         if anchor_target_mode == "surface-corot":
             assert surface_attachments is not None
+            if surface_corot_fallback == "authored":
+                corot_fallback = cap.base_verts
+            elif surface_corot_fallback == "vanilla":
+                corot_fallback = cap.base_verts + cap.raw_diff * t
+            elif surface_corot_fallback == "body-vanilla":
+                body_t = 0.0 if body_mode == "static" else t
+                corot_fallback = cap.base_verts + cap.raw_diff * body_t
+            else:
+                raise ValueError(
+                    f"unknown surface-corot fallback: {surface_corot_fallback}"
+                )
             anchor_target = transport_surface_attachments(
                 surface_attachments,
                 cap.ref_body_verts,
                 body,
                 cap.body_tris,
+                corot_fallback,
                 cap.base_verts,
             )
             if surface_corot_clamp:
+                clamp_mask = np.logical_and(fixed, surface_attachments.requested)
                 clamp_count, clamp_worst = clamp_targets_to_contact_floor(
                     anchor_target,
-                    np.flatnonzero(fixed).astype(np.int32),
+                    np.flatnonzero(clamp_mask).astype(np.int32),
                     collider,
                     contact_floor,
                 )
@@ -1819,6 +2049,21 @@ def solve_shell(
         )
         final_gap = final_collider.gaps(x)
         observed = np.isfinite(minimum_observed_gap)
+        effective_classifier = None
+        effective_mask_sha256 = None
+        effective_fallback = None
+        effective_clamp = None
+        if anchor_target_mode == "surface-corot":
+            effective_classifier = (
+                surface_corot_classifier
+                if surface_corot_mask_json is not None
+                else "broad-current"
+            )
+            effective_mask_sha256 = hashlib.sha256(
+                surface_attachments.requested.astype(np.uint8).tobytes()
+            ).hexdigest()
+            effective_fallback = surface_corot_fallback
+            effective_clamp = surface_corot_clamp
         trace = {
             "schema": "pathb-s03e-contact-trace-v1",
             "capture": str(capture_path),
@@ -1834,7 +2079,16 @@ def solve_shell(
                 "anchor_target": anchor_target_mode,
                 "soft_anchor": soft_anchor_mode,
                 "body_mode": body_mode,
-                "surface_corot_clamp": surface_corot_clamp,
+                "surface_corot_clamp": effective_clamp,
+                "surface_corot_mask_json": (
+                    str(surface_corot_mask_json) if surface_corot_mask_json else None
+                ),
+                "surface_corot_mask_sha256": (
+                    sha256(surface_corot_mask_json) if surface_corot_mask_json else None
+                ),
+                "surface_corot_classifier": effective_classifier,
+                "surface_corot_effective_mask_sha256": effective_mask_sha256,
+                "surface_corot_fallback": effective_fallback,
                 "clearance": clearance,
             },
             "counts": {
@@ -2073,6 +2327,21 @@ def main() -> int:
         "--surface-corot-clamp", choices=("on", "off"), default="on",
         help="clamp surface-corot hard targets to authored contact floors",
     )
+    ap.add_argument(
+        "--surface-corot-mask-json", type=Path,
+        help="consume a capture-hashed support mask frozen by the S04 preflight",
+    )
+    ap.add_argument(
+        "--surface-corot-classifier", default="coherent-v1",
+        help="classifier record to select from --surface-corot-mask-json",
+    )
+    ap.add_argument(
+        "--surface-corot-fallback",
+        choices=("authored", "vanilla", "body-vanilla"),
+        default="authored",
+        help=("target for fixed/soft vertices outside the selected corot mask; "
+              "body-vanilla is authored for a static body and vanilla during continuation"),
+    )
     ap.add_argument("--soft-anchor", choices=("on", "off"), default="on")
     ap.add_argument("--body-mode", choices=("continuation", "static"), default="continuation")
     ap.add_argument(
@@ -2086,6 +2355,8 @@ def main() -> int:
             "choose --inspect, --contact-check, --attachment-selftest, "
             "--attachment-report and/or --solve"
         )
+    if args.surface_corot_mask_json and args.anchor_target != "surface-corot":
+        ap.error("--surface-corot-mask-json requires --anchor-target surface-corot")
     if args.inspect:
         inspect_dataset(args.capture.resolve(), args.dataset.resolve())
     if args.contact_check:
@@ -2129,6 +2400,12 @@ def main() -> int:
             body_mode=args.body_mode,
             trace_json=args.trace_json.resolve() if args.trace_json else None,
             surface_corot_clamp=args.surface_corot_clamp == "on",
+            surface_corot_mask_json=(
+                args.surface_corot_mask_json.resolve()
+                if args.surface_corot_mask_json else None
+            ),
+            surface_corot_classifier=args.surface_corot_classifier,
+            surface_corot_fallback=args.surface_corot_fallback,
         )
     return 0
 

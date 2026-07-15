@@ -910,13 +910,87 @@ anchor.
   Cloak permanecem `1bc183425f8b` / `eacf522f53e3`. Depois dessa correção, a
   adição do modo `surface-corot` deixa o default corrigido byte-idêntico.
 - Artefatos rastreados:
-  - `S03E_H3C_RESULTS.json` SHA-256 `3e3eb3f267301ef1a525a7e75a6b38d37f536b3ee566dc31c591b549d09e4ef6`;
-  - `S03E_SECTION_RESULTS.json` SHA-256 `f5b52bf3278e9aeaef2d00bf5a3ae185daa2d25d40f32ac4c5845c09eb74c399`;
-  - `S03E_SURFACE_COROT_SCOREBOARD.md` SHA-256 `e710f5ca51c61313f1aefccb3c7a8684ea2d5b32d4dd6f73897b39e9977c770f`;
-  - `S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md` SHA-256 `683479894751fa03b051090775e02c352de20efc7cd8aba6f8577d1ccae5cc01`.
+  - `S03E_H3C_RESULTS.json` SHA-256 `4714aa2eaf413814338fc2610b29d0c94fed5f5f4fd0a00e871e152cd5aa1cb3`;
+  - `S03E_SECTION_RESULTS.json` SHA-256 `94dcf7128d8a3a7682c45dd6bba93abfe19cde04ef86ab521f75c6c749b16511`;
+  - `S03E_SURFACE_COROT_SCOREBOARD.md` SHA-256 `5c3591cc11bd689f3894dbd875f10511ad43a8d48d2d33c3889ec544ab9d6e0b`;
+  - `S03E_SURFACE_COROT_NO_CLAMP_SCOREBOARD.md` SHA-256 `078ffd3e372e0cda30a80365de7afe517c11ca6ec156acdceba5c0adbacd2adc`.
 - Handoff operacional: `PATH_B_HANDOFF.md`.
 
 Próximo passo permitido: preflight da **classificação/fronteira de suporte**
 (por que Cloak tem 90% fixed; distinguir fitted material de fronteira realmente
 presa) e/ou aquisição de ground truth gravitacional limpo. Não construir solver
 energético nem plumb mirado antes disso.
+
+## Marco 9 - S04 support-boundary preflight e Heavy gate (2026-07-15)
+
+O passo permitido no marco anterior foi executado sem tocar produção, DLL ou
+flags live. A pesquisa separou duas coisas que o classificador antigo misturava:
+
+- mobilidade/`fixed`/soft anchors continuam exatamente como no shell;
+- uma máscara decide apenas quais anchors recebem target `surface-corot`.
+
+### Preflight `coherent-v1`
+
+Entradas permitidas: capture, topologia material, corpo base/morph, target raw e
+target corot. Sculpt, ground truth, nomes de garment e IDs escolhidos à mão não
+entram no classificador.
+
+Contrato congelado: seis morph steps, continuation, `soft-anchor=on`, fallback
+`body-vanilla`, clamp unilateral ligado e clearance `0.02`. O gate roda em cada
+passo, não apenas no frame final. Ele exige:
+
+- lever/body-edge <= 2 e >=75% de coerência nas arestas incidentes;
+- zero flip novo e zero seam regression;
+- nenhuma expansão pior que `max(2x, raw)`;
+- nenhuma contração pior que `min(0.5x, raw)`;
+- nenhuma área de face pior que `min(0.1x, raw)`;
+- depois do pruning, todo componente welded por exact seam contém hard support
+  e pelo menos uma face material completa.
+
+O peer review encontrou e corrigiu antes do Heavy: um flip intermediário em
+Clothes 4/6, clamp vazando para vértices fora da máscara, fallback static
+incorreto, consumo de artefato sem provenance, ilhas pós-pruning e ausência de
+gate de contração/área. O loader final rejeita schema, tools, ambiente, capture,
+contrato, IDs/count/hash ou approval divergentes.
+
+Máscara final (broad -> coherent): Blacksmith `1726 -> 998`, Clothes
+`1269 -> 590`, Cloak `526 -> 11`. Todos os selecionados acabaram hard-fixed.
+Isso é seguro, mas extremamente conservador no Cloak (2.1% de coverage), logo
+não prova uma soft frontier universal.
+
+Todos os 18 registros garment x morph-step passam os gates de target. O
+preflight regenera byte a byte (`587da6ee2a060809...`). Static closure é
+byte-idêntica a authored nos três garments; continuation repetida também é
+byte-determinística; hard supports selecionados têm zero violação final de
+contact floor.
+
+### Gate Heavy estrito - REJEITADO
+
+O strict gate agora exige shell rc=0, base fresca capture-paired, finitude,
+topologia exata, seis métricas mean+p95 <= baseline x1.05 e integridade sem
+piora. Resultado `coherent-v1 + corot + clamp`:
+
+| garment | indexed | surface fwd/rev | flips | veredito |
+|---|---:|---:|---:|---|
+| Blacksmith | 1.8650 | 0.9930 / 1.0424 | 0 | FAIL |
+| Yarl Clothes | 1.2320 | 0.5013 / 0.6000 | 9 | FAIL |
+| Yarl Cloak | 1.9342 | 1.1943 / 0.9422 | 19 | FAIL |
+
+Controle shell-vanilla pareado: Blacksmith `1.8508 / 0.9969 / 1.0488`, Clothes
+`1.1980 / 0.4832 / 0.5906`, Cloak `1.9344 / 1.1940 / 0.9439`. O pacote fica
+misto e <1% no Blacksmith, piora todas as means em Clothes (1.59-3.75%) e vira
+quase no-op no Cloak. Integridade é igual ao controle.
+
+Conclusão estreita: o pacote universal que poderia avançar - máscara segura +
+surface-corot + clamp - falha 3/3 Heavy. Regra de parada aplicada: **sem
+RM_Thin, sem tuning adicional, sem C++ e sem deploy**. Produção `MERGED`
+permanece intacta.
+
+Artefatos autoritativos:
+
+- `S04_SUPPORT_PREFLIGHT.json` `587da6ee2a060809cb7ff262133f94e4e4c76b28d43bcc69d1506dd7081e5a13`;
+- `S04_COHERENT_V1_STRICT_SCOREBOARD.md` `99505aeaabba77b497f2b4f0839c2655093033f0afd86ac6adef6f3f17993f2a`;
+- `S04_SHELL_VANILLA_CONTROL_STRICT_SCOREBOARD.md` `df9416a2c227988a7e603672b5938db4383d5f0d31bcb7b1a4f4398c2d46518b`.
+
+Próximo desbloqueio: ground truth gravitacional/free-hang limpo e uma métrica
+local do defeito visual antes de propor outra família física.

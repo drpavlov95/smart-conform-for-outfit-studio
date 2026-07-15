@@ -8,4 +8,6 @@
 /fixtures/pathb/*.txt text eol=lf
 /fixtures/pathb/S03E_*.json text eol=crlf
 /fixtures/pathb/S03E_*.md text eol=crlf
+/fixtures/pathb/S04_*.json text eol=crlf
+/fixtures/pathb/S04_*.md text eol=crlf
 /fixtures/pathb/captures/*.drcap binary
