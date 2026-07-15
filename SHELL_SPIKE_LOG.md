@@ -994,3 +994,45 @@ Artefatos autoritativos:
 
 Próximo desbloqueio: ground truth gravitacional/free-hang limpo e uma métrica
 local do defeito visual antes de propor outra família física.
+
+## 2026-07-15 — S0.4a: hinge-fold (dobra de placas até a vertical) FALSIFICADO no preflight
+
+Candidato do usuário (`PATH_B_HINGE_FOLD_CANDIDATE.md`): placas rígidas +
+dobradiças, dobrando do suporte para baixo até contato ou vertical (90°).
+
+**Instrumentação que NÃO funcionou (registrada para não repetir):** duas
+tentativas de "fold ideal" por teleporte independente (plumb sob a âncora
+geodésica, com e sem âncoras de contato; `tools/pathb_s04a_fold_preflight.py`)
+produziram alvos a ~12u tanto do defeito quanto do sculpt — sendo que S0.3e
+mostra que defeito e sculpt diferem entre si por ≤4.5u. Idealização inválida
+(colapso lateral pro meridiano da âncora + geodésica errante + âncoras de
+preset/bodice dominando); não adjudica a família.
+
+**O teste model-independent que decidiu (pergunta 2 do trio):** ângulo das
+arestas-meridiano PENDURADAS (u≥0.55, gap>0.6) com a vertical:
+
+| garment | PRODUÇÃO mean/p50/p90 | SCULPT mean/p50/p90 |
+|---|---|---|
+| blacksmith | 22.0° / 19.1° / 46.6° | **24.0° / 19.3° / 50.4°** |
+| yarl_cloak | 17.1° / 12.7° / 32.3° | **22.2° / 19.5° / 37.6°** |
+
+O SCULPT está IGUAL OU MAIS LONGE da vertical que o defeito, nos dois
+garments. "Dobrar até a vertical" move o tecido PARA LONGE do alvo. Trio:
+(1) defeito viola a vertical? sim (22°); (2) sculpt satisfaz? **NÃO** (24°);
+(3) margem? negativa. **Família "fold-até-vertical" morta no preflight** —
+quinto candidato consecutivo que o próprio sculpt rejeita.
+
+**O que sobrevive da ideia:** o insight mecânico (rotação em dobradiça é o
+movimento kinematicamente admissível; translação é desfeita pelo stretch)
+continua válido e explica a falha da gravidade crua. O que morreu é o ALVO
+("vertical"). Sem um campo de ângulos de equilíbrio conhecido, o fold vira
+"gire até um ângulo-alvo por região" = heurística posicional com passos extras.
+
+**Padrão acumulado do preflight (nomeá-lo é o resultado):** compressão, arco,
+anchors/contato, gravidade-translação e agora gravidade-rotação-até-vertical —
+TODOS falsificados PELO SCULPT. Os hand-sculpts codificam um alvo artístico
+(~20-24° de queda com flare/pregas/camadas), não uma lei física simples. Isso
+fortalece: (i) o caminho S05 do Codex (o IMPRINT LOCAL é objetivo separado,
+mensurável, e é o que o usuário VÊ como bump), e (ii) a necessidade de um
+ground truth de GRAVIDADE de verdade (re-sculpt do falmer) antes de qualquer
+nova tentativa de "queda global".
