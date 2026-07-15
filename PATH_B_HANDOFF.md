@@ -150,6 +150,40 @@ Cloak has insufficient selected coverage to matter.  Integrity is identical
 to the vanilla-shell control.  This falsifies the package that could have been
 shipped; it does not justify RM_Thin, tuning, live deployment or a C++ port.
 
+## S05 active checkpoint - localized Heavy defect (2026-07-15)
+
+The next step remains on `RM_Heavy`, which is the primary slider and therefore
+the release gate. Read-only causal analysis has now separated two effects that
+the earlier whole-mesh scores mixed together:
+
+- with anchors, rest state and soft-anchor settings held identical, changing
+  only `body-mode=static` to `body-mode=continuation` moves the conservative
+  always-clear/free population by mean/p95/max `0.251/0.963/2.495u` on
+  Blacksmith and `0.151/0.821/1.636u` on Yarl Clothes;
+- most of that response is within one or two material-graph hops of vertices
+  corrected by body contact; at three to five hops it falls to roughly
+  `0.03-0.05u`;
+- the same ablation changes broad edge verticality by only about `0.3 deg`.
+
+Therefore the visible local bump/contact imprint and the broad non-plumb fall
+are separate objectives. S05 is promoting frozen, seam-aware local metrics
+before changing the solver: causal continuation-minus-static displacement and
+its material Laplacian, area-weighted error islands against clean sculpts, and
+a diagnostic body-morph transfer score with candidate-independent coverage.
+Ground truth remains evaluator-only and cannot select solver vertices.
+
+Two candidate levers are permitted only after those metrics and missing
+integrity gates are frozen: unilateral tension-only stretch, and disabling the
+dihedral constraint only on a baseline-frozen contact-to-always-clear frontier.
+This is a no-sweep `2x2`, paired again with static/continuation on every Heavy
+sentinel. Production, DLL and deployment remain untouched.
+
+Important gate debt discovered during S05: `pathb_metrics.py` documents a
+non-adjacent crossing check that its current `integrity()` function does not
+implement, and it has no final body-floor set check. Do not accept a
+tension-only result until new crossing-set inclusion, frozen-clear contact,
+edge/area and section/hem collapse gates exist.
+
 ## Tracked artifacts
 
 - `fixtures/pathb/S03E_H3C_RESULTS.json`
