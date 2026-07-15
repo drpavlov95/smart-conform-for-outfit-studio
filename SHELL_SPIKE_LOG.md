@@ -633,3 +633,46 @@ gravidade ajude; há um sinal misto do shell.
 - **RM_Thin JÁ EXISTE**: `captures/yarl/...Yarl_Clothes_2...{Clothes,Cloak,Belt,
   Pants}__RM_Thin.drcap` (smoke: Clothes 1777 verts, replay determinístico).
   O gate G não precisa de sessão de captura live — só validar/hashear/fixturar.
+
+## 2026-07-14 — S0.3c: ablação causal de anchors/contato (desenho do Codex)
+
+Adicionados ao spike 3 fatores ortogonais (default = comportamento atual;
+`--anchor-target vanilla|authored`, `--soft-anchor on|off`, `--body-mode
+continuation|static`). Gate: default == flags-explícitos byte-idêntico; cada
+fator muda a saída (1889/436/736 verts movidos). Hard anchors NUNCA soltos
+(sem eles o problema fica sem condição de contorno).
+
+Fatorial 2×2×2 × 3 sentinelas, rest=base, gravity=0, 6 steps, 10 iters.
+Medido na REGIÃO LIVRE (authored gap >2u ao ref-body = nunca tocou o corpo) —
+a métrica de garment inteiro estava confundida pelo deslocamento da região
+ancorada e foi descartada.
+
+**Efeitos principais na região livre (Δ indexed vs sculpt; + = piora):**
+
+| fator | blacksmith | yarl_clothes | yarl_cloak |
+|---|---:|---:|---:|
+| anchor authored−vanilla | +0.147 | +0.251 | +2.313 |
+| soft off−on | +0.014 | +0.078 | +0.002 |
+| body static−continuation | +0.439 | +0.511 | +0.038 |
+
+**Leituras:**
+1. **soft-anchor é irrelevante** (≤0.08 em tudo) — pode sair do desenho.
+2. **contato/continuação é NECESSÁRIO e benéfico** (static piora 0.44/0.51 em
+   blacksmith/clothes) — o corpo empurrando o tecido faz trabalho real; contato
+   não é o vilão do imprint. No cloak é irrelevante (+0.04): ele quase não toca.
+3. **anchors não são a fonte do imprint** onde importa: o efeito na região livre
+   de blacksmith/clothes é PEQUENO (+0.15/+0.25). No cloak é grande (+2.31) mas
+   por POSICIONAMENTO (ele pendura dos ombros; anchor autoral deixa a peça toda
+   fora do lugar), não por imprint.
+4. **NENHUM fator domina o erro da região livre**: ele continua grande
+   (clothes ~2.8-3.3, cloak ~2.6) em TODAS as 8 células. Anchors, soft-anchors e
+   contato NÃO explicam a diferença de forma do tecido livre vs sculpt.
+
+⇒ H3c (anti-imprint via rest/anchors/contato) NÃO tem alavanca: a informação
+que falta não está nesses fatores. Isso converge com o marco 7 (a diferença está
+na DISTRIBUIÇÃO dentro da banda, não no arco) e com o marco 1.
+
+**Próximo indicado (branch "se nenhum dominar" do Codex): S0.3d
+measurement-only da DISTRIBUIÇÃO por banda** — centro, largura e quantis
+direcionais da seção — para caracterizar o que de fato difere ANTES de
+implementar qualquer constraint nova. NÃO implementar constraint sem isso.

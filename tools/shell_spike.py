@@ -1142,6 +1142,9 @@ def solve_shell(
     band_rest_mode: str,
     gravity: float,
     clearance: float,
+    anchor_target_mode: str = "vanilla",
+    soft_anchor_mode: str = "on",
+    body_mode: str = "continuation",
 ) -> None:
     cap = read_capture_front(capture_path)
     vanilla_path = dataset / "cloth_vanilla.obj"
@@ -1184,6 +1187,12 @@ def solve_shell(
     inv_mass = u
     fixed = inv_mass <= 1.0e-12
     soft_anchor = 0.18 * (1.0 - u) ** 2
+    # S0.3c causal ablation (2026-07-14): the anchors inject the VANILLA rawDiff,
+    # so "the body only acts as an obstacle" is not yet true in this experiment.
+    # soft_anchor_mode=off disables the soft field only - hard anchors always
+    # stay pinned (releasing them leaves the problem with no boundary condition).
+    if soft_anchor_mode == "off":
+        soft_anchor = np.zeros_like(soft_anchor)
     active = np.flatnonzero(inv_mass > 0.0).astype(np.int32)
     shadow_indices = np.flatnonzero(drape >= 0.20).astype(np.int32)
     meridian_triplets, meridian_blend = build_meridian_triplets(cap.base_verts, edges, inv_mass)
@@ -1242,9 +1251,22 @@ def solve_shell(
     body_tri_adjacency = triangle_adjacency(cap.body_tris) if shadow_source == "contact" else []
     for step in range(1, morph_steps + 1):
         t = step / morph_steps
-        body = cap.ref_body_verts + (cap.body_verts - cap.ref_body_verts) * t
+        # S0.3c factor "body/contact": continuation (morph the obstacle) vs
+        # static (the obstacle never grows) - isolates how much of the imprint
+        # arrives through CONTACT rather than through the anchors/rest.
+        if body_mode == "static":
+            body = cap.ref_body_verts
+        else:
+            body = cap.ref_body_verts + (cap.body_verts - cap.ref_body_verts) * t
         collider = UniformBodyCollider(body, cap.body_tris)
-        anchor_target = cap.base_verts + cap.raw_diff * t
+        # S0.3c factor "hard-anchor target": vanilla (base + rawDiff*t, the
+        # current behaviour, which injects the vanilla conform) vs authored
+        # (base only - the anchors hold the AUTHORED pose and never carry the
+        # body imprint). Hard anchors stay pinned in both cases.
+        if anchor_target_mode == "authored":
+            anchor_target = cap.base_verts
+        else:
+            anchor_target = cap.base_verts + cap.raw_diff * t
         x[fixed] = anchor_target[fixed]
         if gravity != 0.0:
             x[:, 2] -= gravity * inv_mass
@@ -1571,6 +1593,10 @@ def main() -> int:
     ap.add_argument("--band-rest", choices=("base", "vanilla"), default="base")
     ap.add_argument("--gravity", type=float, default=0.0)
     ap.add_argument("--clearance", type=float, default=0.02)
+    # S0.3c causal ablation factors (default = current behaviour)
+    ap.add_argument("--anchor-target", choices=("vanilla", "authored"), default="vanilla")
+    ap.add_argument("--soft-anchor", choices=("on", "off"), default="on")
+    ap.add_argument("--body-mode", choices=("continuation", "static"), default="continuation")
     args = ap.parse_args()
 
     if not args.inspect and not args.contact_check and not args.solve:
@@ -1609,6 +1635,9 @@ def main() -> int:
             args.band_rest,
             args.gravity,
             args.clearance,
+            anchor_target_mode=args.anchor_target,
+            soft_anchor_mode=args.soft_anchor,
+            body_mode=args.body_mode,
         )
     return 0
 
