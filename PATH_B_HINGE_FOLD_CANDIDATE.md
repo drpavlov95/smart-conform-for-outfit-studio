@@ -1,8 +1,14 @@
 # Path B — Candidato: hinge-fold gravity re-pose ("dobra de placas")
 
 Data: 2026-07-15 · Autor da ideia: usuário (brainstorm) · Anotado por: Opus
-Status: **PROPOSTO — bloqueado por 2 dependências. NÃO implementar antes do
-preflight kinemático passar** (regra do plano: nenhuma família fora do preflight).
+Status: **FALSIFICADO no preflight S0.4a (2026-07-15)** — o teste
+model-independent mostrou que as arestas penduradas do SCULPT ficam a
+24.0°/22.2° da vertical (blacksmith/cloak), igual ou MAIS longe que o defeito
+(22.0°/17.1°): "dobrar até a vertical" afasta do alvo. O insight mecânico
+(rotação-em-dobradiça vs translação) permanece válido; o ALVO "vertical"
+morreu. Detalhes: `SHELL_SPIKE_LOG.md` (S0.4a) e commit cea5041. Reabrir
+apenas se surgir um ground truth de gravidade real (re-sculpt do falmer) E um
+campo de ângulo-alvo que o sculpt satisfaça.
 
 Este documento é um adendo ao `PATH_B_SHELL_SOLVE_PLAN.md` (v2.2) e reusa toda
 a infraestrutura dele (sentinelas, baselines, `pathb_gate.py`, gates de
