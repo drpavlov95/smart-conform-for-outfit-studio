@@ -597,3 +597,39 @@ precisa entrar SEM as leis escalares rejeitadas.
 PENDENTE: S0.3c ablação de anchors (quanto do imprint entra por anchor-vanilla
 vs rest vs contato). Depois: Fase 1 REFORMULADA — não implementar compressão
 nem circunferência; investigar suporte-plumb dentro do loop + rest autoral.
+
+### 2026-07-14 — CORREÇÃO ao marco 7 (peer-review Codex, verificada)
+
+**RETRATAÇÃO: o "ganho por gravidade" do yarl Cloak NÃO existe.**
+1. O shell-base foi rodado SEM gravidade — `--gravity` default é `0.0`
+   (`shell_spike.py:1572`) e eu não o passei. Não era um resultado "de
+   gravidade"; era shell+continuação com g=0.
+2. E nem vence o gate completo: indexed 2.0463→1.9344 (melhora) e surf fwd
+   1.2265→1.1940 (melhora), MAS surf **rev 0.9154→0.9439 piora**, fwd **p95
+   3.4131→3.8348 piora** e **flips 10→19 pioram**. É sinal MISTO do
+   shell/continuação, não evidência a favor de gravidade.
+Conclusão anterior corrigida: não há, até agora, evidência positiva de que a
+gravidade ajude; há um sinal misto do shell.
+
+**Escopo correto das rejeições:**
+- H3a morta apenas como **piso GLOBAL UNIFORME de compressão de aresta**.
+- H3b morta apenas como **piso/teto de ARCO TOTAL por banda vs `arc_base`**,
+  nos três sentinelas ATUAIS. NÃO elimina: distribuição angular, arcos
+  parciais, centro/forma da seção projetada, suporte transportado entre
+  bandas, anisotropia, atrito de contato, rest/anchors. E como o falmer está
+  benchado, H3b **não** foi falsificada para o caso original das tiras.
+
+**Outras correções aceitas:**
+- `apply_graph_plumb_constraint` JÁ roda dentro do loop de iterações
+  (`shell_spike.py:1283`) — "colocá-lo no loop" não é hipótese nova. O sinal
+  tension-seeded atual é frágil: usa `len-rest` DEPOIS de o stretch tentar
+  levar `len→rest`; se retomado, deve usar reação física (multiplicador XPBD /
+  impulso de contato), não strain residual.
+- Infra é PARCIAL: `pathb_gate.py` ignorava return codes (risco de OBJ stale),
+  sem thresholds/PASS-FAIL, sem log de comandos/hashes; `pathb_metrics.py` não
+  tem self-intersection nem body-penetration; hem `mean_nn=0` porque os IDs
+  incluem seam twins duplicados. Status honesto: "Fase 0.0-0.3b cientificamente
+  útil, infraestrutura parcial".
+- **RM_Thin JÁ EXISTE**: `captures/yarl/...Yarl_Clothes_2...{Clothes,Cloak,Belt,
+  Pants}__RM_Thin.drcap` (smoke: Clothes 1777 verts, replay determinístico).
+  O gate G não precisa de sessão de captura live — só validar/hashear/fixturar.
