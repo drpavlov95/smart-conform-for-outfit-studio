@@ -529,3 +529,35 @@ produção (contaminado por um Smart Conform salvo); o hand-sculpt verdadeiro
 sobrevive só nos snapshots OBJ de 2026-07-09 (`1b52898da8fd`, duas cópias
 byte-idênticas). Blacksmith/yarl/vampire: candidatos concordam (limpos).
 S0.0c (decisão do usuário) pendente.
+
+## 2026-07-14 — fase 0.2/0.3: infra de métricas, baselines, preflight H3a
+
+Ferramentas novas (branch wip/path-b-shell-solve): `tools/pathb_metrics.py`
+(indexed + surface fwd/rev EXATO via KD + point-triangle, com gate de exatidão
+vs brute; integridade vs base; hem por IDs fixos) e `tools/pathb_gate.py`
+(runner + scoreboard). Baselines de produção MERGED em `fixtures/pathb/BASELINES.md`.
+
+Sentinelas atuais (falmer benchado): blacksmith, yarl Clothes, yarl Cloak.
+yarl Clothes CONFIRMADO entra no solve (`merged-preset: Loose Draped -> Fitted`).
+
+**Preflight H3a (piso de compressão de aresta <0.95×rest_base) = REJEITADO.**
+O sculpt tem MAIS arestas comprimidas que o defeito em TODOS os sentinelas
+(blacksmith sculpt 958 / prod-defeito 859 / shell-defeito 546; yarl_clothes
+857/793; yarl_cloak 232/231). O sculpt faz PREGAS ⇒ um piso que impede
+compressão brigaria com o alvo. Robusto a defeito-produção vs defeito-shell e
+à contagem exata (a intuição do Codex, generalizada aos 3).
+
+**Contexto shell-base (rest=base, 6 steps, 10 iters) vs produção:**
+
+| garment | shell surf_fwd | prod surf_fwd | shell indexed | prod indexed |
+|---|---:|---:|---:|---:|
+| blacksmith | 0.997 | 0.756 | 1.851 | 1.544 |
+| yarl_clothes | 0.481 | 0.259 | 1.191 | 0.839 |
+| yarl_cloak | **1.194** | 1.227 | **1.934** | 2.046 |
+
+Achado central: **o shell-base JÁ SUPERA a produção no yarl_cloak** (garment de
+queda-pura/gravidade) — o mais forte sinal a favor do Path B até agora. Perde
+nos garments com estrutura fitted/larga (blacksmith, clothes), que é onde H3b
+(suporte de baixa freq) e a integração das outras leis precisam fechar o gap.
+Além disso o shell-base tem topologia mais limpa (0 flips no blacksmith vs 1 da
+produção). PENDENTE: S0.3a descriptor de banda (H3b) + S0.3c ablação de anchors.
