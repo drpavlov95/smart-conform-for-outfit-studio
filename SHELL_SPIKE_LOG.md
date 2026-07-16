@@ -1036,3 +1036,38 @@ fortalece: (i) o caminho S05 do Codex (o IMPRINT LOCAL é objetivo separado,
 mensurável, e é o que o usuário VÊ como bump), e (ii) a necessidade de um
 ground truth de GRAVIDADE de verdade (re-sculpt do falmer) antes de qualquer
 nova tentativa de "queda global".
+
+## 2026-07-15 — P1 (hinge-fold em tira 1D como refino): NEGATIVO em todas as frentes
+
+`tools/pathb_p1_strip_fold.py`: cadeias meridianas por steepest-ascent na base
+autoral; FK do suporte (preset+contato 0.6) para baixo; cada aresta mantém o
+comprimento ATUAL e gira a direção rumo à vertical por fração λ (nlerp), com
+parada por contato (bisseção); weld de seam twins ao fim. Rodado sobre a
+PRODUÇÃO do blacksmith, λ ∈ {0.25, 0.5, 0.75, 1.0}.
+
+| λ | imprint (juiz S05) | flips vs base | stretch lateral p95/max | perfil coxa |
+|---:|---|---:|---|---|
+| prod | 0.08447 / corr .340 | 1 | — | 16.64 → 16.08 |
+| 0.25 | **+16.8%** / .338 | 1 | 1.095 / 5.03 | ~igual |
+| 0.50 | +31.8% / .259 | 5 | 1.218 / 9.54 | ~igual |
+| 0.75 | +43.3% / .199 | 7 | 1.349 / 14.30 | ~igual |
+| 1.00 | +49.3% / .160 | 31 | 1.476 / 18.95 | 15.94 |
+
+Leituras:
+1. **O imprint PIORA monotonicamente** com λ — o fold-1D não remove o carimbo;
+   ele injeta energia de alta frequência NOVA (o caos lateral entre colunas
+   vizinhas domina o sinal). Mesmo no λ mais suave (0.25), +16.8%.
+2. **Stretch lateral explode** (máx 5→19×) exatamente como previsto: colunas
+   vizinhas dobram ângulos diferentes e a fronteira rasga. A esperança "refino
+   residual ⇒ problema lateral encolhe" NÃO se confirmou: já em λ=0.25 há
+   arestas 5× (localizadas em seams/fronteiras de painel).
+3. **O bump visível quase não muda** (perfil da coxa ~16.6→15.9 só em λ=1, ao
+   custo de 31 flips). Causa estrutural: o nlerp por-aresta gira TUDO rumo à
+   vertical — inclusive o drape que já estava certo — em vez de remover
+   seletivamente a componente corpo-seguidora.
+
+**Veredito: a idealização 1-coluna não é só incompleta — ela envenena o
+próprio teste.** O fold não pode ser avaliado (muito menos shipado) sem
+coerência lateral (P2), e P2 ≈ reconstruir o shell solver com placas rígidas —
+a família de custo que os preflights vêm rejeitando. Registrado como negativo;
+decisão de investir em P2 vs levers-S05 volta ao usuário.
