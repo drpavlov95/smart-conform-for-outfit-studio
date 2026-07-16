@@ -11,7 +11,8 @@ hash from this document.
 - The transactional C++ Path-B pilot is implemented, rebuilt from the current
   source, harness-validated, deployed to both Outfit Studio mod copies and
   enabled live. Its scope is deliberately hard-coded to
-  `BlackSmithTorso` + `RM_Heavy` + Fitted/Loose only.
+  `BlackSmithTorso` + `RM_Heavy` + the merged UI preset `Cloth` only. The code
+  accepts both historical fitted/loose enum values for old captures.
 - The feature is OFF by default. Live activation is the present
   `shell_solve_on.flag`; `shell_solve_off.flag` is absent and, if created,
   wins over both the ON flag and `DRAPE_SHELL_SOLVE=1`.
@@ -335,9 +336,9 @@ as corpus-clean or universally deployable.
 ## Marco 9: transactional C++ Heavy pilot (2026-07-16)
 
 The dark C++ pilot is implemented in `algo/conform_hook.cpp`, still hard-scoped
-to `BlackSmithTorso` + `RM_Heavy` + Fitted/Loose and OFF by default. Runtime
-enablement is `DRAPE_SHELL_SOLVE=1` in the harness or `shell_solve_on.flag`
-live; `shell_solve_off.flag` has explicit precedence.
+to `BlackSmithTorso` + `RM_Heavy` + the merged UI preset `Cloth` and OFF by
+default. Runtime enablement is `DRAPE_SHELL_SOLVE=1` in the harness or
+`shell_solve_on.flag` live; `shell_solve_off.flag` has explicit precedence.
 
 An earlier literal-port build was correctly rejected by a new corresponding
 body-face gate: vertex penetrations fell slightly, but canonical triangle
@@ -419,3 +420,16 @@ Both deployed copies and the build artifact have SHA-256
 `6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
 Live state at handoff: `shell_solve_on.flag` present,
 `shell_solve_off.flag` absent. Restart Outfit Studio before visual testing.
+
+### User visual gate - still open (2026-07-16)
+
+The user tested the deployed live DLL. The first impression was that the new
+gravitational fall was functional on Blacksmith Heavy, but the user then
+clarified that the result is not yet 100%. This is a partial positive signal,
+not an approval: do not expand the pilot to other garments from this result.
+
+One confirmed residual defect is that the cloth follows/enters the butt cleft
+too strongly (excessive posterior body imprint). Await a new screenshot and/or
+post-conform OBJ before choosing the next lever. Preserve the current gravity
+result as a comparison baseline; a later fix must reduce the local imprint
+without restoring the old body-following behavior in freely hanging cloth.

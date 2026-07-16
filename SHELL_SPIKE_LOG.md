@@ -1184,3 +1184,17 @@ Deploy concluido com Outfit Studio/BodySlide fechados. Build e as duas copias
 instaladas possuem SHA-256
 `6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
 Estado live: `shell_solve_on.flag` presente, `shell_solve_off.flag` ausente.
+
+### Gate visual do usuario ainda aberto (2026-07-16)
+
+Primeira impressao live: a gravidade parece funcional no Blacksmith Heavy. O
+usuario corrigiu em seguida que o resultado ainda nao esta 100%. Logo, isto e
+somente um sinal parcial positivo, nao aprovacao nem autorizacao para expandir
+o piloto. Correcao de nomenclatura: a UI atual tem um unico preset `Cloth`;
+fitted/loose sao apenas enums historicos aceitos para compatibilidade de
+captures.
+
+Defeito residual confirmado: a roupa ainda marca/entra demais no sulco da
+bunda. Aguardar screenshot e/ou OBJ pos-conform atual antes de escolher a
+proxima alavanca. Preservar este resultado como baseline comparativo e reduzir
+o imprint local sem reintroduzir influencia do corpo no pano livre.
