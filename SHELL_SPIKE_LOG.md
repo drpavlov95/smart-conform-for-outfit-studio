@@ -1071,3 +1071,35 @@ próprio teste.** O fold não pode ser avaliado (muito menos shipado) sem
 coerência lateral (P2), e P2 ≈ reconstruir o shell solver com placas rígidas —
 a família de custo que os preflights vêm rejeitando. Registrado como negativo;
 decisão de investir em P2 vs levers-S05 volta ao usuário.
+
+## 2026-07-16 — marco 8: gravidade quase-estática + fios só-tração (candidato "sim v2")
+
+Direção decidida pelo usuário: cloth sim de verdade (gravidade + toque/não-toque),
+julgado por INVARIANTES FÍSICOS + olho do usuário; distância-ao-sculpt vira
+informativa (o próprio usuário: o sculpt não é referência fina de queda).
+
+Duas mudanças no spike, default-preserving (byte-idêntico sem os flags):
+- `--gravity-mode iteration`: gravidade aplicada A CADA iteração junto das
+  projeções (quase-estático XPBD), em vez de 1×/morph-step (o teste antigo
+  aplicava 6 doses de gravidade contra 60 de constraints — falha estrutural
+  do experimento, não do conceito).
+- `--stretch-mode tension`: fios SÓ-TRAÇÃO (c>0) — tecido real não resiste
+  compressão (dobra). É o que converte o puxão da gravidade em ROTAÇÃO em
+  torno do suporte (o pêndulo emerge; a coerência lateral é resolvida pelo
+  próprio solver — vizinhos compartilham vértices), exatamente a mecânica que
+  o usuário especificou e que o P1 (colunas independentes) não tinha.
+
+Probe blacksmith (g_iter ∈ {0.02,0.05,0.10}, 6 steps × 10 iters):
+- **Invariantes limpos**: flips 0 (produção tem 1); stretch p95 1.86-1.88
+  (produção 1.94); penetrações reais (gap<0) = 186 IDÊNTICAS ao shell-base
+  sem gravidade (140 âncoras-vanilla + 46 pré-existentes do spike; a produção
+  as corrige no floor final) ⇒ **zero penetração nova**. Determinístico.
+- imprintE sobe (+27%..+159%) — SUSPEITO DE CONFUSÃO: a métrica lê energia de
+  alta frequência projetada no morph; PREGAS legítimas de gravidade são alta
+  frequência. Flag pro Codex: validar a métrica em candidatos enrugados.
+- indexed vs sculpt sobe com g (informativo; sculpt não é juiz de queda).
+- Render: primeira vez que um candidato PARECE tecido — queda reta, sem
+  guarda-chuva, SEM rasgos, e o pinch central das costas da produção sumiu.
+
+Pacote visual pro gate do usuário: `tmp/simv2_visual/` (4 garments ×
+{produção, g=0.02, g=0.05}), determinístico. Aguardando o olho dele no OS.

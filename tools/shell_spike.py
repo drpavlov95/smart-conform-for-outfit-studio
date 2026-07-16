@@ -1401,6 +1401,7 @@ def xpbd_stretch_jacobi(
     lambdas: np.ndarray,
     compliance: float,
     relaxation: float,
+    tension_only: bool = False,
 ) -> None:
     a = edges[:, 0]
     b = edges[:, 1]
@@ -1410,6 +1411,12 @@ def xpbd_stretch_jacobi(
     c = length - rest
     denom = inv_mass[a] + inv_mass[b] + compliance
     valid = denom > 1.0e-30
+    if tension_only:
+        # real fabric threads resist EXTENSION only; compression buckles into
+        # folds for free. Unilateral constraint: project only stretched edges
+        # (c > 0). This is what lets per-iteration gravity settle into rotation
+        # about the support instead of being undone by a wire-frame equality.
+        valid = valid & (c > 0.0)
     dl = np.zeros(len(edges), dtype=np.float64)
     dl[valid] = (-c[valid] - compliance * lambdas[valid]) / denom[valid]
     lambdas += dl
@@ -1650,6 +1657,8 @@ def solve_shell(
     anchor_target_mode: str = "vanilla",
     soft_anchor_mode: str = "on",
     body_mode: str = "continuation",
+    gravity_mode: str = "step",
+    stretch_mode: str = "bilateral",
     trace_json: Path | None = None,
     surface_corot_clamp: bool = True,
     surface_corot_mask_json: Path | None = None,
@@ -1862,7 +1871,10 @@ def solve_shell(
             anchor_target = cap.base_verts + cap.raw_diff * t
         final_anchor_target = anchor_target
         x[fixed] = anchor_target[fixed]
-        if gravity != 0.0:
+        if gravity != 0.0 and gravity_mode == "step":
+            # legacy: one dose of gravity per morph step, then the constraint
+            # iterations relax it away (6 doses vs 60 projections) - kept as
+            # the default for reproducibility of earlier marcos.
             x[:, 2] -= gravity * inv_mass
 
         stretch_lambda = np.zeros(len(edges), dtype=np.float64)
@@ -1899,6 +1911,12 @@ def solve_shell(
         for _iteration in range(iterations):
             x += soft_anchor[:, None] * (anchor_target - x)
             x[fixed] = anchor_target[fixed]
+            if gravity != 0.0 and gravity_mode == "iteration":
+                # quasi-static XPBD: the external pull is applied EVERY
+                # iteration, alongside the projections, so equilibrium emerges
+                # from the balance (gravity vs taut threads vs contact) instead
+                # of the projections erasing a once-per-step displacement.
+                x[:, 2] -= gravity * inv_mass
             if graph_plumb_order == "pre-stretch":
                 plumb_moved, plumb_step = apply_graph_plumb_constraint(
                     x,
@@ -1915,6 +1933,7 @@ def solve_shell(
             xpbd_stretch_jacobi(
                 x, edges, rest_len, inv_mass, stretch_lambda,
                 compliance=stretch_compliance, relaxation=0.95,
+                tension_only=(stretch_mode == "tension"),
             )
             if band_circumference_compliance >= 0.0:
                 band_active, band_ratio = xpbd_band_circumference(
@@ -2344,6 +2363,8 @@ def main() -> int:
     )
     ap.add_argument("--soft-anchor", choices=("on", "off"), default="on")
     ap.add_argument("--body-mode", choices=("continuation", "static"), default="continuation")
+    ap.add_argument("--gravity-mode", choices=("step", "iteration"), default="step")
+    ap.add_argument("--stretch-mode", choices=("bilateral", "tension"), default="bilateral")
     ap.add_argument(
         "--trace-json", type=Path,
         help="write per-vertex S0.3e contact/fixed history for causal analysis",
@@ -2398,6 +2419,8 @@ def main() -> int:
             anchor_target_mode=args.anchor_target,
             soft_anchor_mode=args.soft_anchor,
             body_mode=args.body_mode,
+            gravity_mode=args.gravity_mode,
+            stretch_mode=args.stretch_mode,
             trace_json=args.trace_json.resolve() if args.trace_json else None,
             surface_corot_clamp=args.surface_corot_clamp == "on",
             surface_corot_mask_json=(
