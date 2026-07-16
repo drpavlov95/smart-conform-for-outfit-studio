@@ -7652,6 +7652,865 @@ static void MaybeWriteSolverCapture(SolverCapture capture,
     }
 }
 
+// -----------------------------------------------------------------------------
+// Experimental Path-B shell solve (sim-v2 pilot)
+// -----------------------------------------------------------------------------
+// This is deliberately separate from the legacy momentum-free/Verlet path below.
+// It mirrors tools/shell_spike.py: authored/base rest, continuous anchors, body
+// continuation, a projected unilateral XPBD thread constraint, and a true signed
+// dihedral constraint. Publication is transactional and opt-in; the production
+// candidate remains untouched unless every gate below accepts the guarded result.
+struct PathBShellEdge {
+    uint16_t a = 0;
+    uint16_t b = 0;
+    float rest = 0.0f;
+};
+
+struct PathBShellHinge {
+    std::array<uint16_t, 4> v{};
+    float restAngle = 0.0f;
+};
+
+struct PathBShellIntegrity {
+    int flips = 0;
+    int collapsed = 0;
+    int penetrations = 0;
+    int bodyFacePenetrations = 0;
+    float worstPenetration = 0.0f;
+    float worstBodyFacePenetration = 0.0f;
+    float worstAreaRatio = 1.0f;
+    float worstStretch = 1.0f;
+};
+
+struct PathBCrossingClosureStats {
+    int rounds = 0;
+    int initialNewPairs = 0;
+    int finalNewPairs = 0;
+    int revertedVerts = 0;
+};
+
+struct PathBBodySampleStats {
+    int compared = 0;
+    int beforePenetrations = 0;
+    int afterPenetrations = 0;
+    int worsened = 0;
+    float worstBefore = 0.0f;
+    float worstAfter = 0.0f;
+    float worstRegression = 0.0f;
+};
+
+struct PathBBodyClosureStats {
+    int rounds = 0;
+    int initialWorsened = 0;
+    int finalWorsened = 0;
+    int revertedVerts = 0;
+};
+
+struct PathBFaceClosureStats {
+    int rounds = 0;
+    int initialWorsened = 0;
+    int finalWorsened = 0;
+    int revertedVerts = 0;
+};
+
+static float PathBWrapAngle(float a) {
+    static constexpr float kPi = 3.14159265358979323846f;
+    static constexpr float kTwoPi = 2.0f * kPi;
+    a = std::fmod(a + kPi, kTwoPi);
+    if (a < 0.0f) a += kTwoPi;
+    return a - kPi;
+}
+
+static float PathBSignedDihedral(const std::array<Vec3, 4>& p) {
+    Vec3 edge = Sub(p[1], p[0]);
+    float edgeLen = Len(edge);
+    edge = edgeLen > 1.0e-30f ? Scale(edge, 1.0f / edgeLen)
+                              : Vec3{0.0f, 0.0f, 0.0f};
+    Vec3 n0 = Cross(Sub(p[1], p[0]), Sub(p[2], p[0]));
+    Vec3 n1 = Cross(Sub(p[3], p[0]), Sub(p[1], p[0]));
+    float n0Len = Len(n0), n1Len = Len(n1);
+    n0 = n0Len > 1.0e-30f ? Scale(n0, 1.0f / n0Len) : Vec3{0.0f, 0.0f, 0.0f};
+    n1 = n1Len > 1.0e-30f ? Scale(n1, 1.0f / n1Len) : Vec3{0.0f, 0.0f, 0.0f};
+    float sinA = Dot(Cross(n0, n1), edge);
+    float cosA = ClampRange(Dot(n0, n1), -1.0f, 1.0f);
+    return std::atan2(sinA, cosA);
+}
+
+static std::array<Vec3, 4> PathBHingeLocal(
+    const std::vector<Vec3>& verts, const PathBShellHinge& h)
+{
+    return {verts[h.v[0]], verts[h.v[1]], verts[h.v[2]], verts[h.v[3]]};
+}
+
+static std::array<Vec3, 4> PathBDihedralGradientsNumeric(
+    const std::array<Vec3, 4>& local)
+{
+    static constexpr float kEps = 1.0e-4f;
+    std::array<Vec3, 4> grad{};
+    auto addAxis = [](Vec3& p, int axis, float d) {
+        if (axis == 0) p.x += d;
+        else if (axis == 1) p.y += d;
+        else p.z += d;
+    };
+    auto setAxis = [](Vec3& p, int axis, float value) {
+        if (axis == 0) p.x = value;
+        else if (axis == 1) p.y = value;
+        else p.z = value;
+    };
+    for (int lv = 0; lv < 4; ++lv) {
+        for (int axis = 0; axis < 3; ++axis) {
+            auto plus = local;
+            auto minus = local;
+            addAxis(plus[(size_t)lv], axis, kEps);
+            addAxis(minus[(size_t)lv], axis, -kEps);
+            float d = PathBWrapAngle(
+                PathBSignedDihedral(plus) - PathBSignedDihedral(minus)) /
+                (2.0f * kEps);
+            setAxis(grad[(size_t)lv], axis, d);
+        }
+    }
+    return grad;
+}
+
+static bool PathBBuildTopology(
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    std::vector<PathBShellEdge>& outEdges,
+    std::vector<PathBShellHinge>& outHinges)
+{
+    struct EdgeRef { uint16_t opposite, u, v; };
+    std::unordered_map<uint32_t, std::vector<EdgeRef>> edgeFaces;
+    edgeFaces.reserve(tris.size() * 3);
+    auto add = [&](uint16_t u, uint16_t v, uint16_t opposite) {
+        if (u >= baseVerts.size() || v >= baseVerts.size() ||
+            opposite >= baseVerts.size() || u == v) return;
+        edgeFaces[EdgeKey(u, v)].push_back(EdgeRef{opposite, u, v});
+    };
+    for (const auto& t : tris) {
+        add(t[0], t[1], t[2]);
+        add(t[1], t[2], t[0]);
+        add(t[2], t[0], t[1]);
+    }
+    std::vector<uint32_t> keys;
+    keys.reserve(edgeFaces.size());
+    for (const auto& kv : edgeFaces) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+
+    outEdges.clear();
+    outHinges.clear();
+    outEdges.reserve(keys.size());
+    outHinges.reserve(keys.size());
+    for (uint32_t key : keys) {
+        uint16_t a = (uint16_t)(key >> 16);
+        uint16_t b = (uint16_t)(key & 0xFFFFu);
+        float rest = Len(Sub(baseVerts[a], baseVerts[b]));
+        if (rest > 1.0e-6f) outEdges.push_back(PathBShellEdge{a, b, rest});
+        const auto& refs = edgeFaces[key];
+        if (refs.size() == 2) {
+            PathBShellHinge h;
+            h.v = {refs[0].u, refs[0].v, refs[0].opposite, refs[1].opposite};
+            h.restAngle = PathBSignedDihedral(PathBHingeLocal(baseVerts, h));
+            outHinges.push_back(h);
+        }
+    }
+    return !outEdges.empty();
+}
+
+static void PathBStretchJacobi(
+    std::vector<Vec3>& x,
+    const std::vector<PathBShellEdge>& edges,
+    const std::vector<float>& invMass,
+    std::vector<float>& lambdas,
+    float compliance)
+{
+    const size_t n = x.size();
+    std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<float> count(n, 0.0f);
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        Vec3 d = Sub(x[e.a], x[e.b]);
+        float length = Len(d);
+        Vec3 normal = length > 1.0e-30f
+            ? Scale(d, 1.0f / length) : Vec3{0.0f, 0.0f, 0.0f};
+        float c = length - e.rest;
+        float denom = invMass[e.a] + invMass[e.b] + compliance;
+        if (denom <= 1.0e-30f) continue;
+        float dl = (-c - compliance * lambdas[ei]) / denom;
+        // C=length-rest<=0, therefore lambda<=0. Project the accumulated
+        // multiplier every iteration so slack edges discharge stale tension.
+        float projected = std::min(lambdas[ei] + dl, 0.0f);
+        dl = projected - lambdas[ei];
+        lambdas[ei] = projected;
+        delta[e.a] = Add(delta[e.a], Scale(normal, invMass[e.a] * dl));
+        delta[e.b] = Add(delta[e.b], Scale(normal, -invMass[e.b] * dl));
+        if (invMass[e.a] > 0.0f) count[e.a] += 1.0f;
+        if (invMass[e.b] > 0.0f) count[e.b] += 1.0f;
+    }
+    for (size_t i = 0; i < n; ++i)
+        if (count[i] > 0.0f)
+            x[i] = Add(x[i], Scale(delta[i], 0.95f / count[i]));
+}
+
+static void PathBBendingJacobi(
+    std::vector<Vec3>& x,
+    const std::vector<PathBShellHinge>& hinges,
+    const std::vector<float>& invMass,
+    std::vector<float>& lambdas,
+    float compliance)
+{
+    const size_t n = x.size();
+    std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<float> count(n, 0.0f);
+    for (size_t hi = 0; hi < hinges.size(); ++hi) {
+        const auto& h = hinges[hi];
+        auto local = PathBHingeLocal(x, h);
+        float c = PathBWrapAngle(PathBSignedDihedral(local) - h.restAngle);
+        auto grad = PathBDihedralGradientsNumeric(local);
+        float denom = compliance;
+        for (int lv = 0; lv < 4; ++lv)
+            denom += invMass[h.v[(size_t)lv]] * Len2(grad[(size_t)lv]);
+        if (denom <= 1.0e-30f) continue;
+        float dl = (-c - compliance * lambdas[hi]) / denom;
+        lambdas[hi] += dl;
+        for (int lv = 0; lv < 4; ++lv) {
+            uint16_t vi = h.v[(size_t)lv];
+            delta[vi] = Add(delta[vi], Scale(grad[(size_t)lv], invMass[vi] * dl));
+            if (invMass[vi] > 0.0f) count[vi] += 1.0f;
+        }
+    }
+    for (size_t i = 0; i < n; ++i)
+        if (count[i] > 0.0f)
+            x[i] = Add(x[i], Scale(delta[i], 0.45f / count[i]));
+}
+
+static void PathBSeamWeld(
+    std::vector<Vec3>& x,
+    const std::vector<std::vector<uint32_t>>& seamGroups,
+    const std::vector<uint8_t>& fixed,
+    const std::vector<Vec3>& fixedTargets)
+{
+    for (const auto& group : seamGroups) {
+        Vec3 target{0.0f, 0.0f, 0.0f};
+        bool haveFixed = false;
+        int count = 0;
+        for (uint32_t vi : group) {
+            if (vi >= x.size()) continue;
+            if (fixed[vi]) {
+                target = fixedTargets[vi];
+                haveFixed = true;
+                break;
+            }
+            target = Add(target, x[vi]);
+            ++count;
+        }
+        if (!haveFixed) {
+            if (count == 0) continue;
+            target = Scale(target, 1.0f / (float)count);
+        }
+        for (uint32_t vi : group) if (vi < x.size()) x[vi] = target;
+    }
+}
+
+static int PathBFaceContactProject(
+    std::vector<Vec3>& x,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<float>& invMass,
+    const BodyBVH& body,
+    const std::vector<float>& contactFloors,
+    float maxSampleStep,
+    float relaxation,
+    float& worstCorrection)
+{
+    if (!body.valid || contactFloors.size() !=
+            tris.size() * std::size(kTriangleSamples)) return 0;
+    int moved = 0;
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        if (t[0] >= x.size() || t[1] >= x.size() || t[2] >= x.size())
+            continue;
+        for (size_t si = 0; si < std::size(kTriangleSamples); ++si) {
+            const TriangleSample& sample = kTriangleSamples[si];
+            const Vec3 p = SampleTrianglePoint(x, t, sample);
+            Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+            float d2 = 0.0f;
+            if (!BVHClosestPoint(body, p, cp, nrm, d2)) continue;
+            const float dist = std::sqrt(d2);
+            const float gap = Dot(Sub(p, cp), nrm) < 0.0f ? -dist : dist;
+            const float floor = contactFloors[
+                ti * std::size(kTriangleSamples) + si];
+            if (gap >= floor) continue;
+
+            Vec3 correction = Sub(Add(cp, Scale(nrm, floor)), p);
+            float correctionLen = Len(correction);
+            if (!std::isfinite(correctionLen) || correctionLen <= 1.0e-7f)
+                continue;
+            worstCorrection = std::max(worstCorrection, correctionLen);
+            if (correctionLen > maxSampleStep)
+                correction = Scale(correction, maxSampleStep / correctionLen);
+            correction = Scale(correction, relaxation);
+
+            const float bary[3] = {sample.a, sample.b, sample.c};
+            const uint16_t vi[3] = {t[0], t[1], t[2]};
+            float denom = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                denom += invMass[vi[k]] * bary[k] * bary[k];
+            if (denom <= 1.0e-30f) continue;
+            for (int k = 0; k < 3; ++k) {
+                const float weight = invMass[vi[k]] * bary[k] / denom;
+                if (weight > 0.0f)
+                    x[vi[k]] = Add(x[vi[k]], Scale(correction, weight));
+            }
+            ++moved;
+        }
+    }
+    return moved;
+}
+
+static bool PathBComputeIntegrity(
+    const std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<PathBShellEdge>& edges,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& body,
+    PathBShellIntegrity& out)
+{
+    out = PathBShellIntegrity{};
+    if (verts.size() != baseVerts.size()) return false;
+    for (const Vec3& p : verts)
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+            return false;
+    for (const auto& t : tris) {
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size())
+            continue;
+        Vec3 authored = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                              Sub(baseVerts[t[2]], baseVerts[t[0]]));
+        Vec3 current = Cross(Sub(verts[t[1]], verts[t[0]]),
+                             Sub(verts[t[2]], verts[t[0]]));
+        float authoredArea = Len(authored);
+        float currentArea = Len(current);
+        if (authoredArea <= 1.0e-8f) continue;
+        out.worstAreaRatio = std::max(out.worstAreaRatio,
+            currentArea / authoredArea);
+        if (Dot(authored, current) < 0.0f) ++out.flips;
+        if (currentArea < authoredArea * 0.10f) ++out.collapsed;
+    }
+    for (const auto& e : edges) {
+        if (e.rest <= 1.0e-6f) continue;
+        out.worstStretch = std::max(out.worstStretch,
+            Len(Sub(verts[e.a], verts[e.b])) / e.rest);
+    }
+    if (body.valid) {
+        for (const Vec3& p : verts) {
+            float gap = 0.0f;
+            if (!BVHSignedGap(body, p, gap, nullptr)) continue;
+            if (gap < -1.0e-4f) {
+                ++out.penetrations;
+                out.worstPenetration = std::max(out.worstPenetration, -gap);
+            }
+        }
+        // Vertex-only contact can miss a triangle whose corners are outside the
+        // body while its interior cuts through it. Sample the same canonical
+        // barycentric points used by the guarded anti-clip pipeline.
+        for (const auto& t : tris) {
+            if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size())
+                continue;
+            for (const TriangleSample& sample : kTriangleSamples) {
+                const Vec3 p = SampleTrianglePoint(verts, t, sample);
+                float gap = 0.0f;
+                if (!BVHSignedGap(body, p, gap, nullptr)) continue;
+                if (gap < -1.0e-4f) {
+                    ++out.bodyFacePenetrations;
+                    out.worstBodyFacePenetration =
+                        std::max(out.worstBodyFacePenetration, -gap);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Corresponding-point body gate. Aggregate penetration counts can hide a trade
+// where one old penetration disappears while a different face cuts through the
+// body. Compare every canonical barycentric sample in place and reject either a
+// new penetration or a materially deeper authored one.
+static bool PathBBodySamplesNoWorse(
+    const std::vector<Vec3>& before,
+    const std::vector<Vec3>& after,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& body,
+    PathBBodySampleStats& stats)
+{
+    stats = PathBBodySampleStats{};
+    if (!body.valid || before.size() != after.size()) return false;
+    auto comparePoints = [&](const Vec3& bp, const Vec3& ap) -> bool {
+        float beforeGap = 0.0f, afterGap = 0.0f;
+        if (!BVHSignedGap(body, bp, beforeGap, nullptr) ||
+            !BVHSignedGap(body, ap, afterGap, nullptr))
+            return false;
+        ++stats.compared;
+        if (beforeGap < -1.0e-4f) {
+            ++stats.beforePenetrations;
+            stats.worstBefore = std::max(stats.worstBefore, -beforeGap);
+        }
+        if (afterGap < -1.0e-4f) {
+            ++stats.afterPenetrations;
+            stats.worstAfter = std::max(stats.worstAfter, -afterGap);
+        }
+        const bool newPenetration =
+            beforeGap >= -1.0e-4f && afterGap < -1.0e-4f;
+        const bool deeperPenetration =
+            beforeGap < -1.0e-4f && afterGap < beforeGap - 1.0e-4f;
+        if (newPenetration || deeperPenetration) {
+            ++stats.worsened;
+            stats.worstRegression = std::max(
+                stats.worstRegression, beforeGap - afterGap);
+        }
+        return true;
+    };
+    for (size_t i = 0; i < before.size(); ++i)
+        if (!comparePoints(before[i], after[i])) return false;
+    for (const auto& t : tris) {
+        if (t[0] >= before.size() || t[1] >= before.size() ||
+            t[2] >= before.size()) continue;
+        for (const TriangleSample& sample : kTriangleSamples) {
+            const Vec3 bp = SampleTrianglePoint(before, t, sample);
+            const Vec3 ap = SampleTrianglePoint(after, t, sample);
+            if (!comparePoints(bp, ap)) return false;
+        }
+    }
+    return stats.worsened == 0;
+}
+
+// Local ring-0 rollback for the small number of face samples that can still be
+// worsened by seam/crossing closure. Every edit moves monotonically back to the
+// trusted entry pose, including exact-seam twins, so the fixed-point terminates
+// without inventing a new positional heuristic.
+static bool PathBCloseBodySampleRegressions(
+    const std::vector<Vec3>& entry,
+    std::vector<Vec3>& candidate,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const BodyBVH& body,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    PathBBodyClosureStats& stats)
+{
+    stats = PathBBodyClosureStats{};
+    if (!body.valid || entry.size() != candidate.size()) {
+        HLog("path-b-shell: body-closure invalid input body=%d entry=%zu candidate=%zu",
+             body.valid ? 1 : 0, entry.size(), candidate.size());
+        return false;
+    }
+    const size_t n = entry.size();
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
+    std::vector<uint8_t> everReverted(n, 0);
+
+    auto isWorsenedGap = [](float entryGap, float candidateGap) {
+        return (entryGap >= -1.0e-4f && candidateGap < -1.0e-4f) ||
+               (entryGap < -1.0e-4f &&
+                candidateGap < entryGap - 1.0e-4f);
+    };
+    auto findWorsened = [&](std::vector<uint32_t>& outFaces,
+                            std::vector<uint32_t>& outVerts) -> bool {
+        outFaces.clear();
+        outVerts.clear();
+        for (uint32_t vi = 0; vi < (uint32_t)n; ++vi) {
+            float entryGap = 0.0f, candidateGap = 0.0f;
+            const bool entryOk = BVHSignedGap(
+                body, entry[vi], entryGap, nullptr);
+            const bool candidateOk = BVHSignedGap(
+                body, candidate[vi], candidateGap, nullptr);
+            if (!entryOk) {
+                HLog("path-b-shell: body-closure entry vertex query failed vert=%u",
+                     vi);
+                return false;
+            }
+            if (!candidateOk || isWorsenedGap(entryGap, candidateGap))
+                outVerts.push_back(vi);
+        }
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            bool worsened = false;
+            for (const TriangleSample& sample : kTriangleSamples) {
+                const Vec3 ep = SampleTrianglePoint(entry, t, sample);
+                const Vec3 cp = SampleTrianglePoint(candidate, t, sample);
+                float entryGap = 0.0f, candidateGap = 0.0f;
+                const bool entryOk = BVHSignedGap(
+                    body, ep, entryGap, nullptr);
+                const bool candidateOk = BVHSignedGap(
+                    body, cp, candidateGap, nullptr);
+                if (!entryOk) {
+                    HLog("path-b-shell: body-closure entry query failed tri=%u sample=%zu",
+                         ti, (size_t)(&sample - kTriangleSamples));
+                    return false;
+                }
+                // A finite candidate query should normally succeed whenever the
+                // entry query does. Treat a rare BVH miss as a local regression
+                // and restore this face instead of aborting the whole pilot.
+                if (!candidateOk) {
+                    worsened = true;
+                    break;
+                }
+                if (isWorsenedGap(entryGap, candidateGap)) {
+                    worsened = true;
+                    break;
+                }
+            }
+            if (worsened) outFaces.push_back(ti);
+        }
+        return true;
+    };
+
+    std::vector<uint32_t> worsenedFaces;
+    std::vector<uint32_t> worsenedVerts;
+    for (int round = 0; round < 32; ++round) {
+        if (!findWorsened(worsenedFaces, worsenedVerts)) return false;
+        if (round == 0) stats.initialWorsened =
+            (int)(worsenedFaces.size() + worsenedVerts.size());
+        if (worsenedFaces.empty() && worsenedVerts.empty()) {
+            stats.finalWorsened = 0;
+            for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+            return true;
+        }
+        stats.rounds = round + 1;
+        std::vector<uint8_t> restore(n, 0);
+        for (uint32_t vi : worsenedVerts) if (vi < n) restore[vi] = 1;
+        for (uint32_t ti : worsenedFaces)
+            for (uint16_t vi : tris[ti]) if (vi < n) restore[vi] = 1;
+        std::unordered_set<uint32_t> restoreReps;
+        for (size_t i = 0; i < n; ++i)
+            if (restore[i]) restoreReps.insert(seamRep[i]);
+        for (size_t i = 0; i < n; ++i)
+            if (restoreReps.count(seamRep[i])) restore[i] = 1;
+        bool any = false;
+        for (size_t i = 0; i < n; ++i) {
+            if (!restore[i]) continue;
+            candidate[i] = entry[i];
+            everReverted[i] = 1;
+            any = true;
+        }
+        if (!any) break;
+    }
+    if (!findWorsened(worsenedFaces, worsenedVerts)) return false;
+    stats.finalWorsened =
+        (int)(worsenedFaces.size() + worsenedVerts.size());
+    for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+    return worsenedFaces.empty() && worsenedVerts.empty();
+}
+
+static bool PathBCloseFaceRegressions(
+    const std::vector<Vec3>& entry,
+    const std::vector<Vec3>& baseVerts,
+    std::vector<Vec3>& candidate,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    PathBFaceClosureStats& stats)
+{
+    stats = PathBFaceClosureStats{};
+    if (entry.size() != candidate.size() || entry.size() != baseVerts.size())
+        return false;
+    const size_t n = entry.size();
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
+    std::vector<uint8_t> everReverted(n, 0);
+
+    auto findWorsenedFaces = [&](std::vector<uint32_t>& out) {
+        out.clear();
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const Vec3 authored = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                        Sub(baseVerts[t[2]], baseVerts[t[0]]));
+            const float authoredArea = Len(authored);
+            if (authoredArea <= 1.0e-8f) continue;
+            const Vec3 before = Cross(Sub(entry[t[1]], entry[t[0]]),
+                                      Sub(entry[t[2]], entry[t[0]]));
+            const Vec3 after = Cross(Sub(candidate[t[1]], candidate[t[0]]),
+                                     Sub(candidate[t[2]], candidate[t[0]]));
+            const float beforeArea = Len(before);
+            const float afterArea = Len(after);
+            const bool beforeFlip = Dot(authored, before) < 0.0f;
+            const bool afterFlip = Dot(authored, after) < 0.0f;
+            const bool beforeCollapse = beforeArea < authoredArea * 0.10f;
+            const bool afterCollapse = afterArea < authoredArea * 0.10f;
+            const bool beforeExploded = beforeArea > authoredArea * 8.0f;
+            const bool afterExploded = afterArea > authoredArea * 8.0f;
+            if ((afterFlip && !beforeFlip) ||
+                (afterCollapse && !beforeCollapse) ||
+                (afterExploded && !beforeExploded))
+                out.push_back(ti);
+        }
+    };
+
+    std::vector<uint32_t> worsenedFaces;
+    for (int round = 0; round < 32; ++round) {
+        findWorsenedFaces(worsenedFaces);
+        if (round == 0) stats.initialWorsened = (int)worsenedFaces.size();
+        if (worsenedFaces.empty()) {
+            stats.finalWorsened = 0;
+            for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+            return true;
+        }
+        stats.rounds = round + 1;
+        std::vector<uint8_t> restore(n, 0);
+        for (uint32_t ti : worsenedFaces)
+            for (uint16_t vi : tris[ti]) if (vi < n) restore[vi] = 1;
+        std::unordered_set<uint32_t> restoreReps;
+        for (size_t i = 0; i < n; ++i)
+            if (restore[i]) restoreReps.insert(seamRep[i]);
+        for (size_t i = 0; i < n; ++i)
+            if (restoreReps.count(seamRep[i])) restore[i] = 1;
+        bool anyNew = false;
+        for (size_t i = 0; i < n; ++i) {
+            if (!restore[i]) continue;
+            if (!everReverted[i]) anyNew = true;
+            candidate[i] = entry[i];
+            everReverted[i] = 1;
+        }
+        if (!anyNew) break;
+    }
+    findWorsenedFaces(worsenedFaces);
+    stats.finalWorsened = (int)worsenedFaces.size();
+    for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+    return worsenedFaces.empty();
+}
+
+static bool PathBIntegrityNoWorse(
+    const PathBShellIntegrity& candidate,
+    const PathBShellIntegrity& entry)
+{
+    return candidate.flips <= entry.flips &&
+           candidate.collapsed <= entry.collapsed &&
+           candidate.worstAreaRatio <= 8.0f &&
+           candidate.worstStretch <= 8.0f &&
+           candidate.penetrations <= entry.penetrations &&
+           candidate.worstPenetration <= entry.worstPenetration + 1.0e-4f &&
+           candidate.bodyFacePenetrations <= entry.bodyFacePenetrations &&
+           candidate.worstBodyFacePenetration <=
+               entry.worstBodyFacePenetration + 1.0e-4f;
+}
+
+// Restore both faces of every newly crossing pair, plus exact-seam twins, to
+// the production entry candidate. Counting crossings is insufficient because a
+// hidden pair can be traded for a different visible pair at equal total count.
+static bool PathBCloseNewCrossings(
+    const std::vector<Vec3>& entry,
+    std::vector<Vec3>& candidate,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    PathBCrossingClosureStats& stats)
+{
+    if (entry.size() != candidate.size() || tris.empty()) return false;
+    const size_t n = entry.size();
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
+    std::vector<uint8_t> everReverted(n, 0);
+    auto findNewPairs = [&](const std::vector<Vec3>& verts,
+                            std::vector<std::pair<uint32_t, uint32_t>>& out) {
+        out.clear();
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            for (uint32_t tj = ti + 1; tj < (uint32_t)tris.size(); ++tj) {
+                if (TrianglesShareVertexOrExactSeam(tris[ti], tris[tj], seamRep)) continue;
+                if (!TrianglesCrossNonCoplanar(verts, tris[ti], tris[tj])) continue;
+                if (!TrianglesCrossNonCoplanar(entry, tris[ti], tris[tj]))
+                    out.emplace_back(ti, tj);
+            }
+        }
+    };
+
+    std::vector<std::pair<uint32_t, uint32_t>> newPairs;
+    for (int round = 0; round < 8; ++round) {
+        findNewPairs(candidate, newPairs);
+        if (round == 0) stats.initialNewPairs = (int)newPairs.size();
+        if (newPairs.empty()) {
+            stats.finalNewPairs = 0;
+            for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+            return true;
+        }
+        stats.rounds = round + 1;
+        std::vector<uint8_t> restore(n, 0);
+        for (const auto& pair : newPairs) {
+            for (uint16_t vi : tris[pair.first]) if (vi < n) restore[vi] = 1;
+            for (uint16_t vi : tris[pair.second]) if (vi < n) restore[vi] = 1;
+        }
+        std::unordered_set<uint32_t> restoreReps;
+        for (size_t i = 0; i < n; ++i) if (restore[i]) restoreReps.insert(seamRep[i]);
+        for (size_t i = 0; i < n; ++i) if (restoreReps.count(seamRep[i])) restore[i] = 1;
+        bool any = false;
+        for (size_t i = 0; i < n; ++i) {
+            if (!restore[i]) continue;
+            candidate[i] = entry[i];
+            everReverted[i] = 1;
+            any = true;
+        }
+        if (!any) break;
+    }
+    findNewPairs(candidate, newPairs);
+    stats.finalNewPairs = (int)newPairs.size();
+    for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
+    return newPairs.empty();
+}
+
+static bool PathBSimV2Solve(
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<VertexBoneProfile>* profiles,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const TargetDataDiffs& rawDiff,
+    const BodyBVH& refBody,
+    const BodyBVH& morphedBody,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    std::vector<Vec3>& out,
+    std::string& failReason)
+{
+    const size_t n = baseVerts.size();
+    if (n == 0 || n > 0xFFFF || !profiles || profiles->size() != n) {
+        failReason = "missing/invalid cloth profiles";
+        return false;
+    }
+    if (!refBody.valid || !morphedBody.valid ||
+        refBody.verts.size() != morphedBody.verts.size() ||
+        refBody.tris != morphedBody.tris) {
+        failReason = "body continuation topology mismatch";
+        return false;
+    }
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) {
+            failReason = "garment triangle index out of range";
+            return false;
+        }
+    }
+
+    std::vector<PathBShellEdge> edges;
+    std::vector<PathBShellHinge> hinges;
+    if (!PathBBuildTopology(baseVerts, tris, edges, hinges)) {
+        failReason = "empty shell topology";
+        return false;
+    }
+
+    std::vector<float> invMass(n, 0.0f);
+    std::vector<float> softAnchor(n, 0.0f);
+    std::vector<uint8_t> fixed(n, 0);
+    std::vector<Vec3> raw(n, Vec3{0.0f, 0.0f, 0.0f});
+    for (size_t i = 0; i < n; ++i) {
+        const auto& p = (*profiles)[i];
+        float pelvis = Clamp01(p.pelvis);
+        float leg = Clamp01(p.leg);
+        float sleeve = Clamp01((p.arm + p.handFoot) * 1.6f);
+        float drape = Clamp01((pelvis + leg) * (1.0f - sleeve));
+        float u = ClampRange((drape - 0.05f) / 0.50f, 0.0f, 1.0f);
+        u = u * u * (3.0f - 2.0f * u);
+        invMass[i] = u;
+        fixed[i] = u <= 1.0e-12f ? 1 : 0;
+        softAnchor[i] = 0.18f * (1.0f - u) * (1.0f - u);
+        raw[i] = DiffAt(rawDiff, (uint16_t)i);
+    }
+
+    const float clearance = std::max(0.0f, EnvFloat("DRAPE_SHELL_CLEARANCE", 0.02f));
+    const float gravity = std::max(0.0f, EnvFloat("DRAPE_SHELL_GRAVITY", 0.02f));
+    const float stretchCompliance = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_STRETCH_COMPLIANCE", 2.0e-4f));
+    const float bendCompliance = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_BEND_COMPLIANCE", 2.0e-2f));
+    std::vector<float> contactFloor(n, clearance);
+    for (size_t i = 0; i < n; ++i) {
+        float authoredGap = 0.0f;
+        if (!BVHSignedGap(refBody, baseVerts[i], authoredGap, nullptr)) {
+            failReason = "authored contact query failed";
+            return false;
+        }
+        contactFloor[i] = std::min(authoredGap, clearance);
+    }
+    std::vector<float> faceContactFloor(
+        tris.size() * std::size(kTriangleSamples), clearance);
+    for (size_t ti = 0; ti < tris.size(); ++ti) {
+        for (size_t si = 0; si < std::size(kTriangleSamples); ++si) {
+            const Vec3 authoredPoint = SampleTrianglePoint(
+                baseVerts, tris[ti], kTriangleSamples[si]);
+            float authoredGap = 0.0f;
+            if (!BVHSignedGap(refBody, authoredPoint, authoredGap, nullptr)) {
+                failReason = "authored face-contact query failed";
+                return false;
+            }
+            faceContactFloor[ti * std::size(kTriangleSamples) + si] =
+                std::min(authoredGap, clearance);
+        }
+    }
+
+    std::vector<Vec3> x = baseVerts;
+    int active = 0, hard = 0;
+    for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
+    HLog("path-b-shell: solve begin verts=%zu edges=%zu hinges=%zu seams=%zu active=%d fixed=%d g=%.4f stretchC=%.6g bendC=%.6g",
+         n, edges.size(), hinges.size(), exactSeamGroups.size(), active, hard,
+         gravity, stretchCompliance, bendCompliance);
+
+    static constexpr int kMorphSteps = 6;
+    static constexpr int kIterations = 10;
+    for (int step = 1; step <= kMorphSteps; ++step) {
+        float t = (float)step / (float)kMorphSteps;
+        std::vector<Vec3> bodyVerts(refBody.verts.size());
+        for (size_t i = 0; i < bodyVerts.size(); ++i)
+            bodyVerts[i] = Add(refBody.verts[i],
+                Scale(Sub(morphedBody.verts[i], refBody.verts[i]), t));
+        BodyBVH body;
+        BuildBodyBVH(bodyVerts, refBody.tris, body);
+        if (!body.valid) {
+            failReason = "continuation BVH build failed";
+            return false;
+        }
+
+        std::vector<Vec3> anchorTarget(n);
+        for (size_t i = 0; i < n; ++i) {
+            anchorTarget[i] = Add(baseVerts[i], Scale(raw[i], t));
+            if (fixed[i]) x[i] = anchorTarget[i];
+        }
+        std::vector<float> stretchLambda(edges.size(), 0.0f);
+        std::vector<float> bendLambda(hinges.size(), 0.0f);
+        int contactMoves = 0;
+        int faceContactMoves = 0;
+        float worstContact = 0.0f;
+        float worstFaceContact = 0.0f;
+        for (int iteration = 0; iteration < kIterations; ++iteration) {
+            for (size_t i = 0; i < n; ++i) {
+                x[i] = Add(x[i], Scale(Sub(anchorTarget[i], x[i]), softAnchor[i]));
+                if (fixed[i]) x[i] = anchorTarget[i];
+                x[i].z -= gravity * invMass[i];
+            }
+            PathBStretchJacobi(x, edges, invMass, stretchLambda, stretchCompliance);
+            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance);
+            faceContactMoves += PathBFaceContactProject(
+                x, tris, invMass, body, faceContactFloor,
+                std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.20f)),
+                ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
+                           0.05f, 1.0f),
+                worstFaceContact);
+            PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            for (size_t i = 0; i < n; ++i) {
+                if (invMass[i] <= 0.0f) continue;
+                Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                float d2 = 0.0f;
+                if (!BVHClosestPoint(body, x[i], cp, nrm, d2)) continue;
+                float dist = std::sqrt(d2);
+                float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
+                float floor = contactFloor[i];
+                if (gap >= floor) continue;
+                Vec3 target = Add(cp, Scale(nrm, floor));
+                worstContact = std::max(worstContact, Len(Sub(target, x[i])));
+                x[i] = target;
+                ++contactMoves;
+            }
+            for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+        }
+        HLog("path-b-shell: step=%d/%d contactMoves=%d faceMoves=%d worstContact=%.4f worstFace=%.4f",
+             step, kMorphSteps, contactMoves, faceContactMoves,
+             worstContact, worstFaceContact);
+    }
+    // Deliberately stop after the same fixed-anchor reset as the Python spike.
+    // An extra publication weld changes the solved pose and can re-introduce
+    // body penetration after the final contact projection.
+    out = std::move(x);
+    return true;
+}
+
 // The real solver body. NEVER call this directly outside the ApplyStaticClothPass
 // wrapper below (U1, crash containment) Ã¢â‚¬â€ this function and everything it calls
 // is where a bug in ~8000 lines of solver code could raise a hardware exception
@@ -9016,6 +9875,189 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), proxEdges.size());
     }
 
+    // Path-B sim-v2 pilot. Default OFF, scoped to the one live Heavy fixture.
+    // Keep the production entry candidate immutable until the shell, crossing
+    // closure, and global physical gates have all accepted a separate candidate.
+    bool pathBShellAccepted = false;
+    std::vector<Vec3> pathBShellPublishedReference;
+    std::vector<Vec3> pathBShellIntegrityBaseline;
+    bool pathBShellRequested = EnvToggle("DRAPE_SHELL_SOLVE", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/shell_solve_off.flag"))
+        pathBShellRequested = false;
+    else if (fs::exists("E:/SkyrimDev/Drape/shell_solve_on.flag"))
+        pathBShellRequested = true;
+#endif
+    const bool pathBShellScoped =
+        shapeName == "BlackSmithTorso" && sliderName == "RM_Heavy" &&
+        (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
+         originalPreset == DRAPE_PRESET_LOOSE_DRAPED);
+    if (pathBShellRequested && pathBShellScoped) {
+        const auto started = std::chrono::steady_clock::now();
+        const std::vector<Vec3> productionEntry = finalVerts;
+        std::vector<Vec3> shellCandidate;
+        std::string failReason;
+        bool candidateFinite = false;
+        bool closureOk = false;
+        bool bodyClosureOk = false;
+        bool faceClosureOk = false;
+        bool integrityOk = false;
+        bool seamsOk = false;
+        PathBCrossingClosureStats closureStats;
+        PathBBodyClosureStats bodyClosureStats;
+        PathBFaceClosureStats faceClosureStats;
+        PathBShellIntegrity entryIntegrity, candidateIntegrity;
+        PathBBodySampleStats bodySampleStats;
+        std::vector<PathBShellEdge> gateEdges;
+        std::vector<PathBShellHinge> gateHinges;
+        float p95Stretch = 1.0f;
+        float worstSeamSplit = 0.0f;
+
+        if (baseVerts.size() != n || !tris || tris->empty() ||
+            !bodyBVH || !bodyBVH->valid || !g_refBodyBVH.valid) {
+            failReason = "missing live topology/body input";
+        } else if (PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
+                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                                  shellCandidate, failReason)) {
+            candidateFinite = shellCandidate.size() == productionEntry.size();
+            for (const Vec3& p : shellCandidate) {
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+                    candidateFinite = false;
+                    break;
+                }
+            }
+            if (!candidateFinite) {
+                failReason = "candidate size/finitude gate";
+            } else {
+                closureOk = true;
+                bodyClosureOk = true;
+                faceClosureOk = true;
+                int closureCycles = 0;
+                bool closureStable = false;
+                int crossingReverted = 0, bodyReverted = 0, faceReverted = 0;
+                int initialCrossings = 0, initialBodyRegressions = 0;
+                int initialFaceRegressions = 0;
+                for (int cycle = 0; cycle < 8; ++cycle) {
+                    PathBCrossingClosureStats crossCycle;
+                    PathBBodyClosureStats bodyCycle;
+                    PathBFaceClosureStats faceCycle;
+                    closureOk = PathBCloseNewCrossings(
+                        productionEntry, shellCandidate, *tris,
+                        exactSeamGroups, crossCycle);
+                    if (!closureOk) break;
+                    bodyClosureOk = PathBCloseBodySampleRegressions(
+                        productionEntry, shellCandidate, *tris, *bodyBVH,
+                        exactSeamGroups, bodyCycle);
+                    bodyClosureStats = bodyCycle;
+                    bodyReverted += bodyCycle.revertedVerts;
+                    if (!bodyClosureOk) break;
+                    faceClosureOk = PathBCloseFaceRegressions(
+                        productionEntry, baseVerts, shellCandidate, *tris,
+                        exactSeamGroups, faceCycle);
+                    faceClosureStats = faceCycle;
+                    faceReverted += faceCycle.revertedVerts;
+                    if (!faceClosureOk) break;
+                    if (cycle == 0) {
+                        initialCrossings = crossCycle.initialNewPairs;
+                        initialBodyRegressions = bodyCycle.initialWorsened;
+                        initialFaceRegressions = faceCycle.initialWorsened;
+                    }
+                    crossingReverted += crossCycle.revertedVerts;
+                    ++closureCycles;
+                    closureStats = crossCycle;
+                    if (crossCycle.initialNewPairs == 0 &&
+                        bodyCycle.initialWorsened == 0 &&
+                        faceCycle.initialWorsened == 0) {
+                        closureStable = true;
+                        break;
+                    }
+                }
+                HLog("path-b-shell: local-closure cycles=%d crossReverted=%d bodyReverted=%d faceReverted=%d crossing=%d->%d bodyRegression=%d->%d faceRegression=%d->%d accepted=%d/%d/%d stable=%d",
+                     closureCycles, crossingReverted, bodyReverted, faceReverted,
+                     initialCrossings, closureStats.finalNewPairs,
+                     initialBodyRegressions, bodyClosureStats.finalWorsened,
+                     initialFaceRegressions, faceClosureStats.finalWorsened,
+                     closureOk ? 1 : 0, bodyClosureOk ? 1 : 0,
+                     faceClosureOk ? 1 : 0, closureStable ? 1 : 0);
+                if (!closureOk) {
+                    failReason = "crossing-set inclusion gate";
+                } else if (!bodyClosureOk) {
+                    failReason = "body-sample closure gate";
+                } else if (!faceClosureOk) {
+                    failReason = "face-integrity closure gate";
+                } else if (!closureStable) {
+                    failReason = "local closure did not converge";
+                } else if (!PathBBuildTopology(baseVerts, *tris, gateEdges, gateHinges) ||
+                           !PathBComputeIntegrity(productionEntry, baseVerts, gateEdges,
+                                                  *tris, *bodyBVH, entryIntegrity) ||
+                           !PathBComputeIntegrity(shellCandidate, baseVerts, gateEdges,
+                                                  *tris, *bodyBVH, candidateIntegrity)) {
+                    failReason = "global integrity measurement failed";
+                } else {
+                    std::vector<float> stretchRatios;
+                    stretchRatios.reserve(gateEdges.size());
+                    for (const auto& e : gateEdges) {
+                        if (e.rest <= 1.0e-6f) continue;
+                        stretchRatios.push_back(
+                            Len(Sub(shellCandidate[e.a], shellCandidate[e.b])) / e.rest);
+                    }
+                    if (!stretchRatios.empty()) {
+                        std::sort(stretchRatios.begin(), stretchRatios.end());
+                        size_t p95i = (size_t)std::floor(
+                            0.95 * (double)(stretchRatios.size() - 1));
+                        p95Stretch = stretchRatios[p95i];
+                    }
+                    for (const auto& group : exactSeamGroups) {
+                        uint32_t first = (uint32_t)n;
+                        for (uint32_t vi : group) {
+                            if (vi >= n) continue;
+                            if (first >= n) { first = vi; continue; }
+                            worstSeamSplit = std::max(worstSeamSplit,
+                                Len(Sub(shellCandidate[first], shellCandidate[vi])));
+                        }
+                    }
+                    seamsOk = worstSeamSplit <= 1.0e-4f;
+                    integrityOk = PathBIntegrityNoWorse(candidateIntegrity, entryIntegrity);
+                    const bool bodySamplesOk = PathBBodySamplesNoWorse(
+                        productionEntry, shellCandidate, *tris, *bodyBVH,
+                        bodySampleStats);
+                    if (!bodySamplesOk) failReason =
+                        "corresponding body-face gate";
+                    else if (!seamsOk) failReason = "exact seam closure gate";
+                    else if (!integrityOk) failReason = "global physical integrity gate";
+                    else {
+                        pathBShellPublishedReference = shellCandidate;
+                        pathBShellIntegrityBaseline = productionEntry;
+                        finalVerts = std::move(shellCandidate);
+                        pathBShellAccepted = true;
+                    }
+                }
+            }
+        }
+        const double elapsedMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        HLog("path-b-shell: publish shape='%s' slider='%s' accepted=%d reason='%s' elapsedMs=%.1f entry(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f) candidate(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f p95Edge=%.3f maxEdge=%.3f seam=%.6f)",
+             shapeName.c_str(), sliderName.c_str(), pathBShellAccepted ? 1 : 0,
+             pathBShellAccepted ? "accepted" : failReason.c_str(), elapsedMs,
+             entryIntegrity.flips, entryIntegrity.collapsed,
+             entryIntegrity.penetrations, entryIntegrity.worstPenetration,
+             entryIntegrity.bodyFacePenetrations,
+             entryIntegrity.worstBodyFacePenetration,
+             candidateIntegrity.flips, candidateIntegrity.collapsed,
+             candidateIntegrity.penetrations, candidateIntegrity.worstPenetration,
+             candidateIntegrity.bodyFacePenetrations,
+             candidateIntegrity.worstBodyFacePenetration,
+             p95Stretch, candidateIntegrity.worstStretch, worstSeamSplit);
+        HLog("path-b-shell: body-samples compared=%d beforePen=%d afterPen=%d worsened=%d beforeDepth=%.4f afterDepth=%.4f regression=%.4f",
+             bodySampleStats.compared, bodySampleStats.beforePenetrations,
+             bodySampleStats.afterPenetrations, bodySampleStats.worsened,
+             bodySampleStats.worstBefore, bodySampleStats.worstAfter,
+             bodySampleStats.worstRegression);
+    } else if (pathBShellRequested && sliderName == "RM_Heavy") {
+        HLog("path-b-shell: scope skip shape='%s' slider='%s' originalPreset=%d",
+             shapeName.c_str(), sliderName.c_str(), originalPreset);
+    }
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ Cloth drape solve (momentum-free relaxation) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Keeps the key idea from johnBuffer/ClothSimulation Ã¢â‚¬â€ distance constraints
     // that resist ONLY stretching, so the cloth folds and hangs instead of
@@ -9025,7 +10067,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // relaxation toward a gravity-loaded equilibrium always converges Ã¢â€ â€™ no tears.
     // A hard per-vert max-drop and a hard edge-length cap make it unconditionally
     // stable. Pinned verts (low drape eligibility) hold the garment at the waist.
-    if (params.verletCloth) {
+    if (params.verletCloth && !pathBShellAccepted) {
         std::vector<float> m(n, 0.0f);   // effective inv-mass; 0 = pinned
         for (size_t i = 0; i < n; ++i) {
             bool pinned = (invMass[i] <= 0.0f) || (drapeEl[i] < 0.20f);
@@ -10069,7 +11111,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Slider-source influence blend (CORRECTION MODE ONLY).
     // In physicsDrape mode, physics determines cloth position Ã¢â‚¬â€ no blend-back.
     // Blending back to supportVerts (vanilla conform) would kill the drape effect.
-    if (!params.physicsDrape) {
+    if (!params.physicsDrape && !pathBShellAccepted) {
         for (size_t i = 0; i < n; ++i) {
             float eff = (i < effectiveInfluence.size()) ? effectiveInfluence[i] : 1.0f;
             if (eff < 0.999f) {
@@ -10080,7 +11122,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     }
 
     // Idempotency: verts with near-zero vanilla conform diff stay at base.
-    {
+    if (!pathBShellAccepted) {
         static constexpr float kRawThreshold2 = 0.001f;
         for (size_t i = 0; i < n; ++i) {
             Vec3 rawV = DiffAt(rawDiff, static_cast<uint16_t>(i));
@@ -10091,7 +11133,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     // Safety clamp (correction mode only; disabled when maxDisplacementMult=0).
     // In physicsDrape mode, cloth can deviate freely from rawDiff.
-    if (params.maxDisplacementMult > 0.0f) {
+    if (params.maxDisplacementMult > 0.0f && !pathBShellAccepted) {
         const float multSq = params.maxDisplacementMult * params.maxDisplacementMult;
         for (size_t i = 0; i < n; ++i) {
             Vec3 rawV = DiffAt(rawDiff, static_cast<uint16_t>(i));
@@ -10137,7 +11179,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // shell envelope as the shaper Ã¢â‚¬â€ the result follows the actual belly/hip/bust
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
-    if (params.verletCloth && bodyBVH && bodyBVH->valid) {
+    if (params.verletCloth && !pathBShellAccepted && bodyBVH && bodyBVH->valid) {
         // Finishing rounds scale with intensity: Low=5, Medium=9, High=14.
         static const int kFinishRounds[] = {5, 9, 14};
         int intensity = g_processingIntensity.load(std::memory_order_relaxed);
@@ -15766,12 +16808,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         else if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_on.flag"))
             safeTopologyFloor = true;
 #endif
-        // First live pilot: the Vampire robe capture is the measured case where
-        // the legacy floor removes body penetration but creates new crossed
-        // panels. Keep the transactional O(movedFaces * allFaces) path scoped
-        // until the full corpus and the user's visual gate prove general use.
-        safeTopologyFloor = safeTopologyFloor &&
-            shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy" &&
+        // The Path-B pilot always uses the transactional floor: its accepted
+        // shell is a trusted crossing/body reference and must not be remodeled
+        // by the legacy push/cap/weld loop. Outside Path-B, retain the existing
+        // Vampire-only opt-in scope until the full corpus proves general use.
+        const bool legacySafeFloorScope = safeTopologyFloor &&
+            shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy";
+        safeTopologyFloor = (pathBShellAccepted || legacySafeFloorScope) &&
             tris && !tris->empty();
         auto floorable = [&](size_t i) -> bool {
             int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
@@ -16126,7 +17169,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
     };
-    applyFinalBodyFloorPass();
+    // Path-B defers this pass until every legacy positional edit has been
+    // skipped/finished, immediately before its final transaction at writeback.
+    if (!pathBShellAccepted)
+        applyFinalBodyFloorPass();
 
     // Actual posterior bridge (-Y).  This runs on the shipped final surface and
     // keeps that entry mesh as the downstream collision proxy, so an opt-in
@@ -16139,7 +17185,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (fs::exists("E:/SkyrimDev/Drape/posterior_chord_on.flag"))
         posteriorChordOn = true;
 #endif
-    if (posteriorChordOn &&
+    if (!pathBShellAccepted && posteriorChordOn &&
         shapeName == "BlackSmithTorso" &&
         originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
         params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
@@ -16232,7 +17278,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (fs::exists("E:/SkyrimDev/Drape/tangential_repair_on.flag"))
         tangentialRepairOn = true;
 #endif
-    if (!posteriorChordMoved && tangentialRepairOn &&
+    if (!pathBShellAccepted && !posteriorChordMoved && tangentialRepairOn &&
         originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
         params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
         !useEdges.empty()) {
@@ -16313,7 +17359,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Run tension-plumb after the true-final floor/optional tangential repair.
     // With its default OFF this remains a no-op; tpEntry is its own exact visual
     // baseline and can safely serve as a downstream-only collider proxy.
-    if (!posteriorChordMoved && !tangentialRepairMoved)
+    if (!pathBShellAccepted && !posteriorChordMoved && !tangentialRepairMoved)
         applyTensionPlumb();
 
     // Final degradation guard for the anti-clip pilot.  The captured Vampire
@@ -16535,6 +17581,158 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), flippedFaces, maxFlips,
                  collapsedFaces, maxCollapsed);
         }
+    }
+
+    // Path-B's transaction spans the entire legacy tail, not merely the shell
+    // solve. Run its topology-safe body floor last, close any crossings created
+    // downstream against the accepted shell, then validate corresponding face
+    // samples and global integrity before writeback. A failed tail never leaks:
+    // the already-accepted shell is the deterministic fallback.
+    if (pathBShellAccepted) {
+        bool finalAccepted = true;
+        std::string finalReason = "accepted";
+        PathBCrossingClosureStats finalClosure;
+        PathBBodyClosureStats finalBodyClosure;
+        PathBFaceClosureStats finalFaceClosure;
+        PathBBodySampleStats finalBodySamples;
+        PathBShellIntegrity baselineIntegrity, referenceIntegrity, finalIntegrity;
+        std::vector<PathBShellEdge> finalGateEdges;
+        std::vector<PathBShellHinge> finalGateHinges;
+        float referenceSeamSplit = 0.0f;
+        float finalSeamSplit = 0.0f;
+
+        if (pathBShellPublishedReference.size() != n ||
+            pathBShellIntegrityBaseline.size() != n || !tris || tris->empty() ||
+            !bodyBVH || !bodyBVH->valid) {
+            finalAccepted = false;
+            finalReason = "missing final transaction input";
+        } else {
+            // Gives the safe floor a fixed, accepted topology/body reference.
+            finalFloorIntegrityReference = pathBShellPublishedReference;
+            applyFinalBodyFloorPass();
+
+            bool stable = false;
+            int finalClosureCycles = 0;
+            int finalCrossReverted = 0;
+            int finalBodyReverted = 0;
+            int finalFaceReverted = 0;
+            for (int cycle = 0; cycle < 8 && finalAccepted; ++cycle) {
+                PathBCrossingClosureStats crossCycle;
+                PathBBodyClosureStats bodyCycle;
+                PathBFaceClosureStats faceCycle;
+                if (!PathBCloseNewCrossings(
+                        pathBShellPublishedReference, finalVerts, *tris,
+                        exactSeamGroups, crossCycle)) {
+                    finalAccepted = false;
+                    finalReason = "final crossing-set inclusion gate";
+                    break;
+                }
+                if (!PathBCloseBodySampleRegressions(
+                        pathBShellPublishedReference, finalVerts, *tris,
+                        *bodyBVH, exactSeamGroups, bodyCycle)) {
+                    finalAccepted = false;
+                    finalReason = "final body-sample closure gate";
+                    break;
+                }
+                if (!PathBCloseFaceRegressions(
+                        pathBShellPublishedReference, baseVerts, finalVerts,
+                        *tris, exactSeamGroups, faceCycle)) {
+                    finalAccepted = false;
+                    finalReason = "final face-integrity closure gate";
+                    break;
+                }
+                finalClosure = crossCycle;
+                finalBodyClosure = bodyCycle;
+                finalFaceClosure = faceCycle;
+                finalCrossReverted += crossCycle.revertedVerts;
+                finalBodyReverted += bodyCycle.revertedVerts;
+                finalFaceReverted += faceCycle.revertedVerts;
+                ++finalClosureCycles;
+                if (crossCycle.initialNewPairs == 0 &&
+                    bodyCycle.initialWorsened == 0 &&
+                    faceCycle.initialWorsened == 0) {
+                    stable = true;
+                    break;
+                }
+            }
+            if (finalAccepted && !stable) {
+                finalAccepted = false;
+                finalReason = "final local closure did not converge";
+            }
+            HLog("path-b-shell: final-local-closure cycles=%d crossReverted=%d bodyReverted=%d faceReverted=%d final=%d/%d/%d stable=%d",
+                 finalClosureCycles, finalCrossReverted, finalBodyReverted,
+                 finalFaceReverted, finalClosure.finalNewPairs,
+                 finalBodyClosure.finalWorsened,
+                 finalFaceClosure.finalWorsened, stable ? 1 : 0);
+
+            if (finalAccepted &&
+                (!PathBBuildTopology(baseVerts, *tris,
+                                     finalGateEdges, finalGateHinges) ||
+                 !PathBComputeIntegrity(pathBShellIntegrityBaseline, baseVerts,
+                                        finalGateEdges, *tris, *bodyBVH,
+                                        baselineIntegrity) ||
+                 !PathBComputeIntegrity(pathBShellPublishedReference, baseVerts,
+                                        finalGateEdges, *tris, *bodyBVH,
+                                        referenceIntegrity) ||
+                 !PathBComputeIntegrity(finalVerts, baseVerts, finalGateEdges,
+                                        *tris, *bodyBVH, finalIntegrity))) {
+                finalAccepted = false;
+                finalReason = "final integrity measurement failed";
+            }
+
+            if (finalAccepted && !PathBIntegrityNoWorse(
+                    finalIntegrity, baselineIntegrity)) {
+                finalAccepted = false;
+                finalReason = "final global physical integrity gate";
+            }
+
+            if (finalAccepted && !PathBBodySamplesNoWorse(
+                    pathBShellPublishedReference, finalVerts, *tris, *bodyBVH,
+                    finalBodySamples)) {
+                finalAccepted = false;
+                finalReason = "final corresponding body-face gate";
+            }
+
+            auto worstSeamSplit = [&](const std::vector<Vec3>& verts) {
+                float worst = 0.0f;
+                for (const auto& group : exactSeamGroups) {
+                    uint32_t first = (uint32_t)n;
+                    for (uint32_t vi : group) {
+                        if (vi >= n) continue;
+                        if (first >= n) { first = vi; continue; }
+                        worst = std::max(worst, Len(Sub(verts[first], verts[vi])));
+                    }
+                }
+                return worst;
+            };
+            referenceSeamSplit = worstSeamSplit(pathBShellPublishedReference);
+            finalSeamSplit = worstSeamSplit(finalVerts);
+            if (finalAccepted && finalSeamSplit >
+                    std::max(1.0e-4f, referenceSeamSplit + 1.0e-4f)) {
+                finalAccepted = false;
+                finalReason = "final exact seam gate";
+            }
+        }
+
+        if (!finalAccepted)
+            finalVerts = pathBShellPublishedReference;
+        // The downstream proxy must always match the pose this transaction
+        // actually publishes, including its deterministic fallback.
+        downstreamColliderProxy.clear();
+        HLog("path-b-shell: final accepted=%d reason='%s' closure(rounds=%d reverted=%d new=%d->%d) bodySamples(compared=%d before=%d after=%d worsened=%d regression=%.4f) baseline(flip=%d collapse=%d pen=%d facePen=%d) reference(flip=%d collapse=%d pen=%d facePen=%d) final(flip=%d collapse=%d pen=%d facePen=%d maxArea=%.3f maxEdge=%.3f) seam=%.6f->%.6f",
+             finalAccepted ? 1 : 0, finalReason.c_str(), finalClosure.rounds,
+             finalClosure.revertedVerts, finalClosure.initialNewPairs,
+             finalClosure.finalNewPairs, finalBodySamples.compared,
+             finalBodySamples.beforePenetrations,
+             finalBodySamples.afterPenetrations, finalBodySamples.worsened,
+             finalBodySamples.worstRegression, baselineIntegrity.flips,
+             baselineIntegrity.collapsed, baselineIntegrity.penetrations,
+             baselineIntegrity.bodyFacePenetrations, referenceIntegrity.flips,
+             referenceIntegrity.collapsed, referenceIntegrity.penetrations,
+             referenceIntegrity.bodyFacePenetrations, finalIntegrity.flips,
+             finalIntegrity.collapsed, finalIntegrity.penetrations,
+             finalIntegrity.bodyFacePenetrations, finalIntegrity.worstAreaRatio,
+             finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
     }
 
     static constexpr float kWriteEps2 = 1.0e-10f;

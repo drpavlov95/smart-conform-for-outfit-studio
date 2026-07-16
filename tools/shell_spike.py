@@ -1411,15 +1411,18 @@ def xpbd_stretch_jacobi(
     c = length - rest
     denom = inv_mass[a] + inv_mass[b] + compliance
     valid = denom > 1.0e-30
-    if tension_only:
-        # real fabric threads resist EXTENSION only; compression buckles into
-        # folds for free. Unilateral constraint: project only stretched edges
-        # (c > 0). This is what lets per-iteration gravity settle into rotation
-        # about the support instead of being undone by a wire-frame equality.
-        valid = valid & (c > 0.0)
     dl = np.zeros(len(edges), dtype=np.float64)
     dl[valid] = (-c[valid] - compliance * lambdas[valid]) / denom[valid]
-    lambdas += dl
+    if tension_only:
+        # C = length-rest <= 0, therefore the unilateral XPBD multiplier is
+        # lambda <= 0.  Project the *accumulated* multiplier every iteration.
+        # Merely skipping C <= 0 leaves stale negative lambda behind when an
+        # edge becomes slack, producing a non-physical "sticky thread" force.
+        projected = np.minimum(lambdas + dl, 0.0)
+        dl = projected - lambdas
+        lambdas[:] = projected
+    else:
+        lambdas += dl
 
     delta = np.zeros_like(verts)
     count = np.zeros(len(verts), dtype=np.float64)
@@ -1431,6 +1434,47 @@ def xpbd_stretch_jacobi(
     np.add.at(count, b, (inv_mass[b] > 0.0).astype(np.float64))
     movable = count > 0.0
     verts[movable] += relaxation * delta[movable] / count[movable, None]
+
+
+def xpbd_unilateral_selftest() -> None:
+    """Catch stale/positive tension multipliers without a garment fixture."""
+    edges = np.array([[0, 1]], dtype=np.int32)
+    rest = np.array([1.0], dtype=np.float64)
+    inv_mass = np.ones(2, dtype=np.float64)
+    lambdas = np.zeros(1, dtype=np.float64)
+
+    stretched = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    xpbd_stretch_jacobi(
+        stretched, edges, rest, inv_mass, lambdas,
+        compliance=0.0, relaxation=1.0, tension_only=True,
+    )
+    if not lambdas[0] < 0.0:
+        raise RuntimeError(f"tension multiplier was not activated: {lambdas[0]}")
+
+    previous = float(lambdas[0])
+    slack = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    xpbd_stretch_jacobi(
+        slack, edges, rest, inv_mass, lambdas,
+        compliance=0.0, relaxation=1.0, tension_only=True,
+    )
+    if not previous < lambdas[0] <= 0.0:
+        raise RuntimeError(
+            f"slack edge did not discharge stored tension: {previous} -> {lambdas[0]}"
+        )
+
+    # A fully slack, degenerate edge must clear the multiplier without inventing
+    # a direction or moving either endpoint.
+    collapsed = np.zeros((2, 3), dtype=np.float64)
+    before = collapsed.copy()
+    xpbd_stretch_jacobi(
+        collapsed, edges, rest, inv_mass, lambdas,
+        compliance=0.0, relaxation=1.0, tension_only=True,
+    )
+    if abs(float(lambdas[0])) > 1.0e-12 or not np.array_equal(collapsed, before):
+        raise RuntimeError(
+            f"collapsed slack edge retained tension/moved: lambda={lambdas[0]}"
+        )
+    print("xpbd unilateral selftest: PASS")
 
 
 def xpbd_bending_jacobi(
@@ -2296,6 +2340,10 @@ def main() -> int:
         "--attachment-report", action="store_true",
         help="report inferred surface-corot support bindings without solving",
     )
+    ap.add_argument(
+        "--solver-selftest", action="store_true",
+        help="validate the unilateral XPBD stretch multiplier projection",
+    )
     ap.add_argument("--solve", action="store_true", help="run the experimental quasi-static shell solve")
     ap.add_argument("--output", type=Path, default=DEFAULT_DATASET / "shell_base.obj")
     ap.add_argument("--rest", choices=("base", "uniform", "lowpass"), default="base")
@@ -2371,10 +2419,11 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not any((args.inspect, args.contact_check, args.attachment_selftest, args.attachment_report, args.solve)):
+    if not any((args.inspect, args.contact_check, args.attachment_selftest,
+                args.attachment_report, args.solver_selftest, args.solve)):
         ap.error(
             "choose --inspect, --contact-check, --attachment-selftest, "
-            "--attachment-report and/or --solve"
+            "--attachment-report, --solver-selftest and/or --solve"
         )
     if args.surface_corot_mask_json and args.anchor_target != "surface-corot":
         ap.error("--surface-corot-mask-json requires --anchor-target surface-corot")
@@ -2386,6 +2435,8 @@ def main() -> int:
         attachment_selftest()
     if args.attachment_report:
         attachment_report(args.capture.resolve())
+    if args.solver_selftest:
+        xpbd_unilateral_selftest()
     if args.solve:
         solve_shell(
             args.capture.resolve(),

@@ -1,6 +1,6 @@
 # Path B — operational handoff
 
-Updated: 2026-07-15 (America/Sao_Paulo)
+Updated: 2026-07-16 (America/Sao_Paulo)
 
 Branch: `wip/path-b-shell-solve`. The commit that contains this file is the
 authoritative checkpoint; run `git log -1 --oneline` instead of copying an old
@@ -8,22 +8,35 @@ hash from this document.
 
 ## State at handoff
 
-- This checkpoint is **offline research only**. Production `MERGED`, the DLL,
-  live flags and deployed Outfit Studio copies were not changed.
-- Phase 1 remains blocked. Do not port `surface-corot`, start an energy solver,
-  add sculpt-targeted plumb or tune per garment from this checkpoint.
-- S04 completed the permitted support-boundary preflight.  Its final
-  `coherent-v1 + surface-corot + clamp` package is safe and deterministic, but
-  fails all three Heavy sentinels; RM_Thin and a C++ port remain blocked.
+- The transactional C++ Path-B pilot is implemented, rebuilt from the current
+  source, harness-validated, deployed to both Outfit Studio mod copies and
+  enabled live. Its scope is deliberately hard-coded to
+  `BlackSmithTorso` + `RM_Heavy` + Fitted/Loose only.
+- The feature is OFF by default. Live activation is the present
+  `shell_solve_on.flag`; `shell_solve_off.flag` is absent and, if created,
+  wins over both the ON flag and `DRAPE_SHELL_SOLVE=1`.
+- Deployed DLL SHA-256 (build plus both copies):
+  `6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
+- Current-source validation is green: OFF corpus `18/18`, three selftests,
+  Heavy ON twice byte-identical (`14C332CD...210F7`), and non-scoped
+  `BlackSmithBelt` ON/OFF byte-identical (`1944A076...D13`).
+- Measured Heavy harness latency is about `9.5 s` per conform. This is accepted
+  only for the narrow pilot; the all-pairs transactional gates are not ready
+  for universal rollout.
+- RM_Thin, Yarl, Vampire and every other garment remain on the legacy path.
+  Do not broaden the pilot before a new multi-garment gate/review.
 - Falmer remains benched because its saved OSD ground truth is contaminated.
-- Yarl Cloak is a clean geometry reference for section-position/anti-imprint,
-  but **not** a validated gravity reference.
 - Preserve the user's unrelated worktree files. Never stage, overwrite or
   restore:
   - `corpus/golden/fur_blacksmith_rm_heavy.json`
   - `scripts/capture_outfitstudio_vfs.ps1`
 
-## What S0.3e corrected
+The S0.3e-S05 material below is a historical research checkpoint. It is kept
+for provenance, but its old statements that C++/live work is blocked are
+superseded by Marcos 8 and 9. The Marco 9 section is authoritative for the
+active pilot.
+
+## Historical S0.3e correction (superseded)
 
 The previous “preflight complete” verdict was not reliable:
 
@@ -39,7 +52,7 @@ and `dDown=-dZ`, coverage reporting, globally exact closest-point
 distance/candidates under the existing pseudo-sign convention, per-vertex
 collision-correction traces and reproducible runners.
 
-## Current evidence
+## Historical S0.3e evidence
 
 ### Material sections
 
@@ -242,7 +255,7 @@ All four scoreboard commands intentionally exit nonzero because the tested
 candidates/control fail; that is a recorded scientific result, not a harness
 crash.
 
-## Final validation
+## Historical S0.3e-S05 validation
 
 - `pathb_support_classifier.py` selftest and `shell_spike.py
   --attachment-selftest: PASS.
@@ -255,7 +268,7 @@ crash.
 - Three independent read-only peer reviews found no remaining integration
   blocker; they agree that the Heavy failure is the scientific result.
 
-## Next permitted research step
+## Historical next-step decision (superseded by Marcos 8-9)
 
 The support-boundary step is complete and rejected at Heavy.  Do not rescue it
 with per-garment thresholds, broader coverage or RM_Thin: the paired test says
@@ -273,3 +286,136 @@ Path B needs new information before another solver family is justified:
 The production universality/belt review can proceed independently on its own
 branch.  It remains documented in `UNIVERSALITY_HANDOFF.md`; this checkpoint
 does not authorize changes to the current `MERGED` DLL.
+
+## Marco 8 audit and live-pilot scope (2026-07-16)
+
+Commit `b3b7c45` added an offline experiment with a positional gravity load on
+every solver iteration and tension-only stretch.  A post-commit peer audit
+found that its original unilateral implementation skipped compressed edges
+without projecting the accumulated multiplier.  The worktree now uses the
+proper inequality projection `lambda=min(lambda+dlambda, 0)` and includes
+`shell_spike.py --solver-selftest`.  The corrected Blacksmith g=0.02 output is
+visually/numerically almost identical to the old one (mean displacement
+between them `0.000287u`, max `0.0614u`).
+
+The broader marco-8 release claim is retracted:
+
+- Blacksmith has zero authored-normal flips, but the g=0.02 candidate replaces
+  part of the non-adjacent crossing set: 64 crossing pairs are new even though
+  the total falls from 308 to 218.  Crossing count alone was a false gate.
+- Yarl Clothes g=0.02 reaches max base-edge stretch `10.595x`.
+- Yarl Cloak g=0.02 has 21 authored-normal flips and max stretch `13.313x`.
+- Vampire g=0.02 has 61 flips and 30 faces below 10% authored area.
+- The repeated positional load is iteration-budget dependent.  It is an
+  experimental iterative load, not a demonstrated converged quasi-static
+  equilibrium.
+- `anchor-target=vanilla` and the soft-anchor field still inject `rawDiff` into
+  supported/transition vertices.  Therefore the marco-8 candidate does **not**
+  yet satisfy the strong claim that the body influences cloth only through
+  contact; that remains a model task after the live mechanics pilot.
+
+The immediate C++ work is therefore a **dark live pilot only**, hard-scoped to
+`BlackSmithTorso` + `RM_Heavy`, behind `DRAPE_SHELL_SOLVE=1` or
+`shell_solve_on.flag` and OFF by default.  No other shape/slider may enter it.
+The C++ core must match the corrected spike and publish transactionally.
+
+A viable crossing degradation was measured offline for Blacksmith g=0.02:
+iteratively restore only the vertices of newly crossing face pairs (plus exact
+seam twins) to the trusted entry.  The ring-0 closure converges in 3 rounds,
+restores 156/2316 vertices (6.74%), leaves zero new crossing pairs, preserves
+production flip/collapse/max-edge bounds, and differs from the raw simulation
+by only `0.1334u` RMS.  One- and two-ring dilation regress face orientation and
+must not be used.  This closure plus downstream body/inter-layer floors and a
+final transaction are required before live deployment.
+
+Universal Yarl/Vampire enablement remains blocked on a better support/anchor
+model and self-contact/crossing treatment.  Never describe the current sim-v2
+as corpus-clean or universally deployable.
+
+## Marco 9: transactional C++ Heavy pilot (2026-07-16)
+
+The dark C++ pilot is implemented in `algo/conform_hook.cpp`, still hard-scoped
+to `BlackSmithTorso` + `RM_Heavy` + Fitted/Loose and OFF by default. Runtime
+enablement is `DRAPE_SHELL_SOLVE=1` in the harness or `shell_solve_on.flag`
+live; `shell_solve_off.flag` has explicit precedence.
+
+An earlier literal-port build was correctly rejected by a new corresponding
+body-face gate: vertex penetrations fell slightly, but canonical triangle
+samples rose from 1,228 to 3,196. The solver now projects contact at the triangle centroid
+and three edge midpoints as well as at vertices. This is an intentional live
+safety extension over the Python marco-8 spike. It reduced the raw candidate to
+1,184 penetrating samples before transactional closure.
+
+Publication uses a monotone fixed point of three local ring-0 closures. Every
+repair only restores implicated face vertices plus exact-seam twins to a
+trusted entry pose:
+
+1. no new non-adjacent crossing pair;
+2. no new/deeper corresponding body penetration at any vertex or canonical
+   triangle sample (tolerance `1e-4u`);
+3. no new authored-normal flip, <10% area collapse, or >8x area explosion.
+
+The same fixed point runs again after the topology-safe final body floor. The
+old posterior-chord, tangential-repair and tension-plumb positional passes are
+skipped only for an accepted Path-B pilot, so nothing remodels it after its
+transaction. Any solve, convergence, seam, body, crossing, area or edge gate
+failure publishes the trusted accepted shell instead; failure before initial
+acceptance leaves the production pipeline unchanged.
+
+Canonical Heavy replay results (`DRAPE_SHELL_SOLVE=1`):
+
+- initial accepted shell: flips `14 -> 2`, vertex penetrations `193 -> 193`,
+  face samples `1231 -> 1209`, no corresponding regression, no new crossings;
+- final accepted output: flips `14 -> 0`, collapsed faces `0`, vertex
+  penetrations `193 -> 110`, face samples `1231 -> 1002`, max authored area
+  ratio `7.106x`, max edge ratio `4.065x`, exact seam split `0`;
+- two full replays are byte-identical, SHA-256
+  `14C332CD83C3AC59C092F97A0224A6EFFE6F75C8072F8C6AC50976251EB210F7`;
+- non-scoped `BlackSmithBelt/RM_Heavy` is byte-identical with the flag ON/OFF;
+- feature OFF: all four corpora pass (`18/18` shapes);
+- self-test, shadow-selftest and unilateral XPBD selftest pass;
+- informative sculpt metric: surface forward p95 improves from production
+  `2.7564u` to `2.6379u`; mean is nearly neutral/slightly worse
+  (`0.7563u -> 0.7699u`). Visual judgment remains the deciding gate.
+
+The harness returns code 4 for an ON replay because its expected diff is the
+tracked production golden; that is the expected signal that the opt-in result
+changed. Treat byte identity and the explicit Path-B log gates above as the
+pilot acceptance criteria, not equality to the old golden.
+
+Do not broaden this code to Thin, other sliders, Yarl or Vampire. The current
+gravity remains an iteration load and vanilla soft/hard anchors still inject
+`rawDiff`; a converged energy model and a better support law remain future Path
+B research, not claims of this pilot.
+
+### Current-source reproduction and live deployment
+
+Run from `E:\SkyrimDev\Drape` with Outfit Studio closed:
+
+```powershell
+$h = '.\build\algo\RelWithDebInfo\drape-harness.exe'
+$py = 'C:\Users\T-Gamer\AppData\Local\Python\bin\python.exe'
+& $h --self-test
+& $h --shadow-selftest
+& $py .\tools\shell_spike.py --solver-selftest
+& $py .\scripts\check_corpus.py --harness $h --corpus-root .\corpus
+
+$env:DRAPE_SHELL_SOLVE = '1'
+& $h --replay '.\corpus\fur_blacksmith_rm_heavy\drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap' `
+  --result-obj '.\tmp\pathb\repro_heavy_on.obj'
+Remove-Item Env:DRAPE_SHELL_SOLVE
+```
+
+The final ON replay intentionally exits `4` against the old production golden.
+It must log both local closures with `stable=1`, `publish ... accepted=1`, and
+`final accepted=1`; its OBJ SHA-256 must be `14C332CD...210F7`.
+
+The DLL was copied only to:
+
+- `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
+- `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
+
+Both deployed copies and the build artifact have SHA-256
+`6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
+Live state at handoff: `shell_solve_on.flag` present,
+`shell_solve_off.flag` absent. Restart Outfit Studio before visual testing.

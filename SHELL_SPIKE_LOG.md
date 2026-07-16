@@ -1103,3 +1103,84 @@ Probe blacksmith (g_iter ∈ {0.02,0.05,0.10}, 6 steps × 10 iters):
 
 Pacote visual pro gate do usuário: `tmp/simv2_visual/` (4 garments ×
 {produção, g=0.02, g=0.05}), determinístico. Aguardando o olho dele no OS.
+
+### 2026-07-16 — auditoria corretiva do marco 8
+
+O gate acima era estreito demais. A desigualdade de stretch agora projeta a
+lambda acumulada (`lambda=min(lambda+dlambda,0)`) em vez de simplesmente pular
+`c<=0`; `--solver-selftest` congela essa lei. No Blacksmith g=.02 a correção
+quase não muda a forma (mean/max `0.000287/0.0614u`).
+
+Recontagem com gates que o relatório original não executava:
+- Blacksmith: 0 flips, mas 64 pares de crossing não-adjacente NOVOS;
+- Yarl Clothes: max stretch 10.595x;
+- Yarl Cloak: 21 flips, max stretch 13.313x;
+- Vampire: 61 flips e 30 faces com área <10% do authored.
+
+Logo, “invariantes limpos” só descrevia o recorte Blacksmith sem crossing-set;
+não vale para o pacote multi-garment. A carga posicional também depende do
+budget de iterações e ainda não prova equilíbrio quase-estático convergido.
+Além disso, `anchor-target=vanilla` ainda injeta `rawDiff` nos hard/soft
+supports: a promessa forte “o corpo só influencia por contato” ainda não é
+verdadeira neste marco.
+
+Decisão: port C++ somente como piloto dark de `BlackSmithTorso/RM_Heavy`, flag
+OFF por default. Antes de publicar, aplicar closure ring-0 dos crossings novos
+(rollback das duas faces + twins até fixpoint). O protótipo dessa transação
+reverte 156/2316 verts, zera crossings novos e preserva 93.3% do candidato.
+Yarl/Vampire continuam bloqueados.
+
+### 2026-07-16 - marco 9: piloto C++ transacional aceito no harness
+
+Um build anterior do port literal revelou um erro que o spike offline nao media: contato apenas
+nos vertices deixava o interior dos triangulos atravessar o corpo. O primeiro
+gate correspondente recusou corretamente o candidato (`1228 -> 3196` samples
+penetrantes), publicando byte-a-byte a producao antiga.
+
+Foi adicionado contato de face nos mesmos quatro samples canonicos do gate
+(centroide + tres meios de aresta), distribuido baricentricamente pelos tres
+vertices segundo a mobilidade. O solve passou a sair com 1184 samples
+penetrantes, abaixo dos 1228 da entrada. As poucas trocas locais restantes sao
+fechadas por um ponto fixo ring-0 monotonico, alternando:
+
+1. inclusao do conjunto de crossings;
+2. contato correspondente vertice+face, tolerancia `1e-4u`;
+3. orientacao/area autoral das faces.
+
+O mesmo fechamento roda depois do body floor transacional final. Resultado do
+capture canonico Blacksmith Heavy: `flips 14->0`, `collapse 0`,
+`vertexPen 193->110`, `facePen 1231->1002`, `maxArea 7.106x`,
+`maxEdge 4.065x`, seam split `0`, zero regressao correspondente e zero crossing
+novo. Dois replays produziram SHA-256 identico
+`14C332CD83C3AC59C092F97A0224A6EFFE6F75C8072F8C6AC50976251EB210F7`.
+
+Gates de release offline: self-test PASS, shadow-selftest PASS,
+`shell_spike.py --solver-selftest` PASS, flag OFF corpus `18/18`, e prova de
+escopo BlackSmithBelt ON/OFF byte-identica. Metrica informativa contra sculpt:
+surface-forward p95 `2.7564 -> 2.6379`; media `0.7563 -> 0.7699`.
+
+Escopo continua deliberadamente estreito: somente `BlackSmithTorso/RM_Heavy`.
+Yarl/Vampire/Thin permanecem bloqueados. O modelo ainda usa carga por iteracao
+e anchors vanilla; nao chamar de equilibrio energetico universal.
+
+### Fechamento de release do marco 9 (fonte atual)
+
+Depois do review final, dois fail-closed foram adicionados antes do rebuild:
+
+- rejeicao preflight de qualquer indice de triangulo fora do array de vertices;
+- publicacao inicial exige um ciclo de closure sem nenhuma mudanca
+  (`stable=1`), alem de todos os contadores chegarem a zero.
+
+DLL e harness foram entao reconstruidos juntos da fonte atual (`0` warnings,
+`0` errors) e toda a matriz foi repetida, sem reutilizar o harness anterior:
+self-test PASS, shadow-selftest PASS, XPBD unilateral PASS, corpus OFF `18/18`,
+Heavy ON `2x` byte-identico (`14C332CD...210F7`) e Belt ON/OFF byte-identico
+(`1944A076...D13`). Os logs atuais confirmam `stable=1` nos dois closures,
+`publish accepted=1`, `final accepted=1`, zero crossing novo e zero regressao
+correspondente. Latencia Heavy medida: `9.50 s` e `9.46 s` no harness; custo
+aceito apenas para o piloto estreito.
+
+Deploy concluido com Outfit Studio/BodySlide fechados. Build e as duas copias
+instaladas possuem SHA-256
+`6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
+Estado live: `shell_solve_on.flag` presente, `shell_solve_off.flag` ausente.

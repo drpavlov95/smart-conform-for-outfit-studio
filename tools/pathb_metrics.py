@@ -8,8 +8,12 @@
 #   - profile  : back panel outward extent by z (bulge/imprint probe)
 #   - hem      : on a FROZEN authored vertex-ID list, radial spread std +
 #                mean nearest-neighbour distance among the hem verts
-#   - integrity: new flipped faces / degenerate faces / open exact-seams /
-#                new non-adjacent triangle crossings / NaN  (vs the authored base)
+#   - integrity: flipped faces / degenerate faces / open exact-seams / NaN
+#                (vs the authored base)
+#
+# IMPORTANT: this module does NOT currently measure non-adjacent crossing-set
+# inclusion or final body-contact floors.  Those are separate hard release
+# gates; do not interpret an ``integrity`` PASS here as proof of either one.
 #
 # Surface distance is EXACT: candidate triangles via a centroid KD-tree, exact
 # point-triangle clamping, ring/k expanded until the k-th centroid is farther
