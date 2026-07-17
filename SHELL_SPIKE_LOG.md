@@ -921,7 +921,7 @@ Próximo passo permitido: preflight da **classificação/fronteira de suporte**
 presa) e/ou aquisição de ground truth gravitacional limpo. Não construir solver
 energético nem plumb mirado antes disso.
 
-## Marco 9 - S04 support-boundary preflight e Heavy gate (2026-07-15)
+## Fase historica S04 - support-boundary preflight REJEITADO (2026-07-15)
 
 O passo permitido no marco anterior foi executado sem tocar produção, DLL ou
 flags live. A pesquisa separou duas coisas que o classificador antigo misturava:
@@ -1194,7 +1194,65 @@ o piloto. Correcao de nomenclatura: a UI atual tem um unico preset `Cloth`;
 fitted/loose sao apenas enums historicos aceitos para compatibilidade de
 captures.
 
-Defeito residual confirmado: a roupa ainda marca/entra demais no sulco da
-bunda. Aguardar screenshot e/ou OBJ pos-conform atual antes de escolher a
-proxima alavanca. Preservar este resultado como baseline comparativo e reduzir
-o imprint local sem reintroduzir influencia do corpo no pano livre.
+Defeito residual refinado pelo usuario: alem de marcar o sulco, regioes que ja
+nao tocam o corpo ainda carregam a sua curva; paineis que deveriam pender quase
+a prumo mostram "magnetismo". O gate global sem sculpt tem 306 faces livres,
+originalmente quase verticais e a pelo menos 2.5u do corpo no authored/raw: OFF
+`2.895/6.783 deg`, live `3.164/7.189 deg` area-mean/area-p90. O sentinela
+posterior Blacksmith (`y<=-6,z=35..65`) tem 78 faces: OFF `2.609/6.0`, live
+`3.180/7.2` area-mean/p90 comum. Os bounds sao fixture local, nao classificador
+universal. O gate sempre deve ser pareado com distancia ao corpo.
+
+Ablacoes de soft anchor, cleft bridge, layer tuck e support cap nao separam o
+defeito; remover layer tuck ainda piora Torso/Belt. Um reset para o shell puro
+foi rejeitado por ondulacao diagonal (`13.16/46.52 deg` no juiz fino). Um
+primeiro settle dinamico v3, com massa uniforme nos vertices moveis, apenas
+hard attachments, edges bilaterais, diedro analitico, gravidade e contato
+unilateral, tambem foi rejeitado: reduziu raw-follow colando o pano no corpo
+(gap medio `.959u`, 37/60 abaixo de 1u) e nao convergiu em 60 frames (RMS speed
+`.456u/s`). Nenhum destes candidatos foi deployado.
+
+Nova direcao autorizada pelo usuario: aproximar o Path B de cloth sim real. O
+primeiro probe isolado testa preservacao bilateral de arestas/forma triangular
+contra o tension-only atual; depois corrigir integracao XPBD, contato e
+convergencia no harness. A regra permanece: sem heuristica por garment/sculpt,
+sem rawDiff em vertices livres, e sem deploy antes de vencer simultaneamente
+prumo, gap e todos os gates de integridade do marco 9.
+
+### 2026-07-16 - marco 10: bilateral isolado negativo; rest metric identificado
+
+O toggle C++ `DRAPE_SHELL_TENSION_ONLY=0` preservou todos os gates e o default
+continuou byte-identico, mas mudou apenas `.0211u/.0719u` mean/p95 e piorou
+levemente o diagnostico antigo de magnetismo (`444 -> 448`). Nao foi deployado:
+o teste mostra que rigidez bilateral sozinha nao resolve o solver posicional.
+
+A auditoria do dynamic v3 encontrou a causa do colapso no corpo: ele impunha
+L0 da roupa base/slim enquanto os supports ja estavam no Heavy. Raw/base nas
+arestas da malha tem p50 `1.2186x`, p95 `1.9630x`; nas active-active,
+`1.1236x/1.9857x`. O hand-sculpt confirma praticamente a mesma metrica
+intrinseca (`1.1024x/2.0627x`). Assim, usar L0=base contrai o tubo contra o
+corpo; o defeito que queremos remover e extrinseco, nao o tamanho graded.
+
+Contrato novo do probe: usar `Lraw` sem usar posicao raw como atrator; iniciar
+em raw/body final com supports hard raw, sem soft field, e relaxar por gravidade
+e contato sem atrito. Na continuacao, interpolar multiplicativamente
+`L(t)=Lbase*exp(t*log(Lraw/Lbase))`. Tambem foi corrigida no laboratorio a
+estrutura XPBD: o Jacobi antigo acumulava lambda integral mas dividia so a
+correcao posicional por valencia. O spike agora tem batches GS deterministas,
+gradiente diedral analitico e selftests. Tudo permanece harness-only; DLL live
+continua no marco 9.
+
+Resultados atuais: nenhum probe fisico vence o live global (`3.164/7.189 deg`
+area-mean/area-p90). Raw-metric continuation `4.313/8.440`; raw-settle Jacobi
+`4.122/7.473`; GS soft `4.386/8.814`; GS medium `4.141/8.414`; physical GS
+strong `4.398/7.871`. Os ultimos preservam/aumentam gap, entao nao trapaceiam
+colando no corpo, mas pioram prumo. O strong nao converge em 90 frames e termina
+com 5 flips, 1 collapse, p95 stretch 1.0667x; active floor violations 0, fixed
+legacy supports dentro do floor 145. Rejeitado, sem deploy.
+
+Controle estrutural: sem contato, `g=0,x0=raw,L0=Lraw,bend=off` fica exatamente
+raw (erro/strain zero, converge em 1 frame). O core de membrana/integracao passa
+o invariante; isso nao e candidato visual porque raw preserva o pose body-follow.
+Proximo bloqueio e contato/support fisico e controle de folds/self-collision,
+nao sweep de gravidade. O DLL live continua sendo o artefato marco-9
+`6B325B...`; o toggle bilateral da fonte/harness nao foi deployado.

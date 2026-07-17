@@ -7821,7 +7821,8 @@ static void PathBStretchJacobi(
     const std::vector<PathBShellEdge>& edges,
     const std::vector<float>& invMass,
     std::vector<float>& lambdas,
-    float compliance)
+    float compliance,
+    bool tensionOnly)
 {
     const size_t n = x.size();
     std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
@@ -7836,11 +7837,17 @@ static void PathBStretchJacobi(
         float denom = invMass[e.a] + invMass[e.b] + compliance;
         if (denom <= 1.0e-30f) continue;
         float dl = (-c - compliance * lambdas[ei]) / denom;
-        // C=length-rest<=0, therefore lambda<=0. Project the accumulated
-        // multiplier every iteration so slack edges discharge stale tension.
-        float projected = std::min(lambdas[ei] + dl, 0.0f);
-        dl = projected - lambdas[ei];
-        lambdas[ei] = projected;
+        if (tensionOnly) {
+            // C=length-rest<=0, therefore lambda<=0. Project the accumulated
+            // multiplier every iteration so slack edges discharge stale tension.
+            float projected = std::min(lambdas[ei] + dl, 0.0f);
+            dl = projected - lambdas[ei];
+            lambdas[ei] = projected;
+        } else {
+            // Experimental bilateral cloth edge: preserve compression as well
+            // as tension so triangles move more like inextensible panels.
+            lambdas[ei] += dl;
+        }
         delta[e.a] = Add(delta[e.a], Scale(normal, invMass[e.a] * dl));
         delta[e.b] = Add(delta[e.b], Scale(normal, -invMass[e.b] * dl));
         if (invMass[e.a] > 0.0f) count[e.a] += 1.0f;
@@ -8411,6 +8418,7 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_STRETCH_COMPLIANCE", 2.0e-4f));
     const float bendCompliance = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_BEND_COMPLIANCE", 2.0e-2f));
+    const bool tensionOnly = EnvToggle("DRAPE_SHELL_TENSION_ONLY", true);
     std::vector<float> contactFloor(n, clearance);
     for (size_t i = 0; i < n; ++i) {
         float authoredGap = 0.0f;
@@ -8439,9 +8447,9 @@ static bool PathBSimV2Solve(
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
-    HLog("path-b-shell: solve begin verts=%zu edges=%zu hinges=%zu seams=%zu active=%d fixed=%d g=%.4f stretchC=%.6g bendC=%.6g",
+    HLog("path-b-shell: solve begin verts=%zu edges=%zu hinges=%zu seams=%zu active=%d fixed=%d g=%.4f stretchC=%.6g bendC=%.6g tensionOnly=%d",
          n, edges.size(), hinges.size(), exactSeamGroups.size(), active, hard,
-         gravity, stretchCompliance, bendCompliance);
+         gravity, stretchCompliance, bendCompliance, tensionOnly ? 1 : 0);
 
     static constexpr int kMorphSteps = 6;
     static constexpr int kIterations = 10;
@@ -8475,7 +8483,8 @@ static bool PathBSimV2Solve(
                 if (fixed[i]) x[i] = anchorTarget[i];
                 x[i].z -= gravity * invMass[i];
             }
-            PathBStretchJacobi(x, edges, invMass, stretchLambda, stretchCompliance);
+            PathBStretchJacobi(x, edges, invMass, stretchLambda,
+                               stretchCompliance, tensionOnly);
             PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance);
             faceContactMoves += PathBFaceContactProject(
                 x, tris, invMass, body, faceContactFloor,

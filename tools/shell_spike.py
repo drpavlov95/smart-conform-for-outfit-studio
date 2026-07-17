@@ -304,6 +304,63 @@ def topology_stats(verts: np.ndarray, tris: np.ndarray):
     }
 
 
+@dataclass(frozen=True)
+class SeamReducedShell:
+    vertex_to_node: np.ndarray
+    node_members: tuple[np.ndarray, ...]
+    base_verts: np.ndarray
+    raw_verts: np.ndarray
+    tris: np.ndarray
+
+
+def reduce_exact_seam_dofs(
+    base_verts: np.ndarray,
+    raw_verts: np.ndarray,
+    tris: np.ndarray,
+    seam_groups: list[list[int]],
+) -> SeamReducedShell:
+    """Collapse exact authored seam twins into physical solver DOFs."""
+    dsu = DSU(len(base_verts))
+    for group in seam_groups:
+        for vertex in group[1:]:
+            dsu.union(int(group[0]), int(vertex))
+    by_root: dict[int, list[int]] = {}
+    for vertex in range(len(base_verts)):
+        by_root.setdefault(dsu.find(vertex), []).append(vertex)
+    members = tuple(
+        np.asarray(group, dtype=np.int32)
+        for group in sorted(by_root.values(), key=lambda group: min(group))
+    )
+    vertex_to_node = np.empty(len(base_verts), dtype=np.int32)
+    node_base = np.empty((len(members), 3), dtype=np.float64)
+    node_raw = np.empty_like(node_base)
+    for node, group in enumerate(members):
+        vertex_to_node[group] = node
+        node_base[node] = np.mean(base_verts[group], axis=0)
+        node_raw[node] = np.mean(raw_verts[group], axis=0)
+        if np.max(np.linalg.norm(base_verts[group] - node_base[node], axis=1)) > 1.0e-10:
+            raise ValueError("authored exact seam group is not actually coincident")
+        if np.max(np.linalg.norm(raw_verts[group] - node_raw[node], axis=1)) > 1.0e-6:
+            raise ValueError("raw conform splits an exact authored seam group")
+    node_tris = vertex_to_node[np.asarray(tris, dtype=np.int32)]
+    if np.any(
+        (node_tris[:, 0] == node_tris[:, 1])
+        | (node_tris[:, 1] == node_tris[:, 2])
+        | (node_tris[:, 2] == node_tris[:, 0])
+    ):
+        raise ValueError("seam reduction creates a degenerate triangle")
+    canonical = np.sort(node_tris, axis=1)
+    if len({tuple(row) for row in canonical}) != len(canonical):
+        raise ValueError("seam reduction creates duplicate triangles")
+    return SeamReducedShell(
+        vertex_to_node=vertex_to_node,
+        node_members=members,
+        base_verts=node_base,
+        raw_verts=node_raw,
+        tris=node_tris,
+    )
+
+
 def triangle_adjacency(tris: np.ndarray) -> list[list[int]]:
     edge_owner: dict[tuple[int, int], int] = {}
     adjacency: list[list[int]] = [[] for _ in range(len(tris))]
@@ -590,6 +647,91 @@ class UniformBodyCollider:
                 return result
             k = min(k * 2, count)
 
+    def closest_many(
+        self, points: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Exact deterministic closest queries with a vectorized KD broad phase."""
+        points = np.asarray(points, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("closest_many expects an Nx3 point array")
+        if not np.all(np.isfinite(points)):
+            raise ValueError("closest_many received NaN/Inf")
+        count_points = len(points)
+        closest = np.full((count_points, 3), np.nan, dtype=np.float64)
+        normals = np.full_like(closest, np.nan)
+        gaps = np.full(count_points, np.nan, dtype=np.float64)
+        triangle_ids = np.full(count_points, -1, dtype=np.int32)
+        if not count_points:
+            return closest, normals, gaps, triangle_ids
+        if self.centroid_tree is None:
+            for index, point in enumerate(points):
+                result = self._closest_grid_exact(point)
+                if result is None:
+                    continue
+                cp, normal, gap, triangle = result
+                closest[index] = cp
+                normals[index] = normal
+                gaps[index] = gap
+                triangle_ids[index] = triangle
+            return closest, normals, gaps, triangle_ids
+
+        triangle_count = len(self.tris)
+        unresolved = np.arange(count_points, dtype=np.int32)
+        k = min(32, triangle_count)
+        while len(unresolved):
+            centroid_distance, candidates = self.centroid_tree.query(
+                points[unresolved], k=k
+            )
+            centroid_distance = np.asarray(centroid_distance).reshape(len(unresolved), k)
+            candidates = np.asarray(candidates, dtype=np.int32).reshape(len(unresolved), k)
+            # Stable smallest-triangle-ID tie break, matching closest().
+            order = np.argsort(candidates, axis=1, kind="stable")
+            candidates = np.take_along_axis(candidates, order, axis=1)
+            centroid_distance = np.take_along_axis(
+                centroid_distance, order, axis=1
+            )
+            flat_candidates = candidates.reshape(-1)
+            repeated_points = np.repeat(points[unresolved], k, axis=0)
+            candidate_points = closest_points_triangles(
+                repeated_points,
+                self.a[flat_candidates],
+                self.b[flat_candidates],
+                self.c[flat_candidates],
+            ).reshape(len(unresolved), k, 3)
+            delta = candidate_points - points[unresolved, None, :]
+            distance2 = np.einsum("nki,nki->nk", delta, delta)
+            local = np.argmin(distance2, axis=1)
+            row = np.arange(len(unresolved))
+            best_distance = np.sqrt(distance2[row, local])
+            best_triangle = candidates[row, local]
+            best_point = candidate_points[row, local]
+            # The kth distance must come from the original distance order, not
+            # the ID-sorted candidates used for deterministic tie breaking.
+            kth_distance = np.max(centroid_distance, axis=1)
+            proven = (
+                (k >= triangle_count)
+                | (kth_distance - self.max_triangle_radius >= best_distance)
+            )
+            accepted = unresolved[proven]
+            accepted_local = np.flatnonzero(proven)
+            accepted_tri = best_triangle[accepted_local]
+            accepted_point = best_point[accepted_local]
+            accepted_normal = self.normals[accepted_tri]
+            accepted_delta = points[accepted] - accepted_point
+            sign = np.einsum("ij,ij->i", accepted_delta, accepted_normal)
+            accepted_distance = best_distance[accepted_local]
+            closest[accepted] = accepted_point
+            normals[accepted] = accepted_normal
+            gaps[accepted] = np.where(sign < 0.0, -accepted_distance, accepted_distance)
+            triangle_ids[accepted] = accepted_tri
+            unresolved = unresolved[~proven]
+            if not len(unresolved):
+                break
+            if k >= triangle_count:
+                raise RuntimeError("closest_many failed to resolve an exact query")
+            k = min(k * 2, triangle_count)
+        return closest, normals, gaps, triangle_ids
+
     def project(
         self,
         verts: np.ndarray,
@@ -616,12 +758,7 @@ class UniformBodyCollider:
     def gaps(self, verts: np.ndarray, indices: np.ndarray | None = None) -> np.ndarray:
         if indices is None:
             indices = np.arange(len(verts), dtype=np.int32)
-        out = np.full(len(indices), np.nan, dtype=np.float64)
-        for oi, vi in enumerate(indices):
-            result = self.closest(verts[vi])
-            if result is not None:
-                out[oi] = result[2]
-        return out
+        return self.closest_many(verts[indices])[2]
 
 
 def barycentric_coordinates(point: np.ndarray, triangle: np.ndarray) -> np.ndarray | None:
@@ -645,6 +782,441 @@ def barycentric_coordinates(point: np.ndarray, triangle: np.ndarray) -> np.ndarr
     bary = np.clip(bary, 0.0, 1.0)
     total = float(bary.sum())
     return bary / total if total > 1.0e-20 else None
+
+
+@dataclass
+class BodyContactStats:
+    projected: int = 0
+    kinematic_violations: int = 0
+    worst_correction: float = 0.0
+    node_projected: int = 0
+    edge_projected: int = 0
+    face_projected: int = 0
+    worst_kind: str = "none"
+    worst_owner: int = -1
+    worst_gap: float = 0.0
+    worst_floor: float = 0.0
+
+
+@dataclass(frozen=True)
+class BodyContactFloors:
+    node: np.ndarray
+    edge: np.ndarray
+    face: np.ndarray
+
+
+def build_body_contact_floors(
+    authored_verts: np.ndarray,
+    final_raw_verts: np.ndarray,
+    edges: np.ndarray,
+    tris: np.ndarray,
+    authored_body: UniformBodyCollider,
+    final_body: UniformBodyCollider,
+    clearance: float,
+) -> BodyContactFloors:
+    """Freeze a no-worse unilateral floor for every contact quadrature point.
+
+    Clothing/body datasets intentionally contain inherited intersections.  A
+    vertex floor cannot represent an edge midpoint or centroid that already
+    crosses the body, so each unique sample receives its own endpoint floor.
+    Samples that are clear at both endpoints receive physical ``clearance``;
+    inherited crossings may not become deeper, but are not teleported through
+    the body during initialization.
+    """
+    if not np.isfinite(clearance) or clearance < 0.0:
+        raise ValueError("contact clearance must be finite and non-negative")
+
+    def endpoint_floor(
+        authored_points: np.ndarray, final_points: np.ndarray
+    ) -> np.ndarray:
+        authored_gap = authored_body.gaps(authored_points)
+        final_gap = final_body.gaps(final_points)
+        if not np.all(np.isfinite(authored_gap)) or not np.all(np.isfinite(final_gap)):
+            raise ValueError("contact floor endpoint query returned NaN/Inf")
+        return np.minimum(np.minimum(authored_gap, final_gap), clearance)
+
+    node = endpoint_floor(authored_verts, final_raw_verts)
+    edge = endpoint_floor(
+        0.5 * (authored_verts[edges[:, 0]] + authored_verts[edges[:, 1]]),
+        0.5 * (final_raw_verts[edges[:, 0]] + final_raw_verts[edges[:, 1]]),
+    )
+    face = endpoint_floor(
+        authored_verts[tris].mean(axis=1),
+        final_raw_verts[tris].mean(axis=1),
+    )
+    return BodyContactFloors(node=node, edge=edge, face=face)
+
+
+def project_weighted_body_sample(
+    verts: np.ndarray,
+    indices: np.ndarray,
+    bary: np.ndarray,
+    inv_mass: np.ndarray,
+    collider: UniformBodyCollider,
+    floor: float,
+) -> tuple[bool, bool, float, np.ndarray | None, float]:
+    """Project one material sample against the body.
+
+    ``p=sum(bary*x)`` is a node, unique material-edge midpoint, or triangle
+    centroid.  The positional correction is distributed with the standard
+    mass-weighted constraint gradient, so mixed fixed/mobile samples remain
+    solvable without moving their kinematic support nodes.
+    """
+    if not np.isfinite(floor):
+        return False, False, 0.0, None, float("nan")
+    denominator = float(np.sum(inv_mass[indices] * bary * bary))
+    # Kinematic samples cannot be projected.  Their inherited no-worse status
+    # is checked once by the final diagnostics rather than paying a collider
+    # query in every solver iteration.
+    if denominator <= 1.0e-30:
+        return False, False, 0.0, None, float("nan")
+    point = np.sum(verts[indices] * bary[:, None], axis=0)
+    result = collider.closest(point)
+    if result is None:
+        return False, False, 0.0, None, float("nan")
+    closest, normal, gap, _body_tri = result
+    if gap >= floor:
+        return False, False, 0.0, normal, float(gap)
+    # Use the full closest-point target.  At a body edge/vertex this also
+    # contains the tangential component required to land on the offset
+    # surface; a scalar normal-depth correction is exact only in a face plane.
+    sample_delta = closest + normal * floor - point
+    distribution = inv_mass[indices] * bary / denominator
+    node_delta = distribution[:, None] * sample_delta
+    verts[indices] += node_delta
+    return (
+        True,
+        False,
+        float(np.max(np.linalg.norm(node_delta, axis=1))),
+        normal,
+        float(gap),
+    )
+
+
+def project_cloth_body_samples(
+    verts: np.ndarray,
+    edges: np.ndarray,
+    tris: np.ndarray,
+    inv_mass: np.ndarray,
+    collider: UniformBodyCollider,
+    floors: BodyContactFloors,
+    contact_count: np.ndarray | None = None,
+) -> BodyContactStats:
+    """Project unique nodes, material-edge midpoints, and face centroids.
+
+    Sampling unique material edges avoids applying the same midpoint contact
+    twice through adjacent triangles.  Together with one centroid per face it
+    covers the four interior samples used by the production face-contact gate.
+    """
+    stats = BodyContactStats()
+
+    def apply(
+        indices: np.ndarray,
+        bary: np.ndarray,
+        kind: str,
+        owner: int,
+        floor: float,
+    ) -> None:
+        moved, kinematic, worst, _normal, gap = project_weighted_body_sample(
+            verts, indices, bary, inv_mass, collider, floor
+        )
+        if kinematic:
+            stats.kinematic_violations += 1
+        if not moved:
+            return
+        stats.projected += 1
+        if worst > stats.worst_correction:
+            stats.worst_correction = worst
+            stats.worst_kind = kind
+            stats.worst_owner = owner
+            stats.worst_gap = gap
+            stats.worst_floor = floor
+        if kind == "node":
+            stats.node_projected += 1
+        elif kind == "edge":
+            stats.edge_projected += 1
+        else:
+            stats.face_projected += 1
+        if contact_count is not None:
+            mobile = indices[inv_mass[indices] > 0.0]
+            contact_count[mobile] += 1
+
+    edge_bary = np.asarray([0.5, 0.5], dtype=np.float64)
+    face_bary = np.asarray([1.0 / 3.0] * 3, dtype=np.float64)
+
+    # Exact vectorized pre-query: almost all quadrature points are already
+    # outside their frozen floor, so only the small violating set needs a
+    # sequential GS re-query/correction.
+    node_ids = np.flatnonzero(inv_mass > 0.0).astype(np.int32)
+    edge_ids = np.flatnonzero(
+        np.sum(inv_mass[edges] * edge_bary[None, :] ** 2, axis=1) > 1.0e-30
+    ).astype(np.int32)
+    face_ids = np.flatnonzero(
+        np.sum(inv_mass[tris] * face_bary[None, :] ** 2, axis=1) > 1.0e-30
+    ).astype(np.int32)
+    points = np.concatenate(
+        (
+            verts[node_ids],
+            0.5 * (verts[edges[edge_ids, 0]] + verts[edges[edge_ids, 1]]),
+            verts[tris[face_ids]].mean(axis=1),
+        ),
+        axis=0,
+    )
+    sample_floors = np.concatenate(
+        (floors.node[node_ids], floors.edge[edge_ids], floors.face[face_ids])
+    )
+    if len(points):
+        gap = collider.closest_many(points)[2]
+        if not np.all(np.isfinite(gap)):
+            raise RuntimeError("body contact pre-query returned NaN/Inf")
+        violating = np.flatnonzero(gap < sample_floors).astype(np.int32)
+    else:
+        violating = np.empty(0, dtype=np.int32)
+    node_end = len(node_ids)
+    edge_end = node_end + len(edge_ids)
+    for sample_id in violating:
+        sid = int(sample_id)
+        if sid < node_end:
+            owner = int(node_ids[sid])
+            apply(
+                np.asarray([owner], dtype=np.int32),
+                np.asarray([1.0]),
+                "node",
+                owner,
+                float(floors.node[owner]),
+            )
+        elif sid < edge_end:
+            owner = int(edge_ids[sid - node_end])
+            apply(
+                edges[owner], edge_bary, "edge", owner,
+                float(floors.edge[owner]),
+            )
+        else:
+            owner = int(face_ids[sid - edge_end])
+            apply(
+                tris[owner], face_bary, "face", owner,
+                float(floors.face[owner]),
+            )
+    return stats
+
+
+def body_surface_velocity(
+    collider: UniformBodyCollider,
+    body_velocity: np.ndarray,
+    closest_point: np.ndarray,
+    body_triangle: int,
+) -> np.ndarray:
+    bary = barycentric_coordinates(
+        closest_point, collider.verts[collider.tris[body_triangle]]
+    )
+    if bary is None:
+        return body_velocity[collider.tris[body_triangle]].mean(axis=0)
+    return np.sum(
+        body_velocity[collider.tris[body_triangle]] * bary[:, None], axis=0
+    )
+
+
+def resolve_weighted_contact_velocity(
+    verts: np.ndarray,
+    velocity: np.ndarray,
+    indices: np.ndarray,
+    bary: np.ndarray,
+    inv_mass: np.ndarray,
+    collider: UniformBodyCollider,
+    body_velocity: np.ndarray,
+    floor: float,
+    manifold_tolerance: float,
+) -> bool:
+    """Remove only inward velocity relative to the moving body surface."""
+    if not np.isfinite(floor):
+        return False
+    denominator = float(np.sum(inv_mass[indices] * bary * bary))
+    if denominator <= 1.0e-30:
+        return False
+    point = np.sum(verts[indices] * bary[:, None], axis=0)
+    result = collider.closest(point)
+    if result is None:
+        return False
+    closest, normal, gap, body_tri = result
+    if gap > floor + manifold_tolerance:
+        return False
+    cloth_velocity = np.sum(velocity[indices] * bary[:, None], axis=0)
+    surface_velocity = body_surface_velocity(
+        collider, body_velocity, closest, body_tri
+    )
+    relative_normal_speed = float(np.dot(cloth_velocity - surface_velocity, normal))
+    if relative_normal_speed >= 0.0:
+        return False
+    impulse = -relative_normal_speed / denominator
+    velocity[indices] += (
+        inv_mass[indices] * bary * impulse
+    )[:, None] * normal
+    return True
+
+
+def resolve_cloth_body_velocities(
+    verts: np.ndarray,
+    velocity: np.ndarray,
+    edges: np.ndarray,
+    tris: np.ndarray,
+    inv_mass: np.ndarray,
+    collider: UniformBodyCollider,
+    body_velocity: np.ndarray,
+    floors: BodyContactFloors,
+    manifold_tolerance: float,
+) -> int:
+    resolved = 0
+
+    def apply(indices: np.ndarray, bary: np.ndarray, floor: float) -> None:
+        nonlocal resolved
+        resolved += int(
+            resolve_weighted_contact_velocity(
+                verts, velocity, indices, bary, inv_mass, collider,
+                body_velocity, floor, manifold_tolerance,
+            )
+        )
+
+    edge_bary = np.asarray([0.5, 0.5])
+    face_bary = np.asarray([1.0 / 3.0] * 3)
+    node_ids = np.flatnonzero(inv_mass > 0.0).astype(np.int32)
+    edge_ids = np.flatnonzero(
+        np.sum(inv_mass[edges] * edge_bary[None, :] ** 2, axis=1) > 1.0e-30
+    ).astype(np.int32)
+    face_ids = np.flatnonzero(
+        np.sum(inv_mass[tris] * face_bary[None, :] ** 2, axis=1) > 1.0e-30
+    ).astype(np.int32)
+    points = np.concatenate(
+        (
+            verts[node_ids],
+            0.5 * (verts[edges[edge_ids, 0]] + verts[edges[edge_ids, 1]]),
+            verts[tris[face_ids]].mean(axis=1),
+        ),
+        axis=0,
+    )
+    sample_floors = np.concatenate(
+        (floors.node[node_ids], floors.edge[edge_ids], floors.face[face_ids])
+    )
+    gap = collider.closest_many(points)[2] if len(points) else np.empty(0)
+    manifold = np.flatnonzero(
+        gap <= sample_floors + manifold_tolerance
+    ).astype(np.int32)
+    node_end = len(node_ids)
+    edge_end = node_end + len(edge_ids)
+    for sample_id in manifold:
+        sid = int(sample_id)
+        if sid < node_end:
+            owner = int(node_ids[sid])
+            apply(
+                np.asarray([owner], dtype=np.int32), np.asarray([1.0]),
+                float(floors.node[owner]),
+            )
+        elif sid < edge_end:
+            owner = int(edge_ids[sid - node_end])
+            apply(edges[owner], edge_bary, float(floors.edge[owner]))
+        else:
+            owner = int(face_ids[sid - edge_end])
+            apply(tris[owner], face_bary, float(floors.face[owner]))
+    return resolved
+
+
+def cloth_body_sample_diagnostics(
+    verts: np.ndarray,
+    edges: np.ndarray,
+    tris: np.ndarray,
+    inv_mass: np.ndarray,
+    collider: UniformBodyCollider,
+    floors: BodyContactFloors,
+    tolerance: float = 1.0e-6,
+) -> dict[str, float | int]:
+    """Measure node plus unique edge/face interior contact constraints."""
+    edge_bary = np.asarray([0.5, 0.5])
+    face_bary = np.asarray([1.0 / 3.0] * 3)
+    rows: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {
+        "node": (
+            collider.closest_many(verts)[2],
+            floors.node,
+            inv_mass > 0.0,
+        ),
+        "edge": (
+            collider.closest_many(
+                0.5 * (verts[edges[:, 0]] + verts[edges[:, 1]])
+            )[2],
+            floors.edge,
+            np.sum(
+                inv_mass[edges] * edge_bary[None, :] ** 2, axis=1
+            ) > 1.0e-30,
+        ),
+        "face": (
+            collider.closest_many(verts[tris].mean(axis=1))[2],
+            floors.face,
+            np.sum(
+                inv_mass[tris] * face_bary[None, :] ** 2, axis=1
+            ) > 1.0e-30,
+        ),
+    }
+
+    report: dict[str, float | int] = {}
+    for kind, (gap, floor, movable) in rows.items():
+        finite = np.isfinite(gap) & np.isfinite(floor)
+        violation = finite & (gap < floor - tolerance)
+        report[f"{kind}_samples"] = len(gap)
+        report[f"{kind}_nonfinite"] = int((~finite).sum())
+        report[f"{kind}_movable_violations"] = int((violation & movable).sum())
+        report[f"{kind}_kinematic_violations"] = int((violation & ~movable).sum())
+        report[f"{kind}_min_gap"] = (
+            float(np.min(gap[np.isfinite(gap)]))
+            if np.any(np.isfinite(gap)) else float("nan")
+        )
+    return report
+
+
+def body_contact_selftest() -> None:
+    body = np.asarray(
+        [[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0], [0.0, 10.0, 0.0]],
+        dtype=np.float64,
+    )
+    body_tris = np.asarray([[0, 1, 2]], dtype=np.int32)
+    collider = UniformBodyCollider(body, body_tris)
+    cloth = np.asarray(
+        [[-0.6, 0.0, -0.3], [0.4, 0.0, -0.3], [0.0, 1.0, -0.3]],
+        dtype=np.float64,
+    )
+    indices = np.asarray([0, 1, 2], dtype=np.int32)
+    bary = np.asarray([0.2, 0.3, 0.5], dtype=np.float64)
+    inv_mass = np.asarray([1.0, 2.0, 0.0], dtype=np.float64)
+    fixed_before = cloth[2].copy()
+    moved, kinematic, _worst, _normal, _gap = project_weighted_body_sample(
+        cloth, indices, bary, inv_mass, collider, floor=0.1
+    )
+    sample = np.sum(cloth * bary[:, None], axis=0)
+    if not moved or kinematic or abs(float(sample[2]) - 0.1) > 1.0e-10:
+        raise RuntimeError(f"weighted contact projection failed: sample={sample}")
+    if not np.array_equal(cloth[2], fixed_before):
+        raise RuntimeError("weighted contact moved a zero-inverse-mass node")
+
+    immobile = cloth.copy()
+    moved, kinematic, _worst, _normal, _gap = project_weighted_body_sample(
+        immobile, indices, bary, np.zeros(3), collider, floor=0.2
+    )
+    if moved or kinematic or not np.array_equal(immobile, cloth):
+        raise RuntimeError("all-fixed contact projection did not remain inert")
+
+    velocity = np.zeros_like(cloth)
+    body_velocity = np.zeros_like(body)
+    body_velocity[:, 2] = 2.0
+    resolved = resolve_weighted_contact_velocity(
+        cloth, velocity, indices, bary, inv_mass, collider,
+        body_velocity, floor=0.1, manifold_tolerance=1.0e-9,
+    )
+    sample_velocity = np.sum(velocity * bary[:, None], axis=0)
+    if not resolved or abs(float(sample_velocity[2]) - 2.0) > 1.0e-10:
+        raise RuntimeError(
+            "moving-body relative contact velocity failed: "
+            f"sampleVelocity={sample_velocity}"
+        )
+    if not np.array_equal(velocity[2], np.zeros(3)):
+        raise RuntimeError("velocity contact moved a kinematic node")
+    print("cloth/body sample contact selftest: PASS")
 
 
 def build_surface_attachments(
@@ -1380,6 +1952,72 @@ def dihedral_gradients_numeric(local: np.ndarray, eps: float = 1.0e-4) -> np.nda
     return grad
 
 
+def dihedral_gradients_analytic(local: np.ndarray) -> np.ndarray:
+    """Analytic gradient matching ``signed_dihedrals_local``.
+
+    The hinge convention is [edge0, edge1, opposite0, opposite1].  Degenerate
+    triangles deliberately receive a zero gradient so the solver can reject or
+    gate them without producing NaNs.
+    """
+    p0, p1, p2, p3 = (local[:, i] for i in range(4))
+    edge = p1 - p0
+    length2 = np.einsum("ij,ij->i", edge, edge)
+    length = np.sqrt(np.maximum(length2, 0.0))
+    n0 = np.cross(edge, p2 - p0)
+    n1 = np.cross(p3 - p0, edge)
+    n0_len2 = np.einsum("ij,ij->i", n0, n0)
+    n1_len2 = np.einsum("ij,ij->i", n1, n1)
+    valid = np.logical_and.reduce((length2 > 1.0e-24, n0_len2 > 1.0e-24, n1_len2 > 1.0e-24))
+
+    grad = np.zeros_like(local)
+    if not np.any(valid):
+        return grad
+
+    g2 = np.zeros_like(p0)
+    g3 = np.zeros_like(p0)
+    g2[valid] = -length[valid, None] * n0[valid] / n0_len2[valid, None]
+    g3[valid] = -length[valid, None] * n1[valid] / n1_len2[valid, None]
+
+    t2 = np.zeros(len(local), dtype=np.float64)
+    t3 = np.zeros(len(local), dtype=np.float64)
+    t2[valid] = np.einsum("ij,ij->i", p2[valid] - p0[valid], edge[valid]) / length2[valid]
+    t3[valid] = np.einsum("ij,ij->i", p3[valid] - p0[valid], edge[valid]) / length2[valid]
+
+    grad[:, 2] = g2
+    grad[:, 3] = g3
+    grad[:, 0] = -(1.0 - t2)[:, None] * g2 - (1.0 - t3)[:, None] * g3
+    grad[:, 1] = -t2[:, None] * g2 - t3[:, None] * g3
+    return grad
+
+
+def dihedral_gradient_selftest() -> None:
+    """Freeze the analytic hinge convention against central differences."""
+    rng = np.random.default_rng(0xD4A9E)
+    cases = []
+    while len(cases) < 64:
+        candidate = rng.normal(size=(4, 3))
+        edge = candidate[1] - candidate[0]
+        n0 = np.cross(edge, candidate[2] - candidate[0])
+        n1 = np.cross(candidate[3] - candidate[0], edge)
+        if np.linalg.norm(edge) < 0.2 or np.linalg.norm(n0) < 0.2 or np.linalg.norm(n1) < 0.2:
+            continue
+        cases.append(candidate)
+    local = np.asarray(cases, dtype=np.float64)
+    numeric = dihedral_gradients_numeric(local, eps=1.0e-6)
+    analytic = dihedral_gradients_analytic(local)
+    worst = float(np.max(np.abs(numeric - analytic)))
+    translation_residual = float(np.max(np.linalg.norm(np.sum(analytic, axis=1), axis=1)))
+    if worst > 2.0e-6 or translation_residual > 2.0e-10:
+        raise RuntimeError(
+            "analytic dihedral gradient mismatch: "
+            f"worst={worst:.9g} translationResidual={translation_residual:.9g}"
+        )
+    print(
+        "dihedral analytic selftest: PASS "
+        f"worst={worst:.3g} translationResidual={translation_residual:.3g}"
+    )
+
+
 def seam_weld(
     verts: np.ndarray,
     seam_groups: list[list[int]],
@@ -1485,13 +2123,18 @@ def xpbd_bending_jacobi(
     lambdas: np.ndarray,
     compliance: float,
     relaxation: float,
+    analytic_gradient: bool = False,
 ) -> None:
     if len(hinges) == 0:
         return
     local = verts[hinges]
     angle = signed_dihedrals_local(local)
     c = wrap_angle(angle - rest_angles)
-    grad = dihedral_gradients_numeric(local)
+    grad = (
+        dihedral_gradients_analytic(local)
+        if analytic_gradient
+        else dihedral_gradients_numeric(local)
+    )
     weights = inv_mass[hinges]
     denom = np.sum(weights[:, :, None] * grad * grad, axis=(1, 2)) + compliance
     valid = denom > 1.0e-30
@@ -1507,6 +2150,189 @@ def xpbd_bending_jacobi(
         np.add.at(count, hinges[:, lv], (weights[:, lv] > 0.0).astype(np.float64))
     movable = count > 0.0
     verts[movable] += relaxation * delta[movable] / count[movable, None]
+
+
+def greedy_constraint_batches(constraints: np.ndarray, vertex_count: int) -> tuple[np.ndarray, ...]:
+    """Deterministically color constraints into conflict-free GS batches."""
+    constraints = np.asarray(constraints, dtype=np.int32)
+    if constraints.ndim != 2:
+        raise ValueError("constraints must be a 2D integer array")
+    used: list[set[int]] = [set() for _ in range(vertex_count)]
+    colors = np.empty(len(constraints), dtype=np.int32)
+    color_count = 0
+    for ci, row in enumerate(constraints):
+        forbidden: set[int] = set()
+        for vi in row:
+            if vi < 0 or vi >= vertex_count:
+                raise ValueError(f"constraint vertex out of range: {vi}")
+            forbidden.update(used[int(vi)])
+        color = 0
+        while color in forbidden:
+            color += 1
+        colors[ci] = color
+        color_count = max(color_count, color + 1)
+        for vi in row:
+            used[int(vi)].add(color)
+    return tuple(np.flatnonzero(colors == color).astype(np.int32) for color in range(color_count))
+
+
+def xpbd_stretch_colored_gs(
+    verts: np.ndarray,
+    edges: np.ndarray,
+    batches: tuple[np.ndarray, ...],
+    rest: np.ndarray,
+    inv_mass: np.ndarray,
+    lambdas: np.ndarray,
+    compliance: float,
+    relaxation: float = 1.0,
+) -> None:
+    """Bilateral XPBD distance constraints with conflict-free colored GS."""
+    for batch in batches:
+        e = edges[batch]
+        a = e[:, 0]
+        b = e[:, 1]
+        d = verts[a] - verts[b]
+        length = np.linalg.norm(d, axis=1)
+        normal = d / np.maximum(length[:, None], 1.0e-30)
+        c = length - rest[batch]
+        denom = inv_mass[a] + inv_mass[b] + compliance
+        dl = np.zeros(len(batch), dtype=np.float64)
+        valid = denom > 1.0e-30
+        dl[valid] = (
+            -c[valid] - compliance * lambdas[batch[valid]]
+        ) / denom[valid]
+        dl *= relaxation
+        lambdas[batch] += dl
+        verts[a] += inv_mass[a, None] * dl[:, None] * normal
+        verts[b] -= inv_mass[b, None] * dl[:, None] * normal
+
+
+def xpbd_bending_colored_gs(
+    verts: np.ndarray,
+    hinges: np.ndarray,
+    batches: tuple[np.ndarray, ...],
+    rest_angles: np.ndarray,
+    constraint_scale: np.ndarray,
+    inv_mass: np.ndarray,
+    lambdas: np.ndarray,
+    compliance: float,
+    relaxation: float = 1.0,
+) -> None:
+    """Signed-dihedral XPBD with analytic gradients and colored GS."""
+    for batch in batches:
+        h = hinges[batch]
+        local = verts[h]
+        scale = constraint_scale[batch]
+        c = wrap_angle(signed_dihedrals_local(local) - rest_angles[batch]) * scale
+        grad = dihedral_gradients_analytic(local) * scale[:, None, None]
+        weights = inv_mass[h]
+        denom = np.sum(weights[:, :, None] * grad * grad, axis=(1, 2)) + compliance
+        dl = np.zeros(len(batch), dtype=np.float64)
+        valid = denom > 1.0e-30
+        dl[valid] = (
+            -c[valid] - compliance * lambdas[batch[valid]]
+        ) / denom[valid]
+        dl *= relaxation
+        lambdas[batch] += dl
+        correction = weights[:, :, None] * dl[:, None, None] * grad
+        for lv in range(4):
+            verts[h[:, lv]] += correction[:, lv]
+
+
+def hinge_geometry_scale(vertices: np.ndarray, hinges: np.ndarray) -> np.ndarray:
+    """Mesh-density normalization for signed-dihedral constraints."""
+    local = vertices[hinges]
+    edge = local[:, 1] - local[:, 0]
+    edge_len2 = np.einsum("ij,ij->i", edge, edge)
+    area0 = 0.5 * np.linalg.norm(np.cross(edge, local[:, 2] - local[:, 0]), axis=1)
+    area1 = 0.5 * np.linalg.norm(
+        np.cross(local[:, 3] - local[:, 0], edge), axis=1
+    )
+    denom = area0 + area1
+    scale = np.zeros(len(hinges), dtype=np.float64)
+    valid = (edge_len2 > 1.0e-24) & (denom > 1.0e-24)
+    scale[valid] = np.sqrt(3.0 * edge_len2[valid] / denom[valid])
+    return scale
+
+
+def lumped_area_mass(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    surface_density: float,
+) -> np.ndarray:
+    """Absolute barycentric node mass for a triangle shell."""
+    if not np.isfinite(surface_density) or surface_density <= 0.0:
+        raise ValueError("surface density must be finite and positive")
+    tri = vertices[triangles]
+    area = 0.5 * np.linalg.norm(
+        np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1
+    )
+    if not np.all(np.isfinite(area)) or np.any(area <= 1.0e-12):
+        raise ValueError("area mass requires finite non-degenerate triangles")
+    mass = np.zeros(len(vertices), dtype=np.float64)
+    for local_vertex in range(3):
+        np.add.at(mass, triangles[:, local_vertex], surface_density * area / 3.0)
+    return mass
+
+
+def colored_gs_selftest() -> None:
+    edges = np.asarray([[0, 1], [1, 2], [2, 3], [0, 3]], dtype=np.int32)
+    batches = greedy_constraint_batches(edges, 4)
+    seen = np.zeros(len(edges), dtype=np.int32)
+    for batch in batches:
+        seen[batch] += 1
+        flat = edges[batch].ravel()
+        if len(np.unique(flat)) != len(flat):
+            raise RuntimeError("constraint color contains a shared vertex")
+    if not np.all(seen == 1):
+        raise RuntimeError("constraint coloring lost or duplicated a constraint")
+
+    line_edges = np.asarray([[0, 1], [1, 2]], dtype=np.int32)
+    line_batches = greedy_constraint_batches(line_edges, 3)
+    verts = np.asarray([[0.0, 0.0, 0.0], [1.8, 0.0, 0.0], [3.6, 0.0, 0.0]])
+    rest = np.ones(2, dtype=np.float64)
+    inv_mass = np.asarray([0.0, 1.0, 1.0])
+    lambdas = np.zeros(2, dtype=np.float64)
+    for _ in range(64):
+        xpbd_stretch_colored_gs(
+            verts, line_edges, line_batches, rest, inv_mass, lambdas,
+            compliance=0.0,
+        )
+    lengths = np.linalg.norm(verts[line_edges[:, 0]] - verts[line_edges[:, 1]], axis=1)
+    if np.max(np.abs(lengths - rest)) > 1.0e-8:
+        raise RuntimeError(f"colored GS distance solve did not converge: {lengths}")
+
+    seam_base = np.asarray(
+        [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0], [2.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    seam_tris = np.asarray(
+        [[0, 1, 4], [1, 5, 4], [2, 3, 6], [3, 7, 6]], dtype=np.int32
+    )
+    reduced = reduce_exact_seam_dofs(
+        seam_base, seam_base.copy(), seam_tris, [[1, 2], [5, 6]]
+    )
+    if len(reduced.base_verts) != 6 or len(reduced.tris) != 4:
+        raise RuntimeError("exact seam DOF reduction produced the wrong topology")
+    square = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+         [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=np.float64,
+    )
+    square_tris = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    area_mass = lumped_area_mass(square, square_tris, surface_density=2.5)
+    if abs(float(area_mass.sum()) - 2.5) > 1.0e-12:
+        raise RuntimeError(f"lumped area mass is not conservative: {area_mass}")
+    print(
+        "xpbd colored-GS selftest: PASS "
+        f"edgeColors={len(batches)} lineError={np.max(np.abs(lengths-rest)):.3g} "
+        f"seamNodes=8->{len(reduced.base_verts)} mass={area_mass.sum():.3g}"
+    )
 
 
 def build_meridian_triplets(
@@ -2212,6 +3038,627 @@ def solve_shell(
         print(f"trace={trace_json} sha256={sha256(trace_json)}")
 
 
+def solve_shell_dynamic(
+    capture_path: Path,
+    dataset: Path,
+    output: Path,
+    frames: int,
+    morph_frames: int,
+    morph_steps: int,
+    iterations: int,
+    substeps: int,
+    dt: float,
+    gravity_acceleration: float,
+    velocity_damping: float,
+    damping_rate: float,
+    stretch_compliance: float,
+    bend_compliance: float,
+    clearance: float,
+    rest_metric_mode: str,
+    start_mode: str,
+    solver_mode: str,
+    mass_mode: str,
+    surface_density: float,
+    contact_warmup: int,
+    stabilization_frames: int,
+    settle_window: int,
+    contact_mode: str,
+    bend_rest_mode: str,
+) -> bool:
+    """Experimental physical settle for a static slider (Path-B shell v3).
+
+    Unlike the marco-8 positional load, this mode integrates velocity and
+    gravity over time. Continuation moves only hard supports toward their raw
+    target. ``raw-settle`` initializes the whole shell at raw as an initial
+    condition, but neither mode has a distributed positional raw attractor.
+    Mobile nodes subsequently receive body motion only through unilateral
+    contact and cloth constraints connected to supports. The state is settled
+    at the final body and velocities are discarded.
+    """
+    if (
+        frames < 1 or morph_frames < 1 or morph_steps < 1
+        or iterations < 1 or substeps < 1 or contact_warmup < 0
+        or stabilization_frames < 0
+    ):
+        raise ValueError(
+            "dynamic frames/morph-frames/morph-steps/iterations/substeps must be "
+            "positive and contact warmup/stabilization non-negative"
+        )
+    if morph_frames > frames:
+        raise ValueError("dynamic morph-frames may not exceed total frames")
+    if start_mode == "continuation" and morph_frames + stabilization_frames > frames:
+        raise ValueError(
+            "continuation requires frames >= morph-frames + stabilization-frames"
+        )
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dynamic dt must be finite and positive")
+    if not 0.0 <= velocity_damping <= 1.0:
+        raise ValueError("dynamic damping must be in [0,1]")
+    if damping_rate < 0.0 or not np.isfinite(damping_rate):
+        raise ValueError("dynamic damping rate must be finite and non-negative")
+    if surface_density <= 0.0 or not np.isfinite(surface_density):
+        raise ValueError("dynamic surface density must be finite and positive")
+
+    cap = read_capture_front(capture_path)
+    finite_arrays = {
+        "cloth base": cap.base_verts,
+        "cloth raw diff": cap.raw_diff,
+        "body base": cap.ref_body_verts,
+        "body final": cap.body_verts,
+    }
+    for label, array in finite_arrays.items():
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"dynamic {label} contains NaN/Inf")
+    for label, triangles, vertex_count in (
+        ("cloth", cap.tris, len(cap.base_verts)),
+        ("body base", cap.ref_body_tris, len(cap.ref_body_verts)),
+        ("body final", cap.body_tris, len(cap.body_verts)),
+    ):
+        if triangles.ndim != 2 or triangles.shape[1] != 3 or not len(triangles):
+            raise ValueError(f"dynamic {label} triangle array is empty or malformed")
+        if int(triangles.min()) < 0 or int(triangles.max()) >= vertex_count:
+            raise ValueError(f"dynamic {label} triangle index is out of range")
+    if not np.array_equal(cap.ref_body_tris, cap.body_tris):
+        raise ValueError("dynamic body base/final topology differs")
+    reference_path = dataset / "cloth_sculpt.obj"
+    if reference_path.is_file():
+        reference = load_obj(reference_path)
+        reference_label = "sculpt"
+    else:
+        reference = ObjMesh(cap.base_verts + cap.raw_diff, cap.tris)
+        reference_label = "vanilla"
+    if (
+        len(reference.verts) != len(cap.base_verts)
+        or not np.array_equal(reference.tris, cap.tris)
+        or not np.all(np.isfinite(reference.verts))
+    ):
+        raise ValueError("dynamic reference must match finite capture cloth topology")
+
+    original_topology = topology_stats(cap.base_verts, cap.tris)
+    original_raw_verts = cap.base_verts + cap.raw_diff
+    drape = fitted_drape_signal(cap)
+    mobility = np.clip((drape - 0.05) / 0.50, 0.0, 1.0)
+    mobility = mobility * mobility * (3.0 - 2.0 * mobility)
+    original_fixed = mobility <= 1.0e-12
+    reduced = reduce_exact_seam_dofs(
+        cap.base_verts,
+        original_raw_verts,
+        cap.tris,
+        original_topology["seam_groups"],
+    )
+    base_verts = reduced.base_verts
+    raw_metric_verts = reduced.raw_verts
+    tris = reduced.tris
+    topo = topology_stats(base_verts, tris)
+    if topo["nonmanifold_edges"]:
+        raise ValueError(
+            "dynamic seam-reduced shell contains non-manifold edges: "
+            f"{topo['nonmanifold_edges']}"
+        )
+    edges = np.asarray(sorted(topo["edge_faces"]), dtype=np.int32)
+    hinges = topo["hinges"]
+    base_rest_len = np.linalg.norm(
+        base_verts[edges[:, 0]] - base_verts[edges[:, 1]], axis=1
+    )
+    raw_rest_len = np.linalg.norm(
+        raw_metric_verts[edges[:, 0]] - raw_metric_verts[edges[:, 1]], axis=1
+    )
+    if rest_metric_mode not in ("base", "raw-metric"):
+        raise ValueError(f"unknown dynamic rest metric: {rest_metric_mode}")
+    if np.any(base_rest_len <= 1.0e-12) or np.any(raw_rest_len <= 1.0e-12):
+        raise ValueError("dynamic rest metric contains a degenerate edge")
+    rest_angles = signed_dihedrals_local(base_verts[hinges])
+    base_bend_scale = hinge_geometry_scale(base_verts, hinges)
+    raw_bend_scale = hinge_geometry_scale(raw_metric_verts, hinges)
+    if np.any(base_bend_scale <= 0.0) or np.any(raw_bend_scale <= 0.0):
+        raise ValueError("dynamic bend scale contains a degenerate hinge")
+
+    fixed = np.asarray(
+        [bool(np.any(original_fixed[group])) for group in reduced.node_members],
+        dtype=bool,
+    )
+    # v3 treats mobility as an attachment classifier, not as physical mass.
+    # Every non-attached cloth vertex has the same mass and gravitational
+    # acceleration; this removes the old feathered body-follow field.
+    inv_mass = (~fixed).astype(np.float64)
+    active = np.flatnonzero(~fixed).astype(np.int32)
+
+    if start_mode not in ("continuation", "raw-settle"):
+        raise ValueError(f"unknown dynamic start mode: {start_mode}")
+    if solver_mode not in ("legacy-jacobi", "colored-gs"):
+        raise ValueError(f"unknown dynamic solver mode: {solver_mode}")
+    if mass_mode not in ("uniform", "area"):
+        raise ValueError(f"unknown dynamic mass mode: {mass_mode}")
+    if contact_mode not in ("on", "off"):
+        raise ValueError(f"unknown dynamic contact mode: {contact_mode}")
+    if contact_mode == "on" and clearance < 0.0:
+        raise ValueError("dynamic physical contact thickness must be non-negative")
+    if mass_mode == "area":
+        mass = lumped_area_mass(base_verts, tris, surface_density)
+        positive = mass[~fixed]
+        if not len(positive) or np.any(positive <= 1.0e-12):
+            raise ValueError("dynamic area mass contains a zero-mass mobile vertex")
+        inv_mass[~fixed] = 1.0 / mass[~fixed]
+    else:
+        mass = np.full(len(base_verts), surface_density, dtype=np.float64)
+
+    if bend_rest_mode == "flat-panel":
+        panel_hinges = np.min(inv_mass[hinges], axis=1) > 0.0
+        rest_angles = rest_angles.copy()
+        rest_angles[panel_hinges] = 0.0
+    elif bend_rest_mode not in ("base", "off"):
+        raise ValueError(f"unknown dynamic bend rest metric: {bend_rest_mode}")
+
+    base_collider = UniformBodyCollider(cap.ref_body_verts, cap.ref_body_tris)
+    final_body_collider = UniformBodyCollider(cap.body_verts, cap.body_tris)
+    # Every quadrature sample gets its own endpoint floor.  This prevents a
+    # centroid already inside the body from being misrepresented by three
+    # clear vertices and then receiving a catastrophic teleport correction.
+    contact_floors = (
+        BodyContactFloors(
+            node=np.full(len(base_verts), -np.inf, dtype=np.float64),
+            edge=np.full(len(edges), -np.inf, dtype=np.float64),
+            face=np.full(len(tris), -np.inf, dtype=np.float64),
+        )
+        if contact_mode == "off"
+        else build_body_contact_floors(
+            base_verts,
+            raw_metric_verts,
+            edges,
+            tris,
+            base_collider,
+            final_body_collider,
+            clearance,
+        )
+    )
+
+    edge_batches: tuple[np.ndarray, ...] = ()
+    hinge_batches: tuple[np.ndarray, ...] = ()
+    if solver_mode == "colored-gs":
+        edge_batches = greedy_constraint_batches(edges, len(base_verts))
+        hinge_batches = greedy_constraint_batches(hinges, len(base_verts))
+
+    x = (
+        raw_metric_verts.copy()
+        if start_mode == "raw-settle"
+        else base_verts.copy()
+    )
+    velocity = np.zeros_like(x)
+    contact_count = np.zeros(len(x), dtype=np.int64)
+    effective_substeps = substeps if solver_mode == "colored-gs" else 1
+    h = dt / effective_substeps
+    stretch_alpha = stretch_compliance / (h * h)
+    bend_alpha = bend_compliance / (h * h)
+    print(
+        "dynamic-v3 "
+        f"frames={frames} morphFrames={morph_frames} morphSteps={morph_steps} "
+        f"iterations={iterations} substeps={effective_substeps} dt={dt:g} h={h:g} "
+        f"gravity={gravity_acceleration:g} "
+        f"damping={velocity_damping:g}/rate={damping_rate:g} "
+        f"verts={len(cap.base_verts)}->{len(base_verts)} "
+        f"fixed={int(fixed.sum())} active={len(active)} edges={len(edges)} "
+        f"hinges={len(hinges)} seams={len(original_topology['seam_groups'])} "
+        f"start={start_mode} "
+        f"solver={solver_mode} mass={mass_mode}(density={surface_density:g},"
+        f"total={mass.sum():.4f},mobileMedian={np.median(mass[~fixed]):.6f}) "
+        f"contact={contact_mode}(warmup={contact_warmup},"
+        f"stabilizationFrames={stabilization_frames}) "
+        f"colors={len(edge_batches)}/{len(hinge_batches)} "
+        f"restMetric={rest_metric_mode} bendRest={bend_rest_mode} "
+        f"stretchCompliance={stretch_compliance:g}(alpha={stretch_alpha:g}) "
+        f"bendCompliance={bend_compliance:g}(alpha={bend_alpha:g})"
+    )
+    metric_ratio = raw_rest_len / base_rest_len
+    bend_scale_ratio = raw_bend_scale / base_bend_scale
+    print(
+        "dynamic metric raw/base "
+        f"mean/p50/p95/max={metric_ratio.mean():.4f}/"
+        f"{np.percentile(metric_ratio,50):.4f}/"
+        f"{np.percentile(metric_ratio,95):.4f}/{metric_ratio.max():.4f}"
+    )
+    print(
+        "dynamic hinge scale raw/base "
+        f"p05/p50/p95/min/max={np.percentile(bend_scale_ratio,5):.4f}/"
+        f"{np.percentile(bend_scale_ratio,50):.4f}/"
+        f"{np.percentile(bend_scale_ratio,95):.4f}/"
+        f"{bend_scale_ratio.min():.4f}/{bend_scale_ratio.max():.4f}"
+    )
+
+    initial_t = 1.0 if start_mode == "raw-settle" else 0.0
+    initial_body = cap.ref_body_verts + (
+        cap.body_verts - cap.ref_body_verts
+    ) * initial_t
+    initial_anchor = base_verts + (raw_metric_verts - base_verts) * initial_t
+    initial_rest_len = (
+        base_rest_len * np.exp(initial_t * np.log(raw_rest_len / base_rest_len))
+        if rest_metric_mode == "raw-metric"
+        else base_rest_len
+    )
+    initial_bend_scale = (
+        base_bend_scale
+        * np.exp(initial_t * np.log(raw_bend_scale / base_bend_scale))
+        if rest_metric_mode == "raw-metric"
+        else base_bend_scale
+    )
+    if contact_mode == "on" and contact_warmup:
+        warm_collider = UniformBodyCollider(initial_body, cap.body_tris)
+        stretch_lambda = np.zeros(len(edges), dtype=np.float64)
+        bend_lambda = np.zeros(len(hinges), dtype=np.float64)
+        warm_stats = BodyContactStats()
+        for _ in range(contact_warmup):
+            if solver_mode == "colored-gs":
+                xpbd_stretch_colored_gs(
+                    x, edges, edge_batches, initial_rest_len, inv_mass,
+                    stretch_lambda, compliance=stretch_alpha,
+                )
+            else:
+                xpbd_stretch_jacobi(
+                    x, edges, initial_rest_len, inv_mass, stretch_lambda,
+                    compliance=stretch_alpha, relaxation=0.95,
+                    tension_only=False,
+                )
+            if bend_rest_mode != "off":
+                if solver_mode == "colored-gs":
+                    xpbd_bending_colored_gs(
+                        x, hinges, hinge_batches, rest_angles,
+                        initial_bend_scale, inv_mass, bend_lambda,
+                        compliance=bend_alpha,
+                    )
+                else:
+                    xpbd_bending_jacobi(
+                        x, hinges, rest_angles, inv_mass, bend_lambda,
+                        compliance=bend_alpha, relaxation=0.45,
+                        analytic_gradient=True,
+                    )
+            warm_stats = project_cloth_body_samples(
+                x, edges, tris, inv_mass, warm_collider, contact_floors,
+                contact_count,
+            )
+            x[fixed] = initial_anchor[fixed]
+        print(
+            "dynamic contact warmup "
+            f"lastProjected={warm_stats.projected} "
+            f"lastKinematic={warm_stats.kinematic_violations} "
+            f"lastWorst={warm_stats.worst_correction:.4f} "
+            f"at={warm_stats.worst_kind}:{warm_stats.worst_owner} "
+            f"gap/floor={warm_stats.worst_gap:.4f}/{warm_stats.worst_floor:.4f}"
+        )
+    initial_x = x.copy()
+    velocity.fill(0.0)
+
+    collider: UniformBodyCollider | None = None
+    previous_body = (
+        cap.body_verts.copy()
+        if start_mode == "raw-settle"
+        else cap.ref_body_verts.copy()
+    )
+    stable_frames = 0
+    stable_origin: np.ndarray | None = None
+    converged = False
+    rest_len = base_rest_len.copy()
+    median_edge = float(np.median(raw_rest_len if rest_metric_mode == "raw-metric" else base_rest_len))
+    for frame in range(1, frames + 1):
+        stabilizing = frame <= stabilization_frames
+        physical_frame = frame - stabilization_frames
+        frame_start = x.copy()
+        frame_contacts = 0
+        worst_contact = 0.0
+        worst_contact_info = "none"
+        rms_speed = 0.0
+        peak_rms_speed = 0.0
+        t = 1.0 if start_mode == "raw-settle" else 0.0
+
+        for substep in range(effective_substeps):
+            if start_mode == "raw-settle":
+                t = 1.0
+            elif stabilizing:
+                t = 0.0
+            elif solver_mode == "colored-gs":
+                # Continuous body/anchor/rest motion avoids the six impulses
+                # used by the historical quasi-static spike.
+                progress = (
+                    physical_frame - 1 + (substep + 1) / effective_substeps
+                ) / morph_frames
+                t = min(1.0, progress)
+            else:
+                stage = min(
+                    morph_steps,
+                    int(np.ceil(physical_frame * morph_steps / morph_frames)),
+                )
+                t = min(1.0, stage / morph_steps)
+
+            body = cap.ref_body_verts + (cap.body_verts - cap.ref_body_verts) * t
+            body_velocity = (body - previous_body) / h
+            collider = UniformBodyCollider(body, cap.body_tris)
+            previous_body = body
+            # The physical state lives on seam-reduced material nodes.  Raw is
+            # used only for the moving hard supports and intrinsic edge metric;
+            # mobile nodes never receive a positional pull toward raw conform.
+            anchor_target = base_verts + (raw_metric_verts - base_verts) * t
+            rest_len = (
+                base_rest_len * np.exp(t * np.log(raw_rest_len / base_rest_len))
+                if rest_metric_mode == "raw-metric"
+                else base_rest_len
+            )
+            bend_scale = (
+                base_bend_scale
+                * np.exp(t * np.log(raw_bend_scale / base_bend_scale))
+                if rest_metric_mode == "raw-metric"
+                else base_bend_scale
+            )
+            previous = x.copy()
+
+            damping = (
+                np.exp(-damping_rate * h)
+                if solver_mode == "colored-gs"
+                else velocity_damping
+            )
+            velocity[active] *= damping
+            if not stabilizing:
+                velocity[active, 2] -= gravity_acceleration * h
+            x[active] += velocity[active] * h
+            x[fixed] = anchor_target[fixed]
+
+            stretch_lambda = np.zeros(len(edges), dtype=np.float64)
+            bend_lambda = np.zeros(len(hinges), dtype=np.float64)
+            for constraint_iteration in range(iterations):
+                if solver_mode == "colored-gs":
+                    xpbd_stretch_colored_gs(
+                        x, edges, edge_batches, rest_len, inv_mass,
+                        stretch_lambda, compliance=stretch_alpha,
+                    )
+                else:
+                    xpbd_stretch_jacobi(
+                        x, edges, rest_len, inv_mass, stretch_lambda,
+                        compliance=stretch_alpha, relaxation=0.95,
+                        tension_only=False,
+                    )
+                if bend_rest_mode != "off":
+                    if solver_mode == "colored-gs":
+                        xpbd_bending_colored_gs(
+                            x, hinges, hinge_batches, rest_angles, bend_scale, inv_mass,
+                            bend_lambda, compliance=bend_alpha,
+                        )
+                    else:
+                        xpbd_bending_jacobi(
+                            x, hinges, rest_angles, inv_mass, bend_lambda,
+                            compliance=bend_alpha, relaxation=0.45,
+                            analytic_gradient=True,
+                        )
+                # The Python harness performs the expensive full node/edge/face
+                # contact quadrature once per substep.  Constraint iterations
+                # reconcile it on the following substep; a future C++ port may
+                # afford interleaving every iteration without changing the law.
+                if contact_mode == "on" and constraint_iteration == iterations - 1:
+                    contact_stats = project_cloth_body_samples(
+                        x, edges, tris, inv_mass, collider, contact_floors,
+                        contact_count,
+                    )
+                    frame_contacts += contact_stats.projected
+                    if contact_stats.worst_correction > worst_contact:
+                        worst_contact = contact_stats.worst_correction
+                        worst_contact_info = (
+                            f"{contact_stats.worst_kind}:"
+                            f"{contact_stats.worst_owner} "
+                            f"gap/floor={contact_stats.worst_gap:.3f}/"
+                            f"{contact_stats.worst_floor:.3f}"
+                        )
+                x[fixed] = anchor_target[fixed]
+
+            if not np.all(np.isfinite(x)):
+                raise RuntimeError(
+                    f"dynamic-v3 produced non-finite positions at frame {frame}"
+                )
+            velocity[:] = (x - previous) / h
+            # Rebuild the final manifold instead of reusing stale normals from
+            # an earlier projection.  Only inward velocity relative to the
+            # moving body is removed; tangential motion stays frictionless.
+            if contact_mode == "on":
+                resolve_cloth_body_velocities(
+                    x, velocity, edges, tris, inv_mass, collider,
+                    body_velocity, contact_floors,
+                    manifold_tolerance=max(1.0e-5, 0.05 * clearance),
+                )
+            if stabilizing:
+                # Initial overlap removal is a positional initialization, not
+                # kinetic energy.  Repeated zero-velocity frames let membrane,
+                # bend and contact find a compatible state before gravity/body
+                # motion begins.
+                velocity.fill(0.0)
+            speed = np.linalg.norm(velocity[active], axis=1)
+            if not stabilizing and np.any(speed > 100.0):
+                if solver_mode == "colored-gs":
+                    raise RuntimeError(
+                        f"dynamic physical solve exceeded speed guard at frame {frame}"
+                    )
+                too_fast = speed > 100.0
+                velocity[active[too_fast]] *= (100.0 / speed[too_fast])[:, None]
+                speed[too_fast] = 100.0
+            rms_speed = float(np.sqrt(np.mean(speed * speed))) if len(speed) else 0.0
+            peak_rms_speed = max(peak_rms_speed, rms_speed)
+
+        displacement = np.linalg.norm(x[active] - frame_start[active], axis=1)
+        rms_displacement_ratio = (
+            float(np.sqrt(np.mean(displacement * displacement))) / median_edge
+            if len(displacement) else 0.0
+        )
+        max_displacement_ratio = (
+            float(np.max(displacement)) / median_edge if len(displacement) else 0.0
+        )
+        local_settled = (
+            not stabilizing
+            and t >= 1.0
+            and rms_displacement_ratio < 1.0e-3
+            and max_displacement_ratio < 5.0e-3
+            and peak_rms_speed * dt / median_edge < 1.0e-3
+        )
+        if local_settled:
+            if stable_origin is None:
+                stable_origin = x.copy()
+            window_drift = np.linalg.norm(
+                x[active] - stable_origin[active], axis=1
+            )
+            window_max_ratio = (
+                float(np.max(window_drift)) / median_edge
+                if len(window_drift) else 0.0
+            )
+            if window_max_ratio <= 5.0e-3:
+                stable_frames += 1
+            else:
+                stable_frames = 1
+                stable_origin = x.copy()
+        else:
+            stable_frames = 0
+            stable_origin = None
+        converged = settle_window > 0 and stable_frames >= settle_window
+
+        if (
+            frame == 1 or frame == morph_frames or frame == frames
+            or frame % 15 == 0 or converged
+        ):
+            mean_strain, p95_ratio, max_ratio = edge_metrics(x, edges, rest_len)
+            print(
+                f"dynamic frame={frame}/{frames} t={t:.3f} contacts={frame_contacts} "
+                f"worstContact={worst_contact:.3f}({worst_contact_info}) "
+                f"rmsSpeed={rms_speed:.4f} "
+                f"peakRmsSpeed={peak_rms_speed:.4f} "
+                f"dispRms/Max={rms_displacement_ratio:.6f}/{max_displacement_ratio:.6f} "
+                f"stable={stable_frames}/{settle_window} "
+                f"meanAbsStrain={mean_strain:.5f} p95Stretch={p95_ratio:.4f} "
+                f"maxStretch={max_ratio:.4f}"
+            )
+        if converged:
+            break
+
+    print(
+        f"dynamic convergence converged={int(converged)} "
+        f"stableFrames={stable_frames}/{settle_window}"
+    )
+
+    # Expand the shared material DOFs only at the I/O boundary.  This preserves
+    # the original OBJ indexing while making exact seams impossible to split
+    # during integration or constraint projection.
+    expanded_x = x[reduced.vertex_to_node]
+    expanded_fixed = fixed[reduced.vertex_to_node]
+    expanded_active = ~expanded_fixed
+    expanded_floor = contact_floors.node[reduced.vertex_to_node]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_obj(output, expanded_x, cap.tris)
+    index_err = np.linalg.norm(expanded_x - reference.verts, axis=1)
+    surf = surface_distance_stats(expanded_x, reference)
+    reverse_surf = surface_distance_stats(
+        reference.verts, ObjMesh(expanded_x, cap.tris)
+    )
+
+    base_tri = cap.base_verts[cap.tris]
+    out_tri = expanded_x[cap.tris]
+    base_normal = np.cross(base_tri[:, 1] - base_tri[:, 0], base_tri[:, 2] - base_tri[:, 0])
+    out_normal = np.cross(out_tri[:, 1] - out_tri[:, 0], out_tri[:, 2] - out_tri[:, 0])
+    base_area2 = np.linalg.norm(base_normal, axis=1)
+    out_area2 = np.linalg.norm(out_normal, axis=1)
+    flips = int((np.einsum("ij,ij->i", base_normal, out_normal) < 0.0).sum())
+    collapsed = int((out_area2 < 0.10 * np.maximum(base_area2, 1.0e-30)).sum())
+    final_collider = UniformBodyCollider(cap.body_verts, cap.body_tris)
+    final_gap = final_collider.gaps(expanded_x)
+    penetrating = int((final_gap < expanded_floor - 1.0e-6).sum())
+    active_penetrating = int(
+        (final_gap[expanded_active] < expanded_floor[expanded_active] - 1.0e-6).sum()
+    )
+    fixed_penetrating = int(
+        (final_gap[expanded_fixed] < expanded_floor[expanded_fixed] - 1.0e-6).sum()
+    )
+    sample_diagnostics: dict[str, float | int] = {}
+    if contact_mode == "on":
+        sample_diagnostics = cloth_body_sample_diagnostics(
+            x, edges, tris, inv_mass, final_collider, contact_floors
+        )
+    final_mean_strain, final_p95_stretch, final_max_stretch = edge_metrics(
+        x, edges, rest_len
+    )
+    final_edge_length = np.linalg.norm(
+        x[edges[:, 0]] - x[edges[:, 1]], axis=1
+    )
+    final_min_ratio = float(np.min(final_edge_length / rest_len))
+    finite_ok = bool(np.all(np.isfinite(expanded_x)))
+    sample_finite_ok = all(
+        int(sample_diagnostics.get(f"{kind}_nonfinite", 0)) == 0
+        for kind in ("node", "edge", "face")
+    )
+    sample_mobile_ok = all(
+        int(sample_diagnostics.get(f"{kind}_movable_violations", 0)) == 0
+        for kind in ("node", "edge", "face")
+    )
+    physical_core_accepted = bool(
+        converged
+        and finite_ok
+        and flips == 0
+        and collapsed == 0
+        and active_penetrating == 0
+        and sample_finite_ok
+        and sample_mobile_ok
+        and final_p95_stretch <= 1.10
+        and final_max_stretch <= 4.10
+        and final_min_ratio >= 0.10
+    )
+    if contact_mode == "off":
+        # Contact-off exists only for causal invariance checks.  It is never a
+        # shippable physical candidate, but may return success when it preserves
+        # its input pose exactly and converges.
+        diagnostic_accepted = bool(
+            converged
+            and finite_ok
+            and np.max(np.linalg.norm(x - initial_x, axis=1)) <= 1.0e-9
+        )
+    else:
+        diagnostic_accepted = physical_core_accepted
+    print(
+        f"dynamic-result={output} reference={reference_label} "
+        f"indexError mean/p95/max={index_err.mean():.4f}/"
+        f"{np.percentile(index_err,95):.4f}/{index_err.max():.4f} "
+        f"surface result->reference mean/p95/max={surf[0]:.4f}/{surf[1]:.4f}/{surf[2]:.4f} "
+        f"reference->result={reverse_surf[0]:.4f}/{reverse_surf[1]:.4f}/{reverse_surf[2]:.4f} "
+        f"flips={flips} collapsed={collapsed} "
+        f"floorViolations={penetrating}(active={active_penetrating},fixed={fixed_penetrating}) "
+        f"strainMean/p95/max/min={final_mean_strain:.5f}/"
+        f"{final_p95_stretch:.4f}/{final_max_stretch:.4f}/{final_min_ratio:.4f} "
+        f"everContactedNodes={int((contact_count > 0).sum())}"
+    )
+    if sample_diagnostics:
+        print(
+            "dynamic contact samples "
+            + " ".join(
+                f"{key}={value}" for key, value in sorted(sample_diagnostics.items())
+            )
+        )
+    print(
+        "dynamic acceptance "
+        f"coreAccepted={int(physical_core_accepted)} "
+        f"diagnosticAccepted={int(diagnostic_accepted)} "
+        "(core excludes self-collision/crossing and is not a deploy gate)"
+    )
+    return diagnostic_accepted
+
+
 def inspect_dataset(capture_path: Path, dataset: Path) -> None:
     cap = read_capture_front(capture_path)
     names = [
@@ -2345,6 +3792,10 @@ def main() -> int:
         help="validate the unilateral XPBD stretch multiplier projection",
     )
     ap.add_argument("--solve", action="store_true", help="run the experimental quasi-static shell solve")
+    ap.add_argument(
+        "--solve-dynamic", action="store_true",
+        help="run the isolated Path-B v3 time-integrated physical settle",
+    )
     ap.add_argument("--output", type=Path, default=DEFAULT_DATASET / "shell_base.obj")
     ap.add_argument("--rest", choices=("base", "uniform", "lowpass"), default="base")
     ap.add_argument("--bend-rest", choices=("base", "flat-panel"), default="base")
@@ -2413,6 +3864,62 @@ def main() -> int:
     ap.add_argument("--body-mode", choices=("continuation", "static"), default="continuation")
     ap.add_argument("--gravity-mode", choices=("step", "iteration"), default="step")
     ap.add_argument("--stretch-mode", choices=("bilateral", "tension"), default="bilateral")
+    ap.add_argument("--dynamic-frames", type=int, default=90)
+    ap.add_argument("--dynamic-morph-frames", type=int, default=30)
+    ap.add_argument("--dynamic-morph-steps", type=int, default=6)
+    ap.add_argument("--dynamic-iterations", type=int, default=8)
+    ap.add_argument("--dynamic-substeps", type=int, default=2)
+    ap.add_argument("--dynamic-dt", type=float, default=1.0 / 30.0)
+    ap.add_argument("--dynamic-gravity", type=float, default=10.0)
+    ap.add_argument("--dynamic-damping", type=float, default=0.80)
+    ap.add_argument("--dynamic-damping-rate", type=float, default=5.0)
+    ap.add_argument("--dynamic-settle-window", type=int, default=30)
+    ap.add_argument("--dynamic-stretch-compliance", type=float, default=2.0e-7)
+    ap.add_argument("--dynamic-bend-compliance", type=float, default=2.0e-5)
+    ap.add_argument(
+        "--dynamic-rest", choices=("base", "raw-metric"), default="raw-metric",
+        help=(
+            "dynamic in-plane rest metric: authored base lengths, or lengths "
+            "interpolated to raw conform without copying raw positions"
+        ),
+    )
+    ap.add_argument(
+        "--dynamic-start", choices=("continuation", "raw-settle"),
+        default="continuation",
+        help="continue base/body morph, or physically settle from the final raw pose",
+    )
+    ap.add_argument(
+        "--dynamic-solver", choices=("legacy-jacobi", "colored-gs"),
+        default="colored-gs",
+        help="legacy valence-averaged projection or mathematically consistent colored GS",
+    )
+    ap.add_argument(
+        "--dynamic-mass", choices=("uniform", "area"), default="area",
+        help="uniform mobile mass or triangle-area lumped mass",
+    )
+    ap.add_argument(
+        "--dynamic-surface-density", type=float, default=1.0,
+        help="absolute shell surface density used by the dynamic mass model",
+    )
+    ap.add_argument(
+        "--dynamic-contact-warmup", type=int, default=8,
+        help="zero-velocity constraint/contact iterations for the initial pose",
+    )
+    ap.add_argument(
+        "--dynamic-stabilization-frames", type=int, default=4,
+        help="initial zero-velocity frames before gravity/body continuation",
+    )
+    ap.add_argument(
+        "--dynamic-contact", choices=("on", "off"), default="on",
+        help=(
+            "sampled unilateral body contact on nodes, unique edge midpoints "
+            "and face centroids; off is reserved for invariance tests"
+        ),
+    )
+    ap.add_argument(
+        "--dynamic-bend-rest", choices=("base", "flat-panel", "off"),
+        default="base",
+    )
     ap.add_argument(
         "--trace-json", type=Path,
         help="write per-vertex S0.3e contact/fixed history for causal analysis",
@@ -2420,10 +3927,11 @@ def main() -> int:
     args = ap.parse_args()
 
     if not any((args.inspect, args.contact_check, args.attachment_selftest,
-                args.attachment_report, args.solver_selftest, args.solve)):
+                args.attachment_report, args.solver_selftest, args.solve,
+                args.solve_dynamic)):
         ap.error(
             "choose --inspect, --contact-check, --attachment-selftest, "
-            "--attachment-report, --solver-selftest and/or --solve"
+            "--attachment-report, --solver-selftest, --solve and/or --solve-dynamic"
         )
     if args.surface_corot_mask_json and args.anchor_target != "surface-corot":
         ap.error("--surface-corot-mask-json requires --anchor-target surface-corot")
@@ -2437,6 +3945,38 @@ def main() -> int:
         attachment_report(args.capture.resolve())
     if args.solver_selftest:
         xpbd_unilateral_selftest()
+        dihedral_gradient_selftest()
+        colored_gs_selftest()
+        body_contact_selftest()
+    dynamic_accepted = True
+    if args.solve_dynamic:
+        dynamic_accepted = solve_shell_dynamic(
+            args.capture.resolve(),
+            args.dataset.resolve(),
+            args.output.resolve(),
+            max(1, args.dynamic_frames),
+            max(1, args.dynamic_morph_frames),
+            max(1, args.dynamic_morph_steps),
+            max(1, args.dynamic_iterations),
+            max(1, args.dynamic_substeps),
+            args.dynamic_dt,
+            args.dynamic_gravity,
+            args.dynamic_damping,
+            args.dynamic_damping_rate,
+            max(0.0, args.dynamic_stretch_compliance),
+            max(0.0, args.dynamic_bend_compliance),
+            args.clearance,
+            args.dynamic_rest,
+            args.dynamic_start,
+            args.dynamic_solver,
+            args.dynamic_mass,
+            args.dynamic_surface_density,
+            max(0, args.dynamic_contact_warmup),
+            max(0, args.dynamic_stabilization_frames),
+            max(0, args.dynamic_settle_window),
+            args.dynamic_contact,
+            args.dynamic_bend_rest,
+        )
     if args.solve:
         solve_shell(
             args.capture.resolve(),
@@ -2481,7 +4021,7 @@ def main() -> int:
             surface_corot_classifier=args.surface_corot_classifier,
             surface_corot_fallback=args.surface_corot_fallback,
         )
-    return 0
+    return 0 if dynamic_accepted else 4
 
 
 if __name__ == "__main__":

@@ -416,8 +416,11 @@ The DLL was copied only to:
 - `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
 - `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
 
-Both deployed copies and the build artifact have SHA-256
+The **last deployed marco-9 DLL artifact** and both installed copies have
+SHA-256
 `6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
+The branch source and harness now also contain the later bilateral research
+toggle; that source has not been rebuilt into or copied over the live DLL.
 Live state at handoff: `shell_solve_on.flag` present,
 `shell_solve_off.flag` absent. Restart Outfit Studio before visual testing.
 
@@ -428,8 +431,152 @@ gravitational fall was functional on Blacksmith Heavy, but the user then
 clarified that the result is not yet 100%. This is a partial positive signal,
 not an approval: do not expand the pilot to other garments from this result.
 
-One confirmed residual defect is that the cloth follows/enters the butt cleft
-too strongly (excessive posterior body imprint). Await a new screenshot and/or
-post-conform OBJ before choosing the next lever. Preserve the current gravity
-result as a comparison baseline; a later fix must reduce the local imprint
-without restoring the old body-following behavior in freely hanging cloth.
+The user then refined the diagnosis after rotating and inspecting the live
+mesh: the residual is broader than the butt cleft.  Parts of the skirt that no
+longer touch the body still inherit its curve; where the panel should hang
+almost vertically it retains a visible body-following "magnetism".  The next
+research direction requested by the user is therefore a closer approximation
+to a real cloth simulation, not another positional posterior correction.
+
+This report is now measured on the canonical post-conform Heavy OBJ
+`tmp/pathb/current_heavy_on_1.obj` (SHA-256 `14C332CD...210F7`).  On a frozen
+rear free-cloth mask (`authoredGap >= 2.5u`, `rawGap >= 2.5u`, full drape
+mobility, rear `z=35..65`), the current shell still retains about 72.5% of the
+horizontal raw-conform displacement and reduces mean body gap from `3.750u`
+to `3.106u`.  Two different residuals exist:
+
+- a central island is only partly corrected by the raw shell and is then
+  partly restored by safety closures;
+- a second inclined island is born inside the raw shell itself, so removing
+  downstream finishing cannot solve the whole defect.
+
+All inspected hotspot vertices have full mobility and zero soft-anchor weight.
+Turning soft anchors off moves the genuinely free population by only about
+`0.005u`; it is not the missing lever.  Ablating cleft bridge, layer tuck,
+support cap, or all three also leaves the plumb gate effectively unchanged,
+while removing layer tuck regresses Torso/Belt separation.  Keep those legacy
+passes for the current accepted pilot.
+
+Two aggressive alternatives were rejected and were **not deployed**:
+
+- publishing the raw shell before all legacy tail operations produced severe
+  diagonal waviness (`13.16 deg` mean, `46.52 deg` p90 on the sculpt-informed
+  plumb mask);
+- the first time-integrated dynamic prototype (uniform mobile mass, hard
+  attachments only, bilateral edges, analytic diedro, gravity and unilateral
+  body contact) reduced raw-follow alpha but did so by laying the panel onto
+  the body: mean gap fell to `0.959u`, with `37/60` sampled vertices below
+  `1u`.  It also had not settled (`0.456u/s` RMS speed at frame 60).  This is a
+  useful falsification of that parameterization, not a candidate DLL.
+
+#### No-sculpt plumb/magnetism gates
+
+Freeze a candidate-independent face set from the authored/raw inputs:
+
+1. every face vertex has `authoredGap >= 2.5u`, `rawGap >= 2.5u`, and full
+   drape mobility;
+2. the authored face is already near vertical, using
+   `thetaBase = asin(abs(nBase dot gravity)) <= 10 deg`;
+3. evaluate `theta = asin(abs(n dot gravity))` on exactly those frozen faces.
+
+Report area-weighted mean, ordinary and area-weighted p90, and the largest
+connected material island above `8 deg`.  Always pair this with mean/p10 body
+gap and counts below `1u/2.5u`; otherwise a candidate can appear straighter
+merely by collapsing onto the collider.  This is now implemented by
+`tools/pathb_plumb_gate.py`, including a synthetic selftest and optional frozen
+authored-coordinate bounds.
+
+There are deliberately two judges.  The fully global, garment-agnostic
+Blacksmith mask has 306 faces: production OFF is `2.895/6.783 deg`
+area-mean/area-p90 and current live is `3.164/7.189 deg`.  A localized
+Blacksmith posterior sentinel adds authored bounds `y<=-6, z=35..65`; it has 78
+faces and reproduces the user's visible zone: OFF `2.609/6.0 deg`
+area-mean/ordinary-p90, current `3.180/7.2 deg`.  The coordinate-bounded judge
+is a frozen capture sentinel, **not** the universal selector for other
+garments.  Keep the sculpt-specific 41-face judge only as an informative fine
+validation.
+
+Current decision: leave the deployed DLL and flags untouched.  The first
+isolated experiment was bilateral in-plane edge preservation (triangle shape);
+after its negative result, work moved to a corrected time-integrated XPBD
+settle.  The
+physical contract is: body influence enters a mobile panel only through real
+attachments, unilateral contact, and cloth constraints; no free-vertex
+`rawDiff` attraction.  No candidate may ship unless it improves the frozen
+plumb gate **and** preserves the gap, crossing, face/body, seam, area, edge and
+Torso/Belt gates of marco 9.
+
+#### Physical-solver audit and rest-metric correction
+
+The isolated C++ bilateral-edge probe is complete.  Its default
+`DRAPE_SHELL_TENSION_ONLY=1` reproduces the canonical OBJ byte-for-byte.  With
+the toggle set to `0`, all transactional gates still pass, but the pose changes
+only `0.0211u` mean / `0.0719u` p95 and the old magnetism diagnostic becomes
+slightly worse (`444 -> 448` flagged vertices).  This proves that simply making
+the existing positional solver resist compression is not the missing lever.
+On the canonical new gates the global result is mixed/minuscule (live
+`3.164/7.189 deg`, bilateral `3.137/7.212 deg`, with gap `5.041 -> 5.064u`),
+while the user's posterior zone is unchanged/slightly worse (`3.180/7.196 ->
+3.183/7.215 deg`, gap `3.106 -> 3.104u`).  The experiment was not deployed.
+
+A review of the first dynamic v3 found the principal reason it collapsed onto
+the Heavy body: it used base/slim edge lengths as the in-plane rest metric.
+The final raw conform requires substantial graded expansion:
+
+- all raw/base edges: p50 `1.2186x`, p95 `1.9630x`;
+- active-active edges: p50 `1.1236x`, p95 `1.9857x`;
+- the hand sculpt independently has active-active p50 `1.1024x`, p95
+  `2.0627x`.
+
+Therefore the raw conform already contains approximately the right
+**intrinsic metric**; its defect is mainly extrinsic position/curvature.  The
+next solver must take edge lengths from the graded raw mesh without taking raw
+vertex positions as a distributed target.  For continuation use
+`L(t)=Lbase*exp(t*log(Lraw/Lbase))`; for the causal first probe start at the
+final raw pose/body with `L0=Lraw`, fixed supports at raw, no soft attraction,
+then settle under gravity and frictionless contact.
+
+The audit also found that the legacy vectorized Jacobi update is not valid
+XPBD: it stores the full multiplier update while applying position correction
+divided by vertex valence and relaxation.  Compliance consequently depends on
+topology and the solver never reaches the metric it believes it enforced.
+`tools/shell_spike.py` now contains an isolated analytic diedro gradient and a
+deterministic conflict-free colored-Gauss-Seidel prototype plus synthetic
+selftests.  This remains harness-only research.  Before any C++ port it must
+demonstrate convergence, timestep stability, non-negative physical contact,
+and the complete plumb+gap+integrity gate.
+
+#### Current physical-probe verdict (no candidate, 2026-07-16)
+
+The exact-raw metric and corrected GS family have now been exercised far
+enough to reject the current parameterizations.  Against the global live
+plumb gate (`3.164/7.189 deg` area-mean/area-p90):
+
+- continuation with corrected raw metric: `4.313/8.440 deg`;
+- raw-settle with legacy Jacobi: `4.122/7.473 deg`;
+- raw-settle colored GS, soft bend: `4.386/8.814 deg`;
+- colored GS, medium bend/contact `0.02u`: `4.141/8.414 deg`;
+- area-mass physical GS, strong bend: `4.398/7.871 deg`.
+
+The later candidates preserve/increase gap instead of cheating by body contact,
+which validates the rest-metric diagnosis, but all worsen plumb.  The strong
+physical run also fails its own solver gate: no convergence in 90 frames,
+`5` flips, `1` collapsed face, and p95 stretch `1.0667x`; its active vertices
+do finish above the contact floor (`0` active violations), while `145` fixed
+legacy supports remain inside it.  Nothing in this table is deployable.
+
+A contact-disabled invariant test (`g=0`, `x0=raw`, `L0=Lraw`, bend off) stays
+exactly at raw: zero indexed/surface error, zero strain and convergence in one
+frame.  This validates the corrected membrane/integrator core but is not a
+visual candidate; raw itself contains the body-following pose.  The next
+research blocker is physical contact/support treatment plus fold control
+(ultimately self-collision), not another gravity-strength sweep.
+
+### Worktree ownership / safe staging
+
+The intended checkpoint allowlist is `PATH_B_HANDOFF.md`,
+`SHELL_SPIKE_LOG.md`, `tools/pathb_plumb_gate.py`, `tools/shell_spike.py`, and
+the default-preserving `algo/conform_hook.cpp` toggle.  Never stage the
+user-owned `corpus/golden/fur_blacksmith_rm_heavy.json`, the untracked
+`scripts/capture_outfitstudio_vfs.ps1`, or the runtime
+`shell_solve_on.flag`.  Do not use `git add -A`.
