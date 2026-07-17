@@ -31,13 +31,14 @@ def load_obj(path):
 
 
 def region(p, center):
-    # azimuth relative to body center: front(+y), back(-y), sides
+    # ORIENTATION VERIFIED 2026-07-17 (pathb_view.Orientation): the character
+    # FACES -y in this pipeline. Labels before that date were MIRRORED.
     dx, dy = p[0] - center[0], p[1] - center[1]
     if abs(dx) < 4.0 and abs(dy) < 4.0:
         return "crotch/central"
     if abs(dy) >= abs(dx):
-        return "front" if dy > 0 else "back"
-    return "right" if dx > 0 else "left"
+        return "front" if dy < 0 else "back"
+    return "x+" if dx > 0 else "x-"
 
 
 def main():

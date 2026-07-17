@@ -1448,3 +1448,30 @@ verticalmente (corda tensa), suavizado, radial-pra-fora = SEMPRE factível
   cross-garment (generaliza ou não), SÓ ENTÃO implementar em C++.
 DRAPE_SHELL_HULL default 0 (off); shadow ring default 0 (hull subsume ao
 chegar). DLL live = marco 14. Corpus OFF verde.
+
+## Marco 16 (2026-07-17): O PIPELINE DE VISÃO — eu estava ESPELHADO (frente=costas)
+
+Usuário: "precisamos melhorar a maneira de VOCÊ enxergar os resultados... o
+codex havia descoberto que vc estava olhando a frente do vestido como se fosse
+as costas." CONFIRMADO POR ANATOMIA: -y = FRENTE (barriga pendente ápice z64,
+dobra da cintura z82, seios z94), +y = COSTAS (dorso largo plano z70-94, nuca
+recuada z112). TODA análise anterior tratava y<0 como costas: perfis, leakmap,
+renders rotulados, e a leitura do sculpt do marco 15.
+
+REINTERPRETAÇÃO com rótulos certos:
+- O "A-line 3.5-4u fora no bumbum" = o AVENTAL FRONTAL parado longe da
+  BARRIGA (e blacksmith tem avental de couro na frente - rigidez de avental).
+- Costas do sculpt: +2.5-4.7 das pernas embaixo, +1.5-3 do dorso em cima.
+- sim m14 real: FRENTE colada na barriga (16.4 vs sculpt 19-20), costas
+  SOBRE-flaradas no hem (14.0 vs 10.5!) e sub-flaradas no meio.
+- fur-thickness (marco 15) sobrevive parcialmente: dilatação assimétrica
+  (frente >> costas), não uniforme.
+
+FERRAMENTA NOVA (regra permanente): tools/pathb_view.py
+- Orientation.detect(): eixos por VOTOS ANATÔMICOS em runtime (nuca + vale
+  frontal barriga/dobra/seios), exige 2 votos concordantes, RECUSA a chutar.
+- render_views/contact_sheet: corpo+roupa sombreado, câmeras nomeadas em
+  termos do PERSONAGEM, rótulo da orientação carimbado em cada imagem.
+- REGRA: toda afirmação visual passa por este módulo; contact-sheet
+  candidato|produção|sculpt nas mesmas câmeras antes de qualquer juízo.
+- pathb_leakmap.region() corrigido (front/back estavam trocados).
