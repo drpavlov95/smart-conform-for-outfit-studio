@@ -9460,14 +9460,12 @@ static void PathBDumpLivePublished(const std::vector<Vec3>& verts,
                                    const char* shape) {
     const char* tmp = getenv("TEMP");
     if (!tmp) return;
-    std::string path = std::string(tmp) + "\drape_live_published.obj";
+    std::string path = std::string(tmp) + "\\drape_live_published.obj";
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
-    fprintf(f, "# live published shape=%s verts=%zu
-", shape, verts.size());
+    fprintf(f, "# live published shape=%s verts=%zu\n", shape, verts.size());
     for (const Vec3& v : verts)
-        fprintf(f, "v %.6f %.6f %.6f
-", v.x, v.y, v.z);
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
     fclose(f);
     HLog("path-b-shell: live publish dumped (%zu verts) -> %s",
          verts.size(), path.c_str());
