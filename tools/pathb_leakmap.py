@@ -117,8 +117,9 @@ def main():
     for k in np.nonzero(spen)[0]:
         tri_pen[tid[k]] = True
 
-    views = [("back", -90), ("back_left", -135), ("left", 180),
-             ("front", 90), ("right", 0)]
+    # camera names in CHARACTER terms (azim=-90 = camera on -y = sees FRONT)
+    views = [("front", -90), ("front_x-", -135), ("profile_x-", 180),
+             ("back", 90), ("profile_x+", 0)]
     for name, azim in views:
         fig = plt.figure(figsize=(7, 10))
         ax = fig.add_subplot(111, projection="3d")
