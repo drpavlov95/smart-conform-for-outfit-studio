@@ -7847,7 +7847,8 @@ static bool PathBBuildTopology(
     const std::vector<Vec3>& baseVerts,
     const std::vector<std::array<uint16_t, 3>>& tris,
     std::vector<PathBShellEdge>& outEdges,
-    std::vector<PathBShellHinge>& outHinges)
+    std::vector<PathBShellHinge>& outHinges,
+    std::vector<uint8_t>& outBoundary)
 {
     struct EdgeRef { uint16_t opposite, u, v; };
     std::unordered_map<uint32_t, std::vector<EdgeRef>> edgeFaces;
@@ -7871,12 +7872,14 @@ static bool PathBBuildTopology(
     outHinges.clear();
     outEdges.reserve(keys.size());
     outHinges.reserve(keys.size());
+    outBoundary.assign(baseVerts.size(), 0);
     for (uint32_t key : keys) {
         uint16_t a = (uint16_t)(key >> 16);
         uint16_t b = (uint16_t)(key & 0xFFFFu);
         float rest = Len(Sub(baseVerts[a], baseVerts[b]));
         if (rest > 1.0e-6f) outEdges.push_back(PathBShellEdge{a, b, rest});
         const auto& refs = edgeFaces[key];
+        if (refs.size() == 1) { outBoundary[a] = 1; outBoundary[b] = 1; }
         if (refs.size() == 2) {
             PathBShellHinge h;
             h.v = {refs[0].u, refs[0].v, refs[0].opposite, refs[1].opposite};
@@ -7893,7 +7896,9 @@ static void PathBStretchJacobi(
     const std::vector<float>& invMass,
     std::vector<float>& lambdas,
     float compliance,
-    bool tensionOnly)
+    bool tensionOnly,
+    float compressCompliance,
+    const std::vector<uint8_t>& boundary)
 {
     const size_t n = x.size();
     std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
@@ -7905,9 +7910,18 @@ static void PathBStretchJacobi(
         Vec3 normal = length > 1.0e-30f
             ? Scale(d, 1.0f / length) : Vec3{0.0f, 0.0f, 0.0f};
         float c = length - e.rest;
-        float denom = invMass[e.a] + invMass[e.b] + compliance;
+        // asymmetric in-plane response: compressed edges (c<0) resist with a
+        // softer compliance - real fabric buckles cheaply but not for free
+        // (pure tension-only let the hem collapse around each leg).
+        float effC = (c < 0.0f && !tensionOnly) ? compressCompliance : compliance;
+        // hem tape: boundary edges resist compression at full tension
+        // stiffness - a real garment hem is folded+stitched fabric and does
+        // not concertina (the crumpled free border the user saw).
+        if (c < 0.0f && !boundary.empty() && boundary[e.a] && boundary[e.b])
+            effC = compliance;
+        float denom = invMass[e.a] + invMass[e.b] + effC;
         if (denom <= 1.0e-30f) continue;
-        float dl = (-c - compliance * lambdas[ei]) / denom;
+        float dl = (-c - effC * lambdas[ei]) / denom;
         if (tensionOnly) {
             // C=length-rest<=0, therefore lambda<=0. Project the accumulated
             // multiplier every iteration so slack edges discharge stale tension.
@@ -7935,7 +7949,8 @@ static void PathBBendingJacobi(
     const std::vector<float>& invMass,
     std::vector<float>& lambdas,
     float compliance,
-    int analyticVariant)
+    int analyticVariant,
+    const std::vector<uint8_t>& boundary)
 {
     const size_t n = x.size();
     std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
@@ -7944,14 +7959,19 @@ static void PathBBendingJacobi(
         const auto& h = hinges[hi];
         auto local = PathBHingeLocal(x, h);
         float c = PathBWrapAngle(PathBSignedDihedral(local) - h.restAngle);
+        float effCompliance = compliance;
+        if (!boundary.empty() &&
+            (boundary[h.v[0]] || boundary[h.v[1]] ||
+             boundary[h.v[2]] || boundary[h.v[3]]))
+            effCompliance = compliance * 0.05f;   // hem hinge: 20x stiffer
         auto grad = analyticVariant >= 0
             ? PathBDihedralGradientsAnalytic(local, analyticVariant)
             : PathBDihedralGradientsNumeric(local);
-        float denom = compliance;
+        float denom = effCompliance;
         for (int lv = 0; lv < 4; ++lv)
             denom += invMass[h.v[(size_t)lv]] * Len2(grad[(size_t)lv]);
         if (denom <= 1.0e-30f) continue;
-        float dl = (-c - compliance * lambdas[hi]) / denom;
+        float dl = (-c - effCompliance * lambdas[hi]) / denom;
         lambdas[hi] += dl;
         for (int lv = 0; lv < 4; ++lv) {
             uint16_t vi = h.v[(size_t)lv];
@@ -8463,7 +8483,8 @@ static bool PathBSimV2Solve(
 
     std::vector<PathBShellEdge> edges;
     std::vector<PathBShellHinge> hinges;
-    if (!PathBBuildTopology(baseVerts, tris, edges, hinges)) {
+    std::vector<uint8_t> boundaryVert;
+    if (!PathBBuildTopology(baseVerts, tris, edges, hinges, boundaryVert)) {
         failReason = "empty shell topology";
         return false;
     }
@@ -8473,8 +8494,14 @@ static bool PathBSimV2Solve(
     const float stretchCompliance = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_STRETCH_COMPLIANCE", 2.0e-4f));
     const float bendCompliance = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_BEND_COMPLIANCE", 2.0e-2f));
-    const bool tensionOnly = EnvToggle("DRAPE_SHELL_TENSION_ONLY", true);
+        EnvFloat("DRAPE_SHELL_BEND_COMPLIANCE", 1.0e-4f));
+    const bool tensionOnly = EnvToggle("DRAPE_SHELL_TENSION_ONLY", false);
+    // asymmetric in-plane response: strong against extension, moderate against
+    // compression. Pure tension-only let the hem circumference collapse around
+    // each leg for free (the 'skirt becomes pants' the user saw); real fabric
+    // buckles OUTWARD into folds because compression is cheap but not free.
+    const float compressCompliance = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_COMPRESS_COMPLIANCE", 2.0e-3f));
     // SIM CORE 1 (2026-07-16): the support law is CONTACT, not the drape
     // classifier. Cloth authored worn against the body (authored gap <=
     // kAttach) is attachment and follows the conform there; everything else is
@@ -8498,7 +8525,14 @@ static bool PathBSimV2Solve(
             return false;
         }
         authoredGapArr[i] = authoredGap;
-        contactFloor[i] = std::min(authoredGap, clearance);
+        // RADIAL RULE (user, 2026-07-16): cloth that was AUTHORED away from
+        // the body may never end up closer to it than authored - the body can
+        // push cloth out, never suck it in. min(gap, clearance) let the freed
+        // skirt rest 0.02 off the skin = the shrink-wrap the user saw live.
+        // A distance floor also bridges body valleys automatically (a >=4u
+        // offset surface cannot enter a narrow concavity), which is the
+        // rule's other half. Worn cloth keeps its small authored floor.
+        contactFloor[i] = std::max(authoredGap, clearance);
     }
     // SIM CORE 2: physical mass from authored surface area (a vertex owns 1/3
     // of each incident triangle). invMass weights CONSTRAINT corrections only;
@@ -8528,6 +8562,10 @@ static bool PathBSimV2Solve(
     // healthy (authored area, clamped); the worn band is instead held by a
     // SOFT ANCHOR ramp - the physical proxy for the friction/clamp that keeps
     // worn cloth on the body, which the sim does not model yet.
+    // PURE-PHYSICS TEST (user, 2026-07-16): 0 = no artificial pull toward the
+    // vanilla pose; worn band held only by hard pins + the radial floor.
+    const float kSoftAnchor = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_SOFT_ANCHOR", 0.0f));
     std::vector<float> softAnchor(n, 0.0f);
     for (size_t i = 0; i < n; ++i) {
         if (fixed[i]) { invMass[i] = 0.0f; continue; }
@@ -8536,7 +8574,7 @@ static bool PathBSimV2Solve(
         float u = ClampRange((authoredGapArr[i] - kAttachLo) /
                              (kAttachHi - kAttachLo), 0.0f, 1.0f);
         u = u * u * (3.0f - 2.0f * u);
-        softAnchor[i] = 0.18f * (1.0f - u) * (1.0f - u);
+        softAnchor[i] = kSoftAnchor * (1.0f - u) * (1.0f - u);
     }
     std::vector<float> faceContactFloor(
         tris.size() * std::size(kTriangleSamples), clearance);
@@ -8550,7 +8588,7 @@ static bool PathBSimV2Solve(
                 return false;
             }
             faceContactFloor[ti * std::size(kTriangleSamples) + si] =
-                std::min(authoredGap, clearance);
+                std::max(authoredGap, clearance);   // radial rule (see above)
         }
     }
 
@@ -8644,9 +8682,9 @@ static bool PathBSimV2Solve(
                 x[i].z -= gravity;
             }
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
-                               stretchCompliance, tensionOnly);
+                               stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
             PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
-                               analyticVariant);
+                               analyticVariant, boundaryVert);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             for (size_t i = 0; i < n; ++i) {
                 if (invMass[i] <= 0.0f) continue;
@@ -8708,9 +8746,9 @@ static bool PathBSimV2Solve(
                            0.05f, 1.0f),
                 worstFaceContact);
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
-                               stretchCompliance, tensionOnly);
+                               stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
             PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
-                               analyticVariant);
+                               analyticVariant, boundaryVert);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
         }
@@ -10217,7 +10255,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     failReason = "face-integrity closure gate";
                 } else if (!closureStable) {
                     failReason = "local closure did not converge";
-                } else if (!PathBBuildTopology(baseVerts, *tris, gateEdges, gateHinges) ||
+                } else if (!([&]{ std::vector<uint8_t> scratchB; return PathBBuildTopology(baseVerts, *tris, gateEdges, gateHinges, scratchB); }()) ||
                            !PathBComputeIntegrity(productionEntry, baseVerts, gateEdges,
                                                   *tris, *bodyBVH, entryIntegrity) ||
                            !PathBComputeIntegrity(shellCandidate, baseVerts, gateEdges,
@@ -17920,9 +17958,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  finalBodyClosure.finalWorsened,
                  finalFaceClosure.finalWorsened, stable ? 1 : 0);
 
+            std::vector<uint8_t> finalScratchBoundary;
             if (finalAccepted &&
                 (!PathBBuildTopology(baseVerts, *tris,
-                                     finalGateEdges, finalGateHinges) ||
+                                     finalGateEdges, finalGateHinges,
+                                     finalScratchBoundary) ||
                  !PathBComputeIntegrity(pathBShellIntegrityBaseline, baseVerts,
                                         finalGateEdges, *tris, *bodyBVH,
                                         baselineIntegrity) ||

@@ -1298,3 +1298,38 @@ e dobras suaves. DLL ced2831d5db8 deployada nas 2 cópias; flags live:
 shell_solve_on + shell_transactions_off. **GATE VISUAL DO USUÁRIO ABERTO.**
 Próximos: defeitos da barra (flips/self-collision), facePen, velocidade,
 depois ampliar escopo.
+
+## 2026-07-16 — marco 11: RADIAL RULE no sim + física pura — shrink-wrap RESOLVIDO
+
+Gate visual do usuário no marco 10 reprovou: "o tecido está praticamente todo
+colado ao corpo" (screenshots: saia virou "calça" em volta das pernas). Ele
+diagnosticou: **faltou enforçar o radial rule**. Correto duas vezes:
+
+1. **RADIAL RULE como piso de contato**: o piso do tecido livre era
+   `min(authoredGap, 0.02)` — deixava a saia descansar a 0.02 do corpo. Agora
+   `max(authoredGap, clearance)`: tecido autorado longe NUNCA chega mais perto
+   que o standoff autoral (unilateral — só o corpo empurra). Bônus: superfície
+   de distância ≥4u ponteia vales automaticamente (a regra dos vales de graça).
+   Aplicado a vértices E amostras de face.
+2. **Rigidez real**: dobra 200× mais dura (2e-2→1e-4; o amassado flamba na
+   escala da aresta quando a dobra é mole) + compressão assimétrica (arestas
+   comprimidas resistem a compliance própria 2e-3 — só-tração deixava a
+   circunferência da barra colapsar em volta de cada perna) + bainha (bordas:
+   compressão nível-tração, dobras de borda 20× — ajudou pouco; o vilão era a
+   rigidez global).
+3. **Física pura (pedido do usuário)**: `DRAPE_SHELL_SOFT_ANCHOR` default 0 —
+   zero atração artificial ao pose vanilla; sobram só pinos duros do tecido
+   VESTIDO (condição de contorno), contato empurra-só, radial floor, gravidade,
+   tração/dobra. Knob 0.18 restaura o proxy de atrito p/ A/B.
+
+Resultado (blacksmith, sim-mode): **pen=0 (primeira vez; entry 193)**, facePen
+1231→~500, CLING RESOLVIDO (gap médio dos authored-far 6.69 ≈ autoral 6.06;
+shrink-wrap era 3.89 c/ p10 0.28; produção 5.36), corpo da saia com standoff e
+roundness naturais no render. Determinístico; corpus OFF 18/18. ~50s/conform.
+
+**ABERTO (próxima batalha): a BARRA** — flambagem caótica na borda livre
+(flips ~80-184 concentrados ali; excesso de tecido acumulado pela gravidade
+dobra na escala da aresta; sem auto-colisão as dobras se interpenetram).
+STIFF10x encolheu a zona; resta o rodapé. Candidatos: auto-colisão local no
+hem, damping de gravidade na borda, ou dobras de resolução (subdivisão local).
+DLL 074ca4dd7da6 deployada; flags shell_solve_on + shell_transactions_off.
