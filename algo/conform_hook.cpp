@@ -9452,6 +9452,27 @@ static bool PathBSimV2Solve(
     return true;
 }
 
+// SEEING-PIPELINE live dump: the user judges the LIVE session mesh, which is
+// measurably different from the corpus capture (entry facePen 2226 vs 1231).
+// Every accepted live publish is dumped so the render pipeline can show
+// EXACTLY what his eye sees. Verts only; topology comes from the capture.
+static void PathBDumpLivePublished(const std::vector<Vec3>& verts,
+                                   const char* shape) {
+    const char* tmp = getenv("TEMP");
+    if (!tmp) return;
+    std::string path = std::string(tmp) + "\drape_live_published.obj";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    fprintf(f, "# live published shape=%s verts=%zu
+", shape, verts.size());
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f
+", v.x, v.y, v.z);
+    fclose(f);
+    HLog("path-b-shell: live publish dumped (%zu verts) -> %s",
+         verts.size(), path.c_str());
+}
+
 // The real solver body. NEVER call this directly outside the ApplyStaticClothPass
 // wrapper below (U1, crash containment) Ã¢â‚¬â€ this function and everything it calls
 // is where a bug in ~8000 lines of solver code could raise a hardware exception
@@ -10993,6 +11014,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             pathBShellIntegrityBaseline = productionEntry;
                             finalVerts = std::move(shellCandidate);
                             pathBShellAccepted = true;
+                        PathBDumpLivePublished(finalVerts, shapeName.c_str());
                         }
                     }
                     else if (!bodySamplesOk) failReason =
@@ -11004,6 +11026,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         pathBShellIntegrityBaseline = productionEntry;
                         finalVerts = std::move(shellCandidate);
                         pathBShellAccepted = true;
+                        PathBDumpLivePublished(finalVerts, shapeName.c_str());
                     }
                 }
             }
