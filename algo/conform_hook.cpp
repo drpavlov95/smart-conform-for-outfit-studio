@@ -8816,6 +8816,123 @@ static bool PathBSimV2Solve(
         }
     }
 
+    // PRODUCTION-SILHOUETTE CEILING (user's circles, 2026-07-17): his taste
+    // measured pointwise = the TIGHTER of {production, plumb-sim} everywhere
+    // (front: min(10,14.8)=10; back: min(17.4,16.3)=16.3). The sim may fall
+    // tighter than production (the approved plumb) but never WIDER - which
+    // kills the front hem-tip flare (14.0 vs prod 10.0) and the profile
+    // lumps. Declared prosthesis: references the entry (production) result
+    // as an outer bound only; one-sided inward, capped, azimuth-smoothed.
+    PathBDrapeHull prodCeil;
+    {
+        std::vector<Vec3> entry(n);
+        for (size_t i = 0; i < n; ++i)
+            entry[i] = Add(baseVerts[i], raw[i]);
+        double sx = 0.0, sy = 0.0;
+        for (const Vec3& v : entry) { sx += v.x; sy += v.y; }
+        prodCeil.cx = (float)(sx / n);
+        prodCeil.cy = (float)(sy / n);
+        float zLo = 1.0e30f, zHi = -1.0e30f;
+        for (size_t i = 0; i < n; ++i) {
+            if (fixed[i]) continue;
+            zLo = std::min(zLo, entry[i].z);
+            zHi = std::max(zHi, entry[i].z);
+        }
+        prodCeil.zMin = std::floor(zLo) - 1.0f;
+        prodCeil.nSlabs = (int)std::ceil(zHi - prodCeil.zMin) + 2;
+        if (prodCeil.nSlabs > 2 && prodCeil.nSlabs <= 512) {
+            const int NS = prodCeil.nSectors, NZ = prodCeil.nSlabs;
+            prodCeil.floorR.assign((size_t)NS * NZ, -1.0f);
+            for (size_t i = 0; i < n; ++i) {
+                if (fixed[i] || authoredGapArr[i] < -0.1f) continue;
+                const int slab = (int)std::floor(entry[i].z - prodCeil.zMin);
+                if (slab < 0 || slab >= NZ) continue;
+                const float r = std::hypot(entry[i].x - prodCeil.cx,
+                                           entry[i].y - prodCeil.cy);
+                float& e = prodCeil.floorR[
+                    (size_t)prodCeil.sectorOf(entry[i].x, entry[i].y) * NZ + slab];
+                if (e < 0.0f || r > e) e = r;
+            }
+            // fill empty slabs from neighbours above (envelope continuity)
+            for (int sct = 0; sct < NS; ++sct) {
+                float last = -1.0f;
+                for (int z2 = NZ - 1; z2 >= 0; --z2) {
+                    float& e = prodCeil.floorR[(size_t)sct * NZ + z2];
+                    if (e < 0.0f) e = last; else last = e;
+                }
+            }
+            for (int pass = 0; pass < 2; ++pass) {
+                std::vector<float> sm = prodCeil.floorR;
+                for (int sct = 0; sct < NS; ++sct) {
+                    const int sl = (sct + NS - 1) % NS, sr2 = (sct + 1) % NS;
+                    for (int z2 = 0; z2 < NZ; ++z2) {
+                        const float c = prodCeil.floorR[(size_t)sct * NZ + z2];
+                        if (c < 0.0f) continue;
+                        float acc = 2.0f * c, w = 2.0f;
+                        const float l = prodCeil.floorR[(size_t)sl * NZ + z2];
+                        const float r2 = prodCeil.floorR[(size_t)sr2 * NZ + z2];
+                        if (l >= 0.0f) { acc += l; w += 1.0f; }
+                        if (r2 >= 0.0f) { acc += r2; w += 1.0f; }
+                        sm[(size_t)sct * NZ + z2] = acc / w;
+                    }
+                }
+                prodCeil.floorR.swap(sm);
+            }
+            prodCeil.valid = true;
+            // PLUMB ENVELOPE on the same grid: per sector, the body's max
+            // radius per slab, swept downward (a hanging fabric cannot be
+            // inside the silhouette of what it hangs over) + fabric offset.
+            // CHANNEL = min(production envelope, plumb envelope): the user's
+            // measured taste pointwise (back: plumb 16.35 wins; front:
+            // production 10 wins). Two-sided with asymmetric slack.
+            const int NS2 = prodCeil.nSectors, NZ2 = prodCeil.nSlabs;
+            std::vector<float> bodyMax((size_t)NS2 * NZ2, -1.0f);
+            for (const Vec3& v : morphedBody.verts) {
+                const int slab = (int)std::floor(v.z - prodCeil.zMin);
+                if (slab < 0 || slab >= NZ) continue;
+                const float r = std::hypot(v.x - prodCeil.cx, v.y - prodCeil.cy);
+                float& e = bodyMax[(size_t)prodCeil.sectorOf(v.x, v.y) * NZ + slab];
+                if (e < 0.0f || r > e) e = r;
+            }
+            for (int pass = 0; pass < 2; ++pass) {
+                std::vector<float> sm = bodyMax;
+                for (int sct = 0; sct < NS2; ++sct) {
+                    const int sl = (sct + NS2 - 1) % NS2, sr2 = (sct + 1) % NS2;
+                    for (int z2 = 0; z2 < NZ2; ++z2) {
+                        const float c = bodyMax[(size_t)sct * NZ2 + z2];
+                        if (c < 0.0f) continue;
+                        float acc = 2.0f * c, w = 2.0f;
+                        const float l = bodyMax[(size_t)sl * NZ2 + z2];
+                        const float r2 = bodyMax[(size_t)sr2 * NZ2 + z2];
+                        if (l >= 0.0f) { acc += l; w += 1.0f; }
+                        if (r2 >= 0.0f) { acc += r2; w += 1.0f; }
+                        sm[(size_t)sct * NZ2 + z2] = acc / w;
+                    }
+                }
+                bodyMax.swap(sm);
+            }
+            const float kPlumbOff =
+                std::max(0.0f, EnvFloat("DRAPE_SHELL_PLUMB_OFF", 0.15f));
+            for (int sct = 0; sct < NS2; ++sct) {
+                float run = -1.0f;
+                for (int z2 = NZ2 - 1; z2 >= 0; --z2) {   // sweep DOWN
+                    const size_t k = (size_t)sct * NZ2 + z2;
+                    if (bodyMax[k] > run) run = bodyMax[k];
+                    float plumb = run >= 0.0f ? run + kPlumbOff : -1.0f;
+                    float& ch = prodCeil.floorR[k];
+                    if (ch >= 0.0f && plumb >= 0.0f)
+                        ch = std::min(ch, plumb);
+                }
+            }
+        }
+    }
+    const float kCeilSlack =
+        std::max(0.0f, EnvFloat("DRAPE_SHELL_CEIL_SLACK", 0.5f));
+    const float kFloorSlack =
+        std::max(0.0f, EnvFloat("DRAPE_SHELL_CHAN_FLOOR_SLACK", 1.2f));
+    const bool ceilOn =
+        prodCeil.valid && EnvFloat("DRAPE_SHELL_CEIL", 1.0f) > 0.5f;
+
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
@@ -9196,6 +9313,28 @@ static bool PathBSimV2Solve(
                     }
                     PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
                 }
+            }
+            if (ceilOn) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;
+                    const float er = prodCeil.floorAt(x[i].x, x[i].y, x[i].z);
+                    if (er < 0.0f) continue;
+                    const float dx2 = x[i].x - prodCeil.cx;
+                    const float dy2 = x[i].y - prodCeil.cy;
+                    const float r = std::hypot(dx2, dy2);
+                    if (r < 1.0e-4f) continue;
+                    const float hi = er + kCeilSlack;
+                    const float lo = er - kFloorSlack;
+                    float move = 0.0f;
+                    if (r > hi) move = -std::min(r - hi, kContactStepC);
+                    else if (r < lo) move = std::min(lo - r, kContactStepC);
+                    if (move == 0.0f) continue;
+                    const float inv = 1.0f / r;
+                    x[i].x += dx2 * inv * move;
+                    x[i].y += dy2 * inv * move;
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             // FACE CONTACT IN THE BALANCE (deploy-gate lesson: facePen is the
             // user-visible leak class; the timid post-loop reconciliation let

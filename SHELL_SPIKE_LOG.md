@@ -1518,3 +1518,22 @@ contenção local do tip; nunca knob global de retorno.
 
 Estado deployado inalterado (marco 14). Knob return+freio commitado inerte
 (default 0) para A/B futuro.
+
+## Marco 19 (2026-07-17): CANAL min(produção, prumo) — os dois círculos atingidos com UMA regra
+
+A régua medida dos círculos do usuário é pointwise: gosto = o MAIS JUSTO entre
+{envelope da produção, envelope de prumo do corpo}. Front: min(10, 14.8)=10 ✓
+(círculo produção); back: min(17.4, 16.35)=16.35 ✓ (círculo sim). Implementado
+como canal por setor×slab (grid do drape hull): prodEnv = raio máximo do estado
+de ENTRADA (resultado da produção, que o solve já recebe) + plumbEnv = corpo
+varrido pra baixo + 0.15; canal = min; piso = canal-1.2, teto = canal+0.5;
+push radial capado, autoral-dentro isento, weld após. Prótese DECLARADA:
+referencia produção só como TETO externo; o prumo/queda continuam físicos.
+
+Config live (flags, sem env): FRONT 8.8-9.7 liso (prod 9.7-10.5; flare 14.0
+morto, abraço morto), BACK 14.5-16.6 (prumo aprovado mantido, mais liso que
+m14). Corpus OFF 18/18, determinístico byte-idêntico, Release deployado nas
+2 pastas. Falsificações do caminho: ceiling-só (frente caiu pro abraço 6.3 —
+"mais justo que ambos" nunca foi endossado), retorno uniforme (marco 18).
+
+Validação pendente: OLHO DO USUÁRIO no OS (reiniciar) + círculos no overlay.
