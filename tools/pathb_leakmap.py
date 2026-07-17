@@ -31,13 +31,14 @@ def load_obj(path):
 
 
 def region(p, center):
-    # ORIENTATION VERIFIED 2026-07-17 (pathb_view.Orientation): the character
-    # FACES -y in this pipeline. Labels before that date were MIRRORED.
+    # ORIENTATION settled 2026-07-17 by CALF/KNEE anatomy + user confirmation:
+    # the character FACES +y. (A same-day torso-landmark 'correction' briefly
+    # flipped this - torso landmarks are ambiguous on heavy bodies.)
     dx, dy = p[0] - center[0], p[1] - center[1]
     if abs(dx) < 4.0 and abs(dy) < 4.0:
         return "crotch/central"
     if abs(dy) >= abs(dx):
-        return "front" if dy < 0 else "back"
+        return "front" if dy > 0 else "back"
     return "x+" if dx > 0 else "x-"
 
 
@@ -117,9 +118,9 @@ def main():
     for k in np.nonzero(spen)[0]:
         tri_pen[tid[k]] = True
 
-    # camera names in CHARACTER terms (azim=-90 = camera on -y = sees FRONT)
-    views = [("front", -90), ("front_x-", -135), ("profile_x-", 180),
-             ("back", 90), ("profile_x+", 0)]
+    # camera names in CHARACTER terms (front=+y: azim=+90 = camera on +y = sees FRONT)
+    views = [("front", 90), ("back_x-", -135), ("profile_x-", 180),
+             ("back", -90), ("profile_x+", 0)]
     for name, azim in views:
         fig = plt.figure(figsize=(7, 10))
         ax = fig.add_subplot(111, projection="3d")

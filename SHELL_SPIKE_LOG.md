@@ -1475,3 +1475,24 @@ FERRAMENTA NOVA (regra permanente): tools/pathb_view.py
 - REGRA: toda afirmação visual passa por este módulo; contact-sheet
   candidato|produção|sculpt nas mesmas câmeras antes de qualquer juízo.
 - pathb_leakmap.region() corrigido (front/back estavam trocados).
+
+## Marco 17 (2026-07-17): correção da correção — FRENTE=+y (pernas decidem; usuário confirmou)
+
+O marco 16 publicou FRENTE=-y com selo "VERIFIED" — ERRADO, e o usuário pegou
+na primeira imagem ("front e back estao invertidos também"). Causa: torso de
+corpo heavy é AMBÍGUO (bumbum->lombar->escápula imita barriga->dobra->seios;
+os dois lados têm vale). Âncora definitiva = PERNAS: panturrilha (z13-22)
+protrai pra trás (-y), patela/quadríceps (z34-42) pra frente (+y) ==> FRENTE=+y.
+Detector reescrito com esses 2 votos + recusa; leakmap/câmeras revertidos;
+leitura do marco 15 RESTAURADA (A-line do sculpt = fora do BUMBUM).
+
+CALIBRAÇÃO PELO OLHO DELE (circulou o melhor de cada vista no sheet):
+- COSTAS: sim marco14 (o prumo do bumbum) — preferido AO PRÓPRIO SCULPT.
+- FRENTE e PERFIL: produção.
+- Sculpt: não circulado em nada => trilho direcional, nunca alvo literal.
+NOVO GATE: costas como o sim m14 (manter), frente/perfil como produção
+(alvo), julgado em contact-sheet + overlay de silhuetas, martelo dele.
+Defeito real prioritário do sim: FRENTE (hem frontal ~14 vs ~10 + lombas).
+
+REGRAS: "verificado" só existe após confirmação do usuário na 1a imagem de
+cada garment; formato legível pra ele = overlay de silhuetas (não sheet 3D).

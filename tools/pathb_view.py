@@ -34,29 +34,34 @@ class Orientation:
             if not m.sum():
                 return 0.0
             return float((sign * b[m][:, 1]).max())
-        votes = 0
-        # nape: at the very top the BACK recedes toward the axis
-        top = b[:, 2].max()
-        nape_p = ext(top - 4, top + 1, +1.0)
-        nape_m = ext(top - 4, top + 1, -1.0)
-        if abs(nape_p - nape_m) > 2.0:
-            votes += 1 if nape_p < nape_m else -1     # smaller top side = back
-        # mid-torso VALLEY: the front has belly(z~64) / waist-crease(z~82) /
-        # breasts(z~94) = a local minimum between two maxima; the back is
-        # monotone. valley depth = min(mid) below BOTH shoulders of the band.
-        def valley(sign):
-            prof = [ext(z, z + 6, sign) for z in range(58, 102, 6)]
-            lo = min(prof[2:6])
-            return min(max(prof[0:2]) - lo, max(prof[6:]) - lo)
-        v_p, v_m = valley(+1.0), valley(-1.0)
-        if abs(v_p - v_m) > 0.8:
-            votes += 1 if v_p < v_m else -1   # deeper valley = FRONT (-> other side is back)
-        if abs(votes) < 2:
+        # LESSON (2026-07-17, caught by the user): torso landmarks are
+        # AMBIGUOUS on a heavy body - butt/lumbar/scapula mimics the
+        # belly/crease/breast valley, and the first version of this detector
+        # published a WRONG verdict stamped 'VERIFIED'. The LEGS are not
+        # ambiguous: the gastrocnemius (calf, lower leg) bulges BACKWARD and
+        # the patella/quads (knee band) bulge FORWARD - mechanically fixed
+        # anatomy, immune to weight morphs. Both voters must agree.
+        legs = (np.abs(b[:, 0]) > 1.5) & (np.abs(b[:, 0]) < 10)
+        def leg_side(zlo, zhi):
+            # mean per-leg asymmetry: + => bulge toward +y
+            vals = []
+            for sx in (+1.0, -1.0):
+                m = legs & (np.sign(b[:, 0]) == sx) &                     (b[:, 2] >= zlo) & (b[:, 2] < zhi)
+                if not m.sum():
+                    continue
+                yc = b[m][:, 1].mean()
+                vals.append((b[m][:, 1].max() - yc) - (yc - b[m][:, 1].min()))
+            return float(np.mean(vals)) if vals else 0.0
+        zmin = float(b[:, 2].min())
+        calf = leg_side(zmin + 2, zmin + 11)    # pure calf band: bulges BACK
+        knee = leg_side(zmin + 23, zmin + 31)   # knee/quads band: bulges FRONT
+        vote_calf = -np.sign(calf)   # front is the OPPOSITE of the calf bulge
+        vote_knee = np.sign(knee)
+        if vote_calf == 0 or vote_knee == 0 or vote_calf != vote_knee:
             raise SystemExit(
-                f"Orientation.detect: anatomy votes inconclusive ({votes:+d}) "
-                "- REFUSE to guess. Inspect the capture manually.")
-        # votes>0 => +y is the back => front is -y
-        return cls(front_sign=-1.0 if votes > 0 else +1.0)
+                f"Orientation.detect: leg voters disagree (calf={calf:+.2f} "
+                f"knee={knee:+.2f}) - REFUSE to guess. Inspect manually.")
+        return cls(front_sign=float(vote_calf))
 
     def label(self):
         return (f"FRONT={'-y' if self.front_sign < 0 else '+y'} "
