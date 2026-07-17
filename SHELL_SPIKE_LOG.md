@@ -1496,3 +1496,25 @@ Defeito real prioritário do sim: FRENTE (hem frontal ~14 vs ~10 + lombas).
 
 REGRAS: "verificado" só existe após confirmação do usuário na 1a imagem de
 cada garment; formato legível pra ele = overlay de silhuetas (não sheet 3D).
+
+## Marco 18 (2026-07-17): frente do sim — retorno de catenária FALSIFICADO (3 variantes)
+
+Alvo pelos círculos do usuário: frente ≈ produção (10.0-10.5 z36-60), costas
+≈ sim m14 (16.3-15.3, prumo do bumbum). A/B com o knob novo
+DRAPE_SHELL_SHADOW_RETURN (+ freio pelo standoff autoral):
+- ring4 puro (m14): frente 14.0 no hem-tip ✗ / costas ✓ (aprovadas)
+- ring4+ret 0.10: frente 4.4 (puxa pra dentro das canelas) ✗ / costas 12.3 ✗
+- ring0: frente cola na canela 7.0 ✗ / costas 13.7 ✗
+- ret 0.10 + FREIO autoral: frente 6.9-8.1 (sub-entrega; gap 3D "nearest"
+  aponta pra LATERAL da perna, não pro raio de queda) ✗ / costas 12.0 ✗
+CONCLUSÃO: retorno uniforme quebra as costas aprovadas em TODAS as formas;
+freio por gap-3D não segura prumo (nearest ≠ radial). FALSIFICADO, parar.
+
+ACHADO que estreita o problema: a ofensa da frente do m14 é só o HEM-TIP
+(z36-40: 14.0/12.4 vs prod 10.0/10.1); z44-60 já está próximo (10.8-7.6 vs
+9.9-10.5). Próximo desenho (sessão nova): tratar a QUEDA A PARTIR DO SUPORTE
+DO TECIDO por setor (linha de queda da fábrica, não parede do corpo) OU
+contenção local do tip; nunca knob global de retorno.
+
+Estado deployado inalterado (marco 14). Knob return+freio commitado inerte
+(default 0) para A/B futuro.

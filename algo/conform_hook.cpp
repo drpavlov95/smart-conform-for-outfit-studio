@@ -8886,6 +8886,12 @@ static bool PathBSimV2Solve(
         // whole leg region (>4 cells) and is skipped.
         const int kShadowRing =
             (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 0.0f));
+        // catenary return (production-tested knob): below a protrusion the
+        // cloth falls BACK toward the body by this rate per unit depth -
+        // the physical fix for the belly-shelf the pure plumb made of the
+        // FRONT hem (user's circles: front must read like production).
+        const float kShadowReturn =
+            std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RETURN", 0.0f));
         const bool shadowOn = kShadowRing > 0 &&
             BuildGravityShadow(bodyVerts, refBody.tris, kShadowCell,
                                shadowCeiling, stepShadow);
@@ -9130,16 +9136,41 @@ static bool PathBSimV2Solve(
                     if (shadowHits[i] > 40) continue;
                     float ox = 0.0f, oy = 0.0f;
                     if (!GravityShadowPushOut(stepShadow, x[i], kFaceHard,
-                                              0.0f, kShadowRing, ox, oy))
+                                              kShadowReturn, kShadowRing, ox, oy))
                         continue;
                     ++shadowHits[i];
                     // never push THROUGH the body (inner-thigh wall case):
                     // a target inside the body belongs to body contact.
+                    // AND: the catenary return may pull inward, but never
+                    // closer to the body than the AUTHORED standoff - the
+                    // user's radial rule in its correct role (the return's
+                    // BRAKE). Measured: production's approved front = body +
+                    // authored gap (~10 at the shins); his approved back =
+                    // body + authored gap (~15.7-16.3 under the butt). One
+                    // rule, both sides.
                     Vec3 tgt{ox, oy, x[i].z};
                     float tgtGap = 0.0f;
-                    if (BVHSignedGap(body, tgt, tgtGap, nullptr) &&
-                        tgtGap < 0.0f)
-                        continue;
+                    if (BVHSignedGap(body, tgt, tgtGap, nullptr)) {
+                        if (tgtGap < 0.0f) continue;
+                        if (tgtGap < contactFloor[i]) {
+                            // shrink the inward pull so the target sits at
+                            // the authored standoff instead
+                            const float curGap =
+                                vertGap[i] < 1.0e8f ? vertGap[i] : tgtGap;
+                            if (curGap >= contactFloor[i] &&
+                                tgtGap < curGap) {
+                                const float t2 =
+                                    (curGap - contactFloor[i]) /
+                                    std::max(curGap - tgtGap, 1.0e-6f);
+                                tgt.x = x[i].x + (ox - x[i].x) * t2;
+                                tgt.y = x[i].y + (oy - x[i].y) * t2;
+                                ox = tgt.x; oy = tgt.y;
+                            } else if (curGap < contactFloor[i] &&
+                                       tgtGap <= curGap) {
+                                continue;   // already inside authored: no pull
+                            }
+                        }
+                    }
                     push[i] = Vec3{ox - x[i].x, oy - x[i].y, 0.0f};
                     hasPush[i] = 1;
                     ++pushed;
