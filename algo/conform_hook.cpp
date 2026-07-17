@@ -8020,12 +8020,14 @@ static int PathBFaceContactProject(
     const std::vector<float>& contactFloors,
     float maxSampleStep,
     float relaxation,
-    float& worstCorrection)
+    float& worstCorrection,
+    const std::vector<uint8_t>* triActive = nullptr)
 {
     if (!body.valid || contactFloors.size() !=
             tris.size() * std::size(kTriangleSamples)) return 0;
     int moved = 0;
     for (size_t ti = 0; ti < tris.size(); ++ti) {
+        if (triActive && !(*triActive)[ti]) continue;   // broad-phase skip
         const auto& t = tris[ti];
         if (t[0] >= x.size() || t[1] >= x.size() || t[2] >= x.size())
             continue;
@@ -8058,8 +8060,16 @@ static int PathBFaceContactProject(
             if (denom <= 1.0e-30f) continue;
             for (int k = 0; k < 3; ++k) {
                 const float weight = invMass[vi[k]] * bary[k] / denom;
-                if (weight > 0.0f)
-                    x[vi[k]] = Add(x[vi[k]], Scale(correction, weight));
+                if (weight <= 0.0f) continue;
+                Vec3 mv = Scale(correction, weight);
+                // per-vert clamp: a lone movable vert with a small barycentric
+                // weight receives correction/b (amplified) - measured as edge
+                // spikes and a permanent 9-moves/round oscillation in the
+                // reconciliation. The sample resolves over more rounds instead.
+                const float mvLen = Len(mv);
+                if (mvLen > maxSampleStep && maxSampleStep > 0.0f)
+                    mv = Scale(mv, maxSampleStep / mvLen);
+                x[vi[k]] = Add(x[vi[k]], mv);
             }
             ++moved;
         }
@@ -8591,6 +8601,38 @@ static bool PathBSimV2Solve(
                 std::max(authoredGap, clearance);   // radial rule (see above)
         }
     }
+    // HARD face tier: the radial standoff at face level is geometrically
+    // infeasible between two body features (both thighs demand full authored
+    // standoff from a panel that spans them) - enforcing it in-loop burned
+    // ~1M face moves/step with worstFace 6-9u and never converged, while REAL
+    // penetrations (body through triangle interiors, the user-visible leak in
+    // all three shipped builds) stayed at facePen~730. Faces enforce only the
+    // feasible tier: no body through cloth + fabric thickness. The radial
+    // anti-cling standoff stays vertex-level, where it produced the look the
+    // user signed off on.
+    const float kFaceHard =
+        std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+    std::vector<float> faceHardFloor(faceContactFloor.size());
+    {
+        size_t k = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            for (size_t si = 0; si < std::size(kTriangleSamples); ++si, ++k) {
+                float authoredGap = 0.0f;
+                const Vec3 authoredPoint = SampleTrianglePoint(
+                    baseVerts, tris[ti], kTriangleSamples[si]);
+                if (!BVHSignedGap(refBody, authoredPoint, authoredGap, nullptr))
+                    authoredGap = 0.0f;
+                // cloth AUTHORED inside the base body (inner layers, knee
+                // straps at -4..-6u) is design, not a defect: production
+                // leaves it there and forcing it out both changes the
+                // authored look and ping-pongs forever between body features
+                // (the 5.8u worst that starved the cleanup budget).
+                faceHardFloor[k] = authoredGap < -0.1f
+                    ? -1.0e9f
+                    : std::min(faceContactFloor[k], kFaceHard);
+            }
+        }
+    }
 
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
@@ -8650,6 +8692,51 @@ static bool PathBSimV2Solve(
                 x[i] = anchorTarget[i];
             }
         }
+        // Face-clean the fixed band's targets: the worn band is pinned to the
+        // production pose, which already leaks body through triangle
+        // interiors (entry facePen=1231 measured) - the reason the butt/thigh
+        // leak survived three shipped builds is that the solver could never
+        // touch it. Only fixed verts move here (movable ones belong to the
+        // solver); only the hard tier is enforced.
+        {
+            std::vector<float> anchorMass(n, 0.0f);
+            for (size_t i = 0; i < n; ++i) if (fixed[i]) anchorMass[i] = 1.0f;
+            std::vector<uint8_t> triFixed(tris.size(), 0);
+            for (size_t ti = 0; ti < tris.size(); ++ti)
+                triFixed[ti] = fixed[tris[ti][0]] && fixed[tris[ti][1]] &&
+                               fixed[tris[ti][2]] ? 1 : 0;
+            float worstAnchorFace = 0.0f;
+            int anchorRounds = 0;
+            for (; anchorRounds < 40; ++anchorRounds) {
+                const int moved = PathBFaceContactProject(
+                    anchorTarget, tris, anchorMass, body, faceHardFloor,
+                    0.5f, 1.0f, worstAnchorFace, &triFixed);
+                if (moved == 0) break;
+            }
+            for (const auto& group : exactSeamGroups) {
+                Vec3 mean{0.0f, 0.0f, 0.0f};
+                int cnt = 0;
+                for (uint32_t vi : group)
+                    if (vi < n && fixed[vi]) { mean = Add(mean, anchorTarget[vi]); ++cnt; }
+                if (cnt < 2) continue;
+                mean = Scale(mean, 1.0f / (float)cnt);
+                for (uint32_t vi : group)
+                    if (vi < n && fixed[vi]) anchorTarget[vi] = mean;
+            }
+            for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+            if (anchorRounds > 0) {
+                float residWorst = 0.0f;
+                int residCount = 0;
+                PathBFaceContactProject(
+                    anchorTarget, tris, anchorMass, body, faceHardFloor,
+                    0.0f, 0.0f, residWorst, &triFixed);
+                residCount = PathBFaceContactProject(
+                    anchorTarget, tris, anchorMass, body, faceHardFloor,
+                    1.0e-9f, 1.0e-6f, residWorst, &triFixed);
+                HLog("path-b-shell: fixed-band face cleanup rounds=%d worst=%.4f residual(count=%d worst=%.4f)",
+                     anchorRounds, worstAnchorFace, residCount, residWorst);
+            }
+        }
         std::vector<float> stretchLambda(edges.size(), 0.0f);
         std::vector<float> bendLambda(hinges.size(), 0.0f);
         // sticky contact memory: between two body features (the legs) the
@@ -8686,6 +8773,7 @@ static bool PathBSimV2Solve(
             PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
                                analyticVariant, boundaryVert);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            std::vector<float> vertGap(n, 1.0e9f);
             for (size_t i = 0; i < n; ++i) {
                 if (invMass[i] <= 0.0f) continue;
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
@@ -8700,6 +8788,7 @@ static bool PathBSimV2Solve(
                 }
                 float dist = std::sqrt(d2);
                 float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
+                vertGap[i] = gap;
                 float floor = contactFloor[i];
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
@@ -8721,6 +8810,28 @@ static bool PathBSimV2Solve(
                 stickyHas[i] = 1;
                 ++contactMoves;
             }
+            // FACE CONTACT IN THE BALANCE (deploy-gate lesson: facePen is the
+            // user-visible leak class; the timid post-loop reconciliation let
+            // the body poke through triangle interiors in all three shipped
+            // builds). Runs EVERY iteration, capped like vertex contact, with
+            // a broad-phase skip from this iteration's vertex gaps.
+            {
+                std::vector<uint8_t> triActive(tris.size(), 0);
+                for (size_t ti = 0; ti < tris.size(); ++ti) {
+                    const auto& t = tris[ti];
+                    for (int k = 0; k < 3; ++k) {
+                        const float g = vertGap[t[(size_t)k]];
+                        if (g < 2.5f) { triActive[ti] = 1; break; }
+                    }
+                }
+                faceContactMoves += PathBFaceContactProject(
+                    x, tris, invMass, body, faceHardFloor,
+                    std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.25f)),
+                    ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
+                               0.05f, 1.0f),
+                    worstFaceContact, &triActive);
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
             itersUsed = iteration + 1;
             maxMove = 0.0f;
@@ -8731,26 +8842,6 @@ static bool PathBSimV2Solve(
             // converge: equilibrium = the constraints return the mesh to
             // (almost) where the gravity dose found it.
             if (maxMove <= kEps) break;
-        }
-        // FACE RECONCILIATION PHASE (fixed count, after equilibrium): the
-        // per-face floor pushes 0.15-0.2u per pass and the equilibrium pulls
-        // back - inside the loop that is a permanent limit cycle (measured:
-        // maxMove plateaued at 0.2-0.4 and never crossed eps). Vertex physics
-        // converges first; faces are then reconciled a fixed number of rounds,
-        // and the transactional acceptance closures police any残 face debt.
-        for (int fk = 0; fk < kFaceEvery * 2; ++fk) {
-            faceContactMoves += PathBFaceContactProject(
-                x, tris, invMass, body, faceContactFloor,
-                std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.20f)),
-                ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
-                           0.05f, 1.0f),
-                worstFaceContact);
-            PathBStretchJacobi(x, edges, invMass, stretchLambda,
-                               stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
-            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
-                               analyticVariant, boundaryVert);
-            PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
-            for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
         }
         totalIters += itersUsed;
         HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f contactMoves=%d faceMoves=%d worstContact=%.4f worstFace=%.4f",
@@ -8768,6 +8859,47 @@ static bool PathBSimV2Solve(
         for (size_t i = 0; i < n; ++i)
             lastAnchor[i] = Add(baseVerts[i], raw[i]);
         PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
+    }
+    {
+        BodyBVH fullBody;
+        BuildBodyBVH(morphedBody.verts, refBody.tris, fullBody);
+        if (fullBody.valid) {
+            std::vector<Vec3> lastAnchor(n);
+            for (size_t i = 0; i < n; ++i)
+                lastAnchor[i] = Add(baseVerts[i], raw[i]);
+            const float kVertHard =
+                std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+            float worstFinalFace = 0.0f;
+            int finalRounds = 0, finalMoves = 0;
+            for (; finalRounds < 60; ++finalRounds) {
+                int moved = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (fixed[i]) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(fullBody, x[i], cp, nrm, d2)) continue;
+                    const float dist = std::sqrt(d2);
+                    const float gap =
+                        Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
+                    if (authoredGapArr[i] < -0.1f) continue;   // authored-inside: vanilla parity
+                    const float floorV = std::min(contactFloor[i], kVertHard);
+                    if (gap >= floorV) continue;
+                    Vec3 move = Sub(Add(cp, Scale(nrm, floorV)), x[i]);
+                    const float moveLen = Len(move);
+                    if (moveLen > 0.5f) move = Scale(move, 0.5f / moveLen);
+                    x[i] = Add(x[i], move);
+                    ++moved;
+                }
+                moved += PathBFaceContactProject(
+                    x, tris, invMass, fullBody, faceHardFloor,
+                    0.5f, 1.0f, worstFinalFace, nullptr);
+                PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
+                finalMoves += moved;
+                if (moved == 0) break;
+            }
+            HLog("path-b-shell: hard reconciliation rounds=%d moves=%d worstFace=%.4f",
+                 finalRounds, finalMoves, worstFinalFace);
+        }
     }
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce

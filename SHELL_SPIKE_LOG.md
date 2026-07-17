@@ -1333,3 +1333,32 @@ dobra na escala da aresta; sem auto-colisão as dobras se interpenetram).
 STIFF10x encolheu a zona; resta o rodapé. Candidatos: auto-colisão local no
 hem, damping de gravidade na borda, ou dobras de resolução (subdivisão local).
 DLL 074ca4dd7da6 deployada; flags shell_solve_on + shell_transactions_off.
+
+## Marco 12 (2026-07-17): face-leak morto — a resposta aos "3 patches com o mesmo erro"
+
+**Root cause dos 3 patches**: a banda vestida (authoredGap<=0.3) é FIXA — o solver
+nunca pôde tocá-la — e seus alvos vêm da produção, QUE JÁ VAZA em nível de face
+(entry facePen=1231). O leak do bumbum/coxa era estruturalmente inalcançável.
+Agravante: a fase de reconciliação pós-loop era fraca demais e o floor radial em
+nível de FACE é geometricamente infactível entre as coxas (1M moves/step, worst 6-9u).
+
+**Fix (4 partes)**:
+1. Face contact DENTRO do loop de equilíbrio, toda iteração, broad-phase pelos
+   gaps de vértice da própria iteração, tier DURO só (min(radial, 0.15)).
+2. Face-cleanup dos ALVOS DE ÂNCORA da banda fixa (só triângulos 100% fixos;
+   converge em 9-20 rounds, residual ~20 amostras <=0.14u).
+3. Tecido AUTORAL-DENTRO do corpo (straps de joelho a -4..-6u) = design: sem
+   enforcement (paridade produção). Era o ping-pong que estourava o budget.
+4. Reconciliação final dura vs corpo 100% + clamp POR-VÉRTICE no projetor
+   (amostra com vért. móvel de peso pequeno recebia correção/b amplificada).
+
+**Resultado (Release, determinístico byte-idêntico, corpus OFF 18/18)**:
+facePen 1231(entry) -> 662 vs producao 1139; classe MÓVEL = 0 pens (produção
+tem!); bumbum/coxa z40-70 = ZERO; restante = autoral-raso costas (paridade,
+produção pior: 113@-0.81 vs 62@-0.96) + quadril sob o cinto (5 vs 50+ amostras).
+82s/conform. flips 159 (hem buckling, issue conhecida) — próximo alvo com o
+under-butt bridging.
+
+**Regras de deploy novas (permanentes)**: facePen visível bloqueia deploy;
+validação = render CORPO+ROUPA (tools/pathb_leakmap.py: mapa por classe/z-band
++ compostos); defeito conhecido no log nunca vai pro olho do usuário.
