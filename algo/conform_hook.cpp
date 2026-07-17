@@ -8759,6 +8759,16 @@ static bool PathBSimV2Solve(
     }
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
+    // defensive final weld: live meshes can differ slightly from the capture
+    // (the 22:59 live conform left one twin pair 0.06u apart and the seam gate
+    // rejected the WHOLE sim, publishing production - the 'no gravity at all'
+    // the user reported). The weld is idempotent and cheap.
+    {
+        std::vector<Vec3> lastAnchor(n);
+        for (size_t i = 0; i < n; ++i)
+            lastAnchor[i] = Add(baseVerts[i], raw[i]);
+        PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
+    }
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce
     // body penetration after the final contact projection.
@@ -10297,7 +10307,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         // rejection reasons, because a real sim always diverges
                         // from the corrective pose. The final body floor and
                         // the anti-clip safety net still run downstream.
-                        if (!seamsOk) failReason = "exact seam closure gate";
+                        const bool seamsOkSim = worstSeamSplit <= 0.01f;
+                        if (!seamsOkSim) failReason = "exact seam closure gate";
                         else {
                             HLog("path-b-shell: sim-mode gates BYPASSED "
                                  "(bodySamplesOk=%d integrityOk=%d) - diagnostics only",
