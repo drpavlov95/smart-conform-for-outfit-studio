@@ -9442,6 +9442,67 @@ static bool PathBSimV2Solve(
             lastAnchor[i] = Add(baseVerts[i], raw[i]);
         PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
     }
+    // CLEFT BRIDGE (user 2026-07-17 "a saia nao pode entrar na bunda"): the
+    // solved skirt shrink-wraps the buttocks and dips into the gluteal cleft.
+    // Reuse the production horizontal-bridge (validated falmer/vampire): per
+    // z-slab it finds a same-Z body concavity flanked by two higher shoulders
+    // (the cleft) and lifts the cloth dip out to the bridging line, so the
+    // skirt passes smooth OVER the cleft. Laplacian smoothing erases banding;
+    // the hard reconciliation below repairs any body penetration.
+    if (EnvFloat("DRAPE_SHELL_HBRIDGE", 1.0f) > 0.5f) {
+        HorizontalBridgeProfile hbp;
+        if (BuildHorizontalBridgeProfile(morphedBody.verts, morphedBody.tris,
+                                         kHBridgeZCell, kHBridgeAngleBins,
+                                         1.0e30f, hbp) && hbp.valid) {
+            std::vector<Vec3> bridgeAnchor(n);
+            for (size_t i = 0; i < n; ++i)
+                bridgeAnchor[i] = Add(baseVerts[i], raw[i]);
+            std::vector<float> drapeEl(n, 0.0f);
+            for (size_t i = 0; i < n; ++i)
+                drapeEl[i] = (!fixed[i] && authoredGapArr[i] >= -0.1f) ? 1.0f : 0.0f;
+            std::vector<uint8_t> lifted(n, 0);
+            const int kBridgeRounds = (int)ClampRange(
+                EnvFloat("DRAPE_SHELL_HBRIDGE_ROUNDS", 3.0f), 1.0f, 8.0f);
+            int totalLifts = 0;
+            for (int rd = 0; rd < kBridgeRounds; ++rd) {
+                std::vector<float> clothR;
+                BuildHorizontalBridgeClothProfile(hbp, x, drapeEl, clothR);
+                int lifts = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (drapeEl[i] < 0.20f) continue;
+                    float targetR = 0.0f, dirX = 0.0f, dirY = 0.0f;
+                    if (HorizontalBridgeTargetR(
+                            hbp, clothR, x[i], clearance, kHBridgeZWindow,
+                            kHBridgeMaxAngle, kHBridgeBodyDepth, kHBridgeClothDip,
+                            targetR, dirX, dirY) &&
+                        MoveRadiallyOut(x[i], dirX, dirY,
+                                        std::min(targetR,
+                                                 RadialRadius(x[i]) + kHBridgeMaxStep),
+                                        0.5f)) {
+                        lifted[i] = 1;
+                        ++lifts;
+                    }
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
+                totalLifts += lifts;
+                if (lifts == 0) break;
+            }
+            for (int sm = 0; sm < 4; ++sm) {
+                std::vector<Vec3> upd = x;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!lifted[i] || vertNeighbors[i].empty()) continue;
+                    Vec3 avg{0.0f, 0.0f, 0.0f};
+                    for (uint32_t nb : vertNeighbors[i]) avg = Add(avg, x[nb]);
+                    avg = Scale(avg, 1.0f / (float)vertNeighbors[i].size());
+                    upd[i] = Add(Scale(x[i], 0.4f), Scale(avg, 0.6f));
+                }
+                x = upd;
+            }
+            PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
+            HLog("path-b-shell: cleft bridge lifts=%d (rounds<=%d)",
+                 totalLifts, kBridgeRounds);
+        }
+    }
     {
         const BodyBVH& fullBody = morphedBody;   // already built by the caller
         if (fullBody.valid) {
