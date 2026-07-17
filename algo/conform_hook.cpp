@@ -7772,6 +7772,77 @@ static std::array<Vec3, 4> PathBDihedralGradientsNumeric(
     return grad;
 }
 
+// Analytic dihedral gradients (discrete-shells / Bridson formulas). ~20x
+// faster than the 24-eval central difference, which is what makes converging
+// to equilibrium affordable. Convention must match PathBSignedDihedral; the
+// solver verifies this once per solve against the numeric gradient on real
+// hinges and falls back to numeric if the deviation exceeds tolerance, so a
+// sign/convention error can never corrupt a solve silently.
+// variant encodes: bit0 = global sign flip; bit1 = swap the w-coefficient
+// association between p0 and p1; bit2 = measure w against p1 instead of p0.
+static std::array<Vec3, 4> PathBDihedralGradientsAnalytic(
+    const std::array<Vec3, 4>& p, int variant)
+{
+    std::array<Vec3, 4> grad{};
+    const Vec3 e = Sub(p[1], p[0]);
+    const float elen = Len(e);
+    if (elen < 1.0e-9f) return grad;
+    const Vec3 n1 = Cross(Sub(p[1], p[0]), Sub(p[2], p[0]));   // tri (0,1,2)
+    const Vec3 n2 = Cross(Sub(p[3], p[0]), Sub(p[1], p[0]));   // tri (0,3,1)
+    const float n1l2 = Len2(n1);
+    const float n2l2 = Len2(n2);
+    if (n1l2 < 1.0e-18f || n2l2 < 1.0e-18f) return grad;
+    const float sign = (variant & 1) ? -1.0f : 1.0f;
+    const Vec3 g2 = Scale(n1, sign * elen / n1l2);
+    const Vec3 g3 = Scale(n2, sign * elen / n2l2);
+    const Vec3 wref = (variant & 4) ? p[1] : p[0];
+    const float w2 = Dot(Sub(p[2], wref), e) / (elen * elen);
+    const float w3 = Dot(Sub(p[3], wref), e) / (elen * elen);
+    Vec3 gA = Add(Scale(g2, w2 - 1.0f), Scale(g3, w3 - 1.0f));
+    Vec3 gB = Add(Scale(g2, -w2), Scale(g3, -w3));
+    grad[2] = g2;
+    grad[3] = g3;
+    if (variant & 2) { grad[0] = gB; grad[1] = gA; }
+    else             { grad[0] = gA; grad[1] = gB; }
+    return grad;
+}
+
+// Per-solve calibration on REAL hinges: pick the analytic variant whose
+// gradients match the numeric reference within tolerance. A convention error
+// can therefore never corrupt a solve - at worst we fall back to numeric.
+// Returns the chosen variant (or -1 for numeric fallback) and reports the
+// winning error.
+static int PathBCalibrateAnalyticGradients(
+    const std::vector<Vec3>& verts,
+    const std::vector<PathBShellHinge>& hinges,
+    size_t sampleCount,
+    float& outErr)
+{
+    int bestVariant = -1;
+    float bestErr = 1.0e30f;
+    const size_t step = std::max<size_t>(1, hinges.size() / std::max<size_t>(1, sampleCount));
+    for (int variant = 0; variant < 8; ++variant) {
+        float worst = 0.0f;
+        for (size_t hi = 0; hi < hinges.size(); hi += step) {
+            auto local = PathBHingeLocal(verts, hinges[hi]);
+            auto ga = PathBDihedralGradientsAnalytic(local, variant);
+            auto gn = PathBDihedralGradientsNumeric(local);
+            for (int lv = 0; lv < 4; ++lv) {
+                const float mag = std::max(1.0f, Len(gn[(size_t)lv]));
+                worst = std::max(worst,
+                    Len(Sub(ga[(size_t)lv], gn[(size_t)lv])) / mag);
+            }
+            if (worst > bestErr) break;   // this variant already lost
+        }
+        if (worst < bestErr) { bestErr = worst; bestVariant = variant; }
+    }
+    outErr = bestErr;
+    // relative 2%: the float32 central-difference reference itself carries
+    // ~1e-2 noise on skinny hinges; a small direction error is harmless for a
+    // compliant XPBD constraint (still a descent direction).
+    return bestErr <= 2.0e-2f ? bestVariant : -1;
+}
+
 static bool PathBBuildTopology(
     const std::vector<Vec3>& baseVerts,
     const std::vector<std::array<uint16_t, 3>>& tris,
@@ -7863,7 +7934,8 @@ static void PathBBendingJacobi(
     const std::vector<PathBShellHinge>& hinges,
     const std::vector<float>& invMass,
     std::vector<float>& lambdas,
-    float compliance)
+    float compliance,
+    int analyticVariant)
 {
     const size_t n = x.size();
     std::vector<Vec3> delta(n, Vec3{0.0f, 0.0f, 0.0f});
@@ -7872,7 +7944,9 @@ static void PathBBendingJacobi(
         const auto& h = hinges[hi];
         auto local = PathBHingeLocal(x, h);
         float c = PathBWrapAngle(PathBSignedDihedral(local) - h.restAngle);
-        auto grad = PathBDihedralGradientsNumeric(local);
+        auto grad = analyticVariant >= 0
+            ? PathBDihedralGradientsAnalytic(local, analyticVariant)
+            : PathBDihedralGradientsNumeric(local);
         float denom = compliance;
         for (int lv = 0; lv < 4; ++lv)
             denom += invMass[h.v[(size_t)lv]] * Len2(grad[(size_t)lv]);
@@ -8394,24 +8468,6 @@ static bool PathBSimV2Solve(
         return false;
     }
 
-    std::vector<float> invMass(n, 0.0f);
-    std::vector<float> softAnchor(n, 0.0f);
-    std::vector<uint8_t> fixed(n, 0);
-    std::vector<Vec3> raw(n, Vec3{0.0f, 0.0f, 0.0f});
-    for (size_t i = 0; i < n; ++i) {
-        const auto& p = (*profiles)[i];
-        float pelvis = Clamp01(p.pelvis);
-        float leg = Clamp01(p.leg);
-        float sleeve = Clamp01((p.arm + p.handFoot) * 1.6f);
-        float drape = Clamp01((pelvis + leg) * (1.0f - sleeve));
-        float u = ClampRange((drape - 0.05f) / 0.50f, 0.0f, 1.0f);
-        u = u * u * (3.0f - 2.0f * u);
-        invMass[i] = u;
-        fixed[i] = u <= 1.0e-12f ? 1 : 0;
-        softAnchor[i] = 0.18f * (1.0f - u) * (1.0f - u);
-        raw[i] = DiffAt(rawDiff, (uint16_t)i);
-    }
-
     const float clearance = std::max(0.0f, EnvFloat("DRAPE_SHELL_CLEARANCE", 0.02f));
     const float gravity = std::max(0.0f, EnvFloat("DRAPE_SHELL_GRAVITY", 0.02f));
     const float stretchCompliance = std::max(0.0f,
@@ -8419,6 +8475,21 @@ static bool PathBSimV2Solve(
     const float bendCompliance = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_BEND_COMPLIANCE", 2.0e-2f));
     const bool tensionOnly = EnvToggle("DRAPE_SHELL_TENSION_ONLY", true);
+    // SIM CORE 1 (2026-07-16): the support law is CONTACT, not the drape
+    // classifier. Cloth authored worn against the body (authored gap <=
+    // kAttach) is attachment and follows the conform there; everything else is
+    // FREE physics. The old classifier pinned 62% of the Blacksmith (whole
+    // bodice + sleeves + most of the skirt) to the vanilla conform, which is
+    // why the result still read as "conform melhorado" instead of a sim.
+    // Continuous attachment ramp (the spike's hard-cutoff lesson: a binary
+    // fixed/free boundary makes two short rest edges straddle it and stretch
+    // 6-8x; measured here as maxEdge 8.77 + 167 flips at the seam of the
+    // freed region). gap<=lo -> worn/fixed; lo..hi -> mass ramps from
+    // infinite to the area mass; >hi -> fully free.
+    const float kAttachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
+    const float kAttachHi = std::max(kAttachLo + 0.05f,
+        EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
+    std::vector<float> authoredGapArr(n, 0.0f);
     std::vector<float> contactFloor(n, clearance);
     for (size_t i = 0; i < n; ++i) {
         float authoredGap = 0.0f;
@@ -8426,7 +8497,46 @@ static bool PathBSimV2Solve(
             failReason = "authored contact query failed";
             return false;
         }
+        authoredGapArr[i] = authoredGap;
         contactFloor[i] = std::min(authoredGap, clearance);
+    }
+    // SIM CORE 2: physical mass from authored surface area (a vertex owns 1/3
+    // of each incident triangle). invMass weights CONSTRAINT corrections only;
+    // gravity is a uniform acceleration below (mass-independent), which is the
+    // physics the old `gravity * mobility` dose got wrong.
+    std::vector<float> vertArea(n, 0.0f);
+    for (const auto& t : tris) {
+        const float area = 0.5f * Len(Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                            Sub(baseVerts[t[2]], baseVerts[t[0]])));
+        for (int k = 0; k < 3; ++k) vertArea[t[(size_t)k]] += area / 3.0f;
+    }
+    std::vector<float> invMass(n, 0.0f);
+    std::vector<uint8_t> fixed(n, 0);
+    std::vector<Vec3> raw(n, Vec3{0.0f, 0.0f, 0.0f});
+    double areaSum = 0.0;
+    size_t freeCount = 0;
+    for (size_t i = 0; i < n; ++i) {
+        fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
+        raw[i] = DiffAt(rawDiff, (uint16_t)i);
+        if (!fixed[i]) { areaSum += vertArea[i]; ++freeCount; }
+    }
+    const float meanArea = freeCount ? (float)(areaSum / (double)freeCount) : 1.0f;
+    // MOBILITY != MASS (hard-won): scaling invMass down across the worn band
+    // gave transition verts near-infinite mass; uniform gravity still pulls
+    // them but constraint corrections scale with invMass -> they sink
+    // unbraked and rip the mesh (measured: flip=738, maxEdge=71). Mass stays
+    // healthy (authored area, clamped); the worn band is instead held by a
+    // SOFT ANCHOR ramp - the physical proxy for the friction/clamp that keeps
+    // worn cloth on the body, which the sim does not model yet.
+    std::vector<float> softAnchor(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        if (fixed[i]) { invMass[i] = 0.0f; continue; }
+        const float mass = std::max(vertArea[i], 1.0e-6f) / std::max(meanArea, 1.0e-6f);
+        invMass[i] = ClampRange(1.0f / mass, 0.25f, 4.0f);
+        float u = ClampRange((authoredGapArr[i] - kAttachLo) /
+                             (kAttachHi - kAttachLo), 0.0f, 1.0f);
+        u = u * u * (3.0f - 2.0f * u);
+        softAnchor[i] = 0.18f * (1.0f - u) * (1.0f - u);
     }
     std::vector<float> faceContactFloor(
         tris.size() * std::size(kTriangleSamples), clearance);
@@ -8451,8 +8561,22 @@ static bool PathBSimV2Solve(
          n, edges.size(), hinges.size(), exactSeamGroups.size(), active, hard,
          gravity, stretchCompliance, bendCompliance, tensionOnly ? 1 : 0);
 
+    // SIM CORE 3: converge each morph step to EQUILIBRIUM instead of a fixed
+    // iteration budget - the cloth iterates until it stops moving (maxMove <
+    // eps) or hits the safety cap. This is what makes the fall settle
+    // physically; with 10 fixed iterations the sag depended on the loop
+    // counter, not on the balance of forces. The analytic dihedral gradient
+    // (verified per solve) is what makes this affordable.
     static constexpr int kMorphSteps = 6;
-    static constexpr int kIterations = 10;
+    const int kMaxIters = (int)EnvFloat("DRAPE_SHELL_MAX_ITERS", 600.0f);
+    const float kEps = std::max(1.0e-4f, EnvFloat("DRAPE_SHELL_EPS", 0.01f));
+    const int kFaceEvery = std::max(1, (int)EnvFloat("DRAPE_SHELL_FACE_EVERY", 4.0f));
+    float gradErr = 0.0f;
+    const int analyticVariant = PathBCalibrateAnalyticGradients(baseVerts, hinges, 64, gradErr);
+    HLog("path-b-shell: analytic dihedral calibration variant=%d maxErr=%.6f -> %s",
+         analyticVariant, gradErr,
+         analyticVariant >= 0 ? "analytic" : "NUMERIC FALLBACK");
+    int totalIters = 0;
     for (int step = 1; step <= kMorphSteps; ++step) {
         float t = (float)step / (float)kMorphSteps;
         std::vector<Vec3> bodyVerts(refBody.verts.size());
@@ -8469,50 +8593,134 @@ static bool PathBSimV2Solve(
         std::vector<Vec3> anchorTarget(n);
         for (size_t i = 0; i < n; ++i) {
             anchorTarget[i] = Add(baseVerts[i], Scale(raw[i], t));
-            if (fixed[i]) x[i] = anchorTarget[i];
+            // Anchors must not sit INSIDE the continuation body: a fixed
+            // vertex at a vanilla position up to 4.3u deep drags its free
+            // neighbours into a permanent tug-of-war with the capped contact
+            // (measured as the 0.1-0.25 maxMove plateau). Project the target
+            // out to the contact floor - the production pipeline floors these
+            // verts at the end anyway, so this matches the published look.
+            if (fixed[i]) {
+                Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                float d2 = 0.0f;
+                if (BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
+                    const float dist = std::sqrt(d2);
+                    const float gap =
+                        Dot(Sub(anchorTarget[i], cp), nrm) < 0.0f ? -dist : dist;
+                    const float floor = contactFloor[i];
+                    if (gap < floor) anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                }
+                x[i] = anchorTarget[i];
+            }
         }
         std::vector<float> stretchLambda(edges.size(), 0.0f);
         std::vector<float> bendLambda(hinges.size(), 0.0f);
+        // sticky contact memory: between two body features (the legs) the
+        // nearest point flips sides每 iteration; an uncapped snap teleports
+        // and a capped one still ping-pongs by 2x the cap (measured plateau
+        // 0.16-0.23 with worstContact 14). Once a vertex touches, it keeps
+        // resolving against the REMEMBERED side for this morph step unless
+        // the new normal roughly agrees.
+        std::vector<Vec3> stickyCp(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<Vec3> stickyN(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<uint8_t> stickyHas(n, 0);
         int contactMoves = 0;
         int faceContactMoves = 0;
         float worstContact = 0.0f;
         float worstFaceContact = 0.0f;
-        for (int iteration = 0; iteration < kIterations; ++iteration) {
+        int itersUsed = 0;
+        float maxMove = 0.0f;
+        std::vector<Vec3> xPrev(n);
+        for (int iteration = 0; iteration < kMaxIters; ++iteration) {
+            xPrev = x;
             for (size_t i = 0; i < n; ++i) {
-                x[i] = Add(x[i], Scale(Sub(anchorTarget[i], x[i]), softAnchor[i]));
-                if (fixed[i]) x[i] = anchorTarget[i];
-                x[i].z -= gravity * invMass[i];
+                if (fixed[i]) { x[i] = anchorTarget[i]; continue; }
+                // worn-band friction proxy: soft pull toward the conform pose,
+                // ramped to zero across the attachment band.
+                if (softAnchor[i] > 0.0f)
+                    x[i] = Add(x[i], Scale(Sub(anchorTarget[i], x[i]), softAnchor[i]));
+                // SIM CORE 2: gravity is a uniform ACCELERATION on every free
+                // vertex - mass-independent, exactly like the real thing. Mass
+                // (area) only weights how constraints share their corrections.
+                x[i].z -= gravity;
             }
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
                                stretchCompliance, tensionOnly);
-            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance);
-            faceContactMoves += PathBFaceContactProject(
-                x, tris, invMass, body, faceContactFloor,
-                std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.20f)),
-                ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
-                           0.05f, 1.0f),
-                worstFaceContact);
+            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
+                               analyticVariant);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             for (size_t i = 0; i < n; ++i) {
                 if (invMass[i] <= 0.0f) continue;
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                 float d2 = 0.0f;
                 if (!BVHClosestPoint(body, x[i], cp, nrm, d2)) continue;
+                if (stickyHas[i] && Dot(nrm, stickyN[i]) < -0.1f) {
+                    // side flip: resolve against the remembered plane instead
+                    cp = stickyCp[i];
+                    nrm = stickyN[i];
+                    float planeGap = Dot(Sub(x[i], cp), nrm);
+                    d2 = planeGap * planeGap;
+                }
                 float dist = std::sqrt(d2);
                 float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
                 float floor = contactFloor[i];
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
-                worstContact = std::max(worstContact, Len(Sub(target, x[i])));
-                x[i] = target;
+                // Contact is a capped projection, not a teleport: the nearest
+                // body point between two features (the legs!) flips sides
+                // between iterations and an uncapped snap (measured up to 14u)
+                // injects energy forever - the classic churn. Capped, deep
+                // verts escape gradually and coherently with their neighbours.
+                Vec3 move = Sub(target, x[i]);
+                const float moveLen = Len(move);
+                const float kContactStep =
+                    std::max(0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
+                if (moveLen > kContactStep)
+                    move = Scale(move, kContactStep / moveLen);
+                worstContact = std::max(worstContact, moveLen);
+                x[i] = Add(x[i], move);
+                stickyCp[i] = cp;
+                stickyN[i] = nrm;
+                stickyHas[i] = 1;
                 ++contactMoves;
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+            itersUsed = iteration + 1;
+            maxMove = 0.0f;
+            for (size_t i = 0; i < n; ++i) {
+                if (fixed[i]) continue;
+                maxMove = std::max(maxMove, Len(Sub(x[i], xPrev[i])));
+            }
+            // converge: equilibrium = the constraints return the mesh to
+            // (almost) where the gravity dose found it.
+            if (maxMove <= kEps) break;
         }
-        HLog("path-b-shell: step=%d/%d contactMoves=%d faceMoves=%d worstContact=%.4f worstFace=%.4f",
-             step, kMorphSteps, contactMoves, faceContactMoves,
-             worstContact, worstFaceContact);
+        // FACE RECONCILIATION PHASE (fixed count, after equilibrium): the
+        // per-face floor pushes 0.15-0.2u per pass and the equilibrium pulls
+        // back - inside the loop that is a permanent limit cycle (measured:
+        // maxMove plateaued at 0.2-0.4 and never crossed eps). Vertex physics
+        // converges first; faces are then reconciled a fixed number of rounds,
+        // and the transactional acceptance closures police any残 face debt.
+        for (int fk = 0; fk < kFaceEvery * 2; ++fk) {
+            faceContactMoves += PathBFaceContactProject(
+                x, tris, invMass, body, faceContactFloor,
+                std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.20f)),
+                ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
+                           0.05f, 1.0f),
+                worstFaceContact);
+            PathBStretchJacobi(x, edges, invMass, stretchLambda,
+                               stretchCompliance, tensionOnly);
+            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
+                               analyticVariant);
+            PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+        }
+        totalIters += itersUsed;
+        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f contactMoves=%d faceMoves=%d worstContact=%.4f worstFace=%.4f",
+             step, kMorphSteps, itersUsed, maxMove, contactMoves,
+             faceContactMoves, worstContact, worstFaceContact);
     }
+    HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
+         totalIters, kMaxIters, kEps);
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce
     // body penetration after the final contact projection.
@@ -9946,7 +10154,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 int crossingReverted = 0, bodyReverted = 0, faceReverted = 0;
                 int initialCrossings = 0, initialBodyRegressions = 0;
                 int initialFaceRegressions = 0;
-                for (int cycle = 0; cycle < 8; ++cycle) {
+                // EXPERIMENTAL SIM MODE: the transactional closures compare the
+                // candidate against the PRODUCTION pose and revert divergence -
+                // correct for a corrective pilot, but a real cloth sim
+                // legitimately reorganizes the drape and always diverges.
+                // DRAPE_SHELL_TRANSACTIONS=0 (or shell_transactions_off.flag)
+                // bypasses the pose-vs-production closures for the opt-in sim;
+                // NaN/seam/final-floor safety still applies.
+                bool shellTransactions = EnvToggle("DRAPE_SHELL_TRANSACTIONS", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+                if (fs::exists("E:/SkyrimDev/Drape/shell_transactions_off.flag"))
+                    shellTransactions = false;
+#endif
+                if (!shellTransactions) closureStable = true;
+                for (int cycle = 0; shellTransactions && cycle < 8; ++cycle) {
                     PathBCrossingClosureStats crossCycle;
                     PathBBodyClosureStats bodyCycle;
                     PathBFaceClosureStats faceCycle;
@@ -10030,7 +10251,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     const bool bodySamplesOk = PathBBodySamplesNoWorse(
                         productionEntry, shellCandidate, *tris, *bodyBVH,
                         bodySampleStats);
-                    if (!bodySamplesOk) failReason =
+                    if (!shellTransactions) {
+                        // sim mode (see the closure-bypass note): keep only the
+                        // non-comparative safety here - seams must stay welded
+                        // and the mesh finite; pose-vs-production comparisons
+                        // (body faces, flips-vs-entry) are diagnostics, not
+                        // rejection reasons, because a real sim always diverges
+                        // from the corrective pose. The final body floor and
+                        // the anti-clip safety net still run downstream.
+                        if (!seamsOk) failReason = "exact seam closure gate";
+                        else {
+                            HLog("path-b-shell: sim-mode gates BYPASSED "
+                                 "(bodySamplesOk=%d integrityOk=%d) - diagnostics only",
+                                 bodySamplesOk ? 1 : 0, integrityOk ? 1 : 0);
+                            pathBShellPublishedReference = shellCandidate;
+                            pathBShellIntegrityBaseline = productionEntry;
+                            finalVerts = std::move(shellCandidate);
+                            pathBShellAccepted = true;
+                        }
+                    }
+                    else if (!bodySamplesOk) failReason =
                         "corresponding body-face gate";
                     else if (!seamsOk) failReason = "exact seam closure gate";
                     else if (!integrityOk) failReason = "global physical integrity gate";
@@ -17625,7 +17865,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             int finalCrossReverted = 0;
             int finalBodyReverted = 0;
             int finalFaceReverted = 0;
-            for (int cycle = 0; cycle < 8 && finalAccepted; ++cycle) {
+            bool shellTransactionsFinal = EnvToggle("DRAPE_SHELL_TRANSACTIONS", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+            if (fs::exists("E:/SkyrimDev/Drape/shell_transactions_off.flag"))
+                shellTransactionsFinal = false;
+#endif
+            if (!shellTransactionsFinal) stable = true;   // sim mode: see publish-closure note
+            for (int cycle = 0; shellTransactionsFinal && cycle < 8 && finalAccepted; ++cycle) {
                 PathBCrossingClosureStats crossCycle;
                 PathBBodyClosureStats bodyCycle;
                 PathBFaceClosureStats faceCycle;

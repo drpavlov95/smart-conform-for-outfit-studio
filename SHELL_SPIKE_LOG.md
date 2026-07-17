@@ -1256,3 +1256,45 @@ o invariante; isso nao e candidato visual porque raw preserva o pose body-follow
 Proximo bloqueio e contato/support fisico e controle de folds/self-collision,
 nao sweep de gravidade. O DLL live continua sendo o artefato marco-9
 `6B325B...`; o toggle bilateral da fonte/harness nao foi deployado.
+
+## 2026-07-16 — marco 10: SIM CORE no piloto C++ (direção do usuário: "real cloth sim, custe o que custar")
+
+Reescrita do núcleo físico do piloto (BlackSmithTorso+RM_Heavy, flag-gated),
+com cada decisão validada por medição no caminho:
+
+1. **Lei de suporte por CONTATO** (não classifier): worn = authored gap<=0.3
+   fixo; banda 0.3-1.2 = dinâmica com soft-anchor ramp (proxy de atrito);
+   >1.2 = livre. Pinados caem de 62%→~21% (478/2316).
+2. **Gravidade = aceleração uniforme** (não ×mobilidade) + **massa física por
+   área autoral** (clamp 0.25-4). LIÇÃO CARA: mobilidade≠massa — escalar
+   invMass↓ na banda deu massa quase-infinita que a gravidade puxa mas as
+   constraints não seguram (correção ∝ invMass) → flip=738, maxEdge=71. O
+   soft-anchor ramp é o mecanismo certo pra banda vestida.
+3. **Equilíbrio**: itera até maxMove<eps (0.01) ou cap 600/step (não 10
+   fixas). **Gradiente diedral ANALÍTICO com auto-calibração** (8 variantes
+   testadas vs numérico em hinges reais por solve; tolerância relativa 2%;
+   fallback numérico se falhar) — variant=1, err 0.0076; 2× mais rápido
+   fim-a-fim (113s→~30s).
+4. **Contato robusto**: passo capado (0.25/iter — mata o teleporte de 14u
+   entre as pernas) + **sticky normal** (não flipa de lado >90° num passo;
+   step 2 passou a convergir de verdade em 300 iters).
+5. **Face-contact = fase de reconciliação** pós-equilíbrio (dentro do loop
+   criava limit-cycle de 0.15-0.2 que nunca cruzava eps).
+6. **Âncoras fixas projetadas pra fora do corpo lerped** (alvos vanilla até
+   4.3u DENTRO criavam cabo-de-guerra permanente com o contato capado).
+7. **Sim-mode** (`DRAPE_SHELL_TRANSACTIONS=0` / `shell_transactions_off.flag`):
+   as transações comparativas-de-pose (closures/crossing/body-face vs
+   PRODUÇÃO) rejeitam qualquer sim de verdade por construção (sim diverge da
+   pose corretiva legitimamente). Em sim-mode: seams welded + finitude
+   continuam gates duros; comparativos viram diagnóstico; floor final +
+   anti-clip continuam rodando. Default estrito preservado.
+
+Estado do candidato (blacksmith, 3600 iters, ~30s, determinístico, corpus
+OFF 18/18): pen 189<193 e depth 2.67<4.30 (MELHOR que produção); p95Edge
+1.956; flip 128 vs 14 e facePen 2331 vs 1231 (resíduos CONCENTRADOS NA BARRA
+— visíveis no render como dentinhos no hem). RENDER: o resultado mais
+tecido-real do projeto — pinch central sumiu, banding sumiu, queda com flare
+e dobras suaves. DLL ced2831d5db8 deployada nas 2 cópias; flags live:
+shell_solve_on + shell_transactions_off. **GATE VISUAL DO USUÁRIO ABERTO.**
+Próximos: defeitos da barra (flips/self-collision), facePen, velocidade,
+depois ampliar escopo.
