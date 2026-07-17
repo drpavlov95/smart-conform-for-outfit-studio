@@ -8622,6 +8622,38 @@ static bool PathBCloseNewCrossings(
     return newPairs.empty();
 }
 
+// Live scene dumps (seeing pipeline): the user judges the LIVE session mesh,
+// which differs from the corpus capture (entry facePen 2226 vs 1231). Dumping
+// body + production-entry + published lets the render pipeline reproduce his
+// EXACT scene and develop fixes against his real data, not the corpus.
+static void PathBDumpVerts(const std::vector<Vec3>& verts, const char* file) {
+    const char* tmp = getenv("TEMP");
+    if (!tmp) return;
+    std::string path = std::string(tmp) + "\\" + file;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f
+", v.x, v.y, v.z);
+    fclose(f);
+}
+static void PathBDumpTris(const std::vector<Vec3>& verts,
+                          const std::vector<std::array<uint16_t, 3>>& tris,
+                          const char* file) {
+    const char* tmp = getenv("TEMP");
+    if (!tmp) return;
+    std::string path = std::string(tmp) + "\\" + file;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f
+", v.x, v.y, v.z);
+    for (const auto& t : tris)
+        fprintf(f, "f %d %d %d
+", t[0] + 1, t[1] + 1, t[2] + 1);
+    fclose(f);
+}
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -8745,6 +8777,14 @@ static bool PathBSimV2Solve(
         fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
         raw[i] = DiffAt(rawDiff, (uint16_t)i);
         if (!fixed[i]) { areaSum += vertArea[i]; ++freeCount; }
+    }
+    {
+        // capture the user's EXACT live scene once per solve
+        std::vector<Vec3> prodEntry(n);
+        for (size_t i = 0; i < n; ++i) prodEntry[i] = Add(baseVerts[i], raw[i]);
+        PathBDumpTris(prodEntry, tris, "drape_live_production.obj");
+        PathBDumpTris(baseVerts, tris, "drape_live_authored.obj");
+        PathBDumpTris(morphedBody.verts, morphedBody.tris, "drape_live_body.obj");
     }
     const float meanArea = freeCount ? (float)(areaSum / (double)freeCount) : 1.0f;
     // MOBILITY != MASS (hard-won): scaling invMass down across the worn band
