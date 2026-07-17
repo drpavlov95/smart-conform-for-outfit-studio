@@ -1379,3 +1379,40 @@ segura 15.6-17.2 (produção plana ~16 via plumb guard). Leaks idênticos ao mar
 12 (móvel=0). Sculpt: surf fwd/rev 0.90/0.89 vs prod 0.76/0.79 (paridade aprox;
 indexed 5.1 = deslize TANGENCIAL do assentamento, métrica pune, superfície não).
 Corpus OFF verde, determinístico, Release deployado.
+
+## Marco 14 (2026-07-17): REVIEW COMPLETO + Stage 1 — factibilidade, convergência honesta, strain limit
+
+Pedido do usuário após um dia de patch-atrás-de-patch: review 1)coding 2)lógica
+3)escopo + brainstorm com agentes + implementar.
+
+**Veredito unânime (minha auditoria + code-reviewer + arquiteto de física)**:
+o floor radial (max(authoredGap, clearance) contra o ponto-mais-próximo do
+corpo INTEIRO) é PROVAVELMENTE INFACTÍVEL em corredores (entre-coxas não tem
+posição admissível) → active set nunca esvazia → nada converge (600 iters no
+teto, worstContact 7-10 pra sempre) → gravidade ganha da tensão → arestas 1.85x
+→ derretimento/lombras → cada patch consertava um sintoma. + 5 projetores
+posicionais sem fixed-point comum; getenv POR VÉRTICE (~8M/conform); weld
+first-wins order-dependent; diagnóstico que mutava estado; O(T²) closures.
+
+**Stage 1 implementado**:
+- floor de contato = espessura (min(radial, 0.15)); radial = knob A/B
+  DRAPE_SHELL_RADIAL; autoral-dentro isento (paridade)
+- clamp de corredor (bisseção; nunca empurrar através do lado oposto)
+- stall detector (25 iters sem melhora >1% = break honesto + culprit log)
+- config env lida 1x; buffers reusados; countOnly no diagnóstico; weld
+  media TODOS os alvos fixos; BVH reusado na reconciliação
+- boundary-edge rest = pose âncora do step (culprits authored 0.39-0.44)
+- shadow fight blacklist (>40 pushes/step = tubo/manga, para de brigar)
+- STRAIN LIMIT de tensão 1.10 pós-stretch (2 rounds, compressão intocada)
+
+**Resultados (blacksmith, Release)**: 140s → **13.5s**; hem stretch p95
+1.85→**1.29**; deslize tangencial indexed 5.1→**2.38**; flips 246→~138;
+maxEdge 21.9→6.87; contactMoves 550k→2k/step; silhueta lateral LISA a prumo
+(render); leaks móvel=0, classes ≤ produção; corpus OFF verde; determinístico.
+Hem minZ 4.8 (prod 7.2, marco13 -5.6 overstretch) = comprimento físico.
+
+**Abertos (ordem)**: Stage 2 = sombra→obstáculo unificado + fricção tangencial
+(indexed↓ mais); punhos das mangas (culprits x±25-30 z75, gap até -3.9 — LRA
+tethers do Stage 3 é o fix planejado); steps ainda stallam ~0.24-0.57 maxMove
+(localizado nas mangas; honesto, não mais 600-iter burn); self-collision hem;
+sim-mode ainda bypassa gate de integridade (flips chegam ao olho).

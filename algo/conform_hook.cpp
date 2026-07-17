@@ -7991,23 +7991,27 @@ static void PathBSeamWeld(
     const std::vector<Vec3>& fixedTargets)
 {
     for (const auto& group : seamGroups) {
-        Vec3 target{0.0f, 0.0f, 0.0f};
-        bool haveFixed = false;
-        int count = 0;
+        // Average over ALL fixed members: first-wins was order-dependent and
+        // dragged mixed-island seams off both true targets when two fixed
+        // twins carried different conform positions (review H4 - the z70-100
+        // worn-band flips suspect).
+        Vec3 fixedMean{0.0f, 0.0f, 0.0f};
+        Vec3 freeMean{0.0f, 0.0f, 0.0f};
+        int nFixed = 0, nFree = 0;
         for (uint32_t vi : group) {
             if (vi >= x.size()) continue;
             if (fixed[vi]) {
-                target = fixedTargets[vi];
-                haveFixed = true;
-                break;
+                fixedMean = Add(fixedMean, fixedTargets[vi]);
+                ++nFixed;
+            } else {
+                freeMean = Add(freeMean, x[vi]);
+                ++nFree;
             }
-            target = Add(target, x[vi]);
-            ++count;
         }
-        if (!haveFixed) {
-            if (count == 0) continue;
-            target = Scale(target, 1.0f / (float)count);
-        }
+        Vec3 target{0.0f, 0.0f, 0.0f};
+        if (nFixed > 0) target = Scale(fixedMean, 1.0f / (float)nFixed);
+        else if (nFree > 0) target = Scale(freeMean, 1.0f / (float)nFree);
+        else continue;
         for (uint32_t vi : group) if (vi < x.size()) x[vi] = target;
     }
 }
@@ -8021,7 +8025,8 @@ static int PathBFaceContactProject(
     float maxSampleStep,
     float relaxation,
     float& worstCorrection,
-    const std::vector<uint8_t>* triActive = nullptr)
+    const std::vector<uint8_t>* triActive = nullptr,
+    bool countOnly = false)
 {
     if (!body.valid || contactFloors.size() !=
             tris.size() * std::size(kTriangleSamples)) return 0;
@@ -8048,6 +8053,7 @@ static int PathBFaceContactProject(
             if (!std::isfinite(correctionLen) || correctionLen <= 1.0e-7f)
                 continue;
             worstCorrection = std::max(worstCorrection, correctionLen);
+            if (countOnly) { ++moved; continue; }
             if (correctionLen > maxSampleStep)
                 correction = Scale(correction, maxSampleStep / correctionLen);
             correction = Scale(correction, relaxation);
@@ -8544,6 +8550,28 @@ static bool PathBSimV2Solve(
         // rule's other half. Worn cloth keeps its small authored floor.
         contactFloor[i] = std::max(authoredGap, clearance);
     }
+    // FEASIBILITY (review 2026-07-17): the radial floor against the nearest
+    // point of the WHOLE body is provably infeasible in pinch corridors (a
+    // between-thighs panel cannot keep authored standoff from both legs), so
+    // the active set never empties: contact/stretch/gravity trade the same
+    // displacement forever (worstContact 7-10u every iteration, every step
+    // capped at 600 iters, hem edges stretched to 1.85x rest). The HARD floor
+    // is fabric thickness; anti-shrink-wrap is compression stiffness's job,
+    // anti-concavity is the plumb shadow's job, and nothing pulls cloth
+    // inward (softAnchor=0). DRAPE_SHELL_RADIAL=1 restores the old floors
+    // for A/B. Authored-inside cloth (straps): parity, no enforcement.
+    const bool kRadialFloors = EnvFloat("DRAPE_SHELL_RADIAL", 0.0f) > 0.5f;
+    std::vector<float> vertHardFloor(n, clearance);
+    {
+        const float kVertHardF =
+            std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+        for (size_t i = 0; i < n; ++i) {
+            if (authoredGapArr[i] < -0.1f) { vertHardFloor[i] = -1.0e9f; continue; }
+            vertHardFloor[i] = kRadialFloors
+                ? contactFloor[i]
+                : std::min(contactFloor[i], kVertHardF);
+        }
+    }
     // SIM CORE 2: physical mass from authored surface area (a vertex owns 1/3
     // of each incident triangle). invMass weights CONSTRAINT corrections only;
     // gravity is a uniform acceleration below (mass-independent), which is the
@@ -8647,10 +8675,26 @@ static bool PathBSimV2Solve(
     // physically; with 10 fixed iterations the sag depended on the loop
     // counter, not on the balance of forces. The analytic dihedral gradient
     // (verified per solve) is what makes this affordable.
+    std::vector<std::vector<uint32_t>> vertNeighbors(n);
+    for (const auto& e : edges) {
+        if (e.a < n && e.b < n) {
+            vertNeighbors[e.a].push_back(e.b);
+            vertNeighbors[e.b].push_back(e.a);
+        }
+    }
     static constexpr int kMorphSteps = 6;
     const int kMaxIters = (int)EnvFloat("DRAPE_SHELL_MAX_ITERS", 600.0f);
     const float kEps = std::max(1.0e-4f, EnvFloat("DRAPE_SHELL_EPS", 0.01f));
-    const int kFaceEvery = std::max(1, (int)EnvFloat("DRAPE_SHELL_FACE_EVERY", 4.0f));
+    // hot-loop knobs read ONCE (getenv per-vertex was ~8M locked CRT lookups
+    // per conform, measured as a top-2 cost by the 2026-07-17 review)
+    const float kContactStepC =
+        std::max(0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
+    const float kFaceStepC =
+        std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.25f));
+    const float kFaceRelaxC =
+        ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f), 0.05f, 1.0f);
+    const int kStallWindow = (int)EnvFloat("DRAPE_SHELL_STALL", 25.0f);
+    const float kStrainLimit = EnvFloat("DRAPE_SHELL_STRAIN_LIMIT", 1.10f);
     float gradErr = 0.0f;
     const int analyticVariant = PathBCalibrateAnalyticGradients(baseVerts, hinges, 64, gradErr);
     HLog("path-b-shell: analytic dihedral calibration variant=%d maxErr=%.6f -> %s",
@@ -8680,9 +8724,15 @@ static bool PathBSimV2Solve(
         float shadowCeiling = -1.0e30f;
         for (size_t i = 0; i < n; ++i)
             if (!fixed[i]) shadowCeiling = std::max(shadowCeiling, baseVerts[i].z);
-        const float kShadowGate =
-            std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_GAP", 1.2f));
-        const bool shadowOn = kShadowGate > 0.0f &&
+        // No near-body gap gate: measured live, 30/39 of the tucked verts sat
+        // at gap 1.2-3.7 - OUTSIDE the old 1.2 gate, which is why the user
+        // saw the identical tuck. Locality comes from the RING limit instead:
+        // a plumb correction is a short push to the local silhouette wall
+        // (<=4 cells); the pathological between-legs push needs to cross the
+        // whole leg region (>4 cells) and is skipped.
+        const int kShadowRing =
+            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 4.0f));
+        const bool shadowOn = kShadowRing > 0 &&
             BuildGravityShadow(bodyVerts, refBody.tris, kShadowCell,
                                shadowCeiling, stepShadow);
 
@@ -8742,16 +8792,21 @@ static bool PathBSimV2Solve(
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
             if (anchorRounds > 0) {
                 float residWorst = 0.0f;
-                int residCount = 0;
-                PathBFaceContactProject(
+                const int residCount = PathBFaceContactProject(
                     anchorTarget, tris, anchorMass, body, faceHardFloor,
-                    0.0f, 0.0f, residWorst, &triFixed);
-                residCount = PathBFaceContactProject(
-                    anchorTarget, tris, anchorMass, body, faceHardFloor,
-                    1.0e-9f, 1.0e-6f, residWorst, &triFixed);
+                    0.0f, 0.0f, residWorst, &triFixed, /*countOnly=*/true);
                 HLog("path-b-shell: fixed-band face cleanup rounds=%d worst=%.4f residual(count=%d worst=%.4f)",
                      anchorRounds, worstAnchorFace, residCount, residWorst);
             }
+        }
+        // Edges touching the pinned band: rest = the STEP's anchor-pose
+        // length. With rest = base length and the fixed endpoint at its
+        // conform-displaced position, these edges carried permanent
+        // unresolvable tension - measured as stall culprits at authored
+        // 0.39-0.44 (just past the 0.3 attach line), oscillating forever.
+        for (auto& e : edges) {
+            if (fixed[e.a] || fixed[e.b])
+                e.rest = Len(Sub(anchorTarget[e.a], anchorTarget[e.b]));
         }
         std::vector<float> stretchLambda(edges.size(), 0.0f);
         std::vector<float> bendLambda(hinges.size(), 0.0f);
@@ -8767,10 +8822,19 @@ static bool PathBSimV2Solve(
         int contactMoves = 0;
         int faceContactMoves = 0;
         int shadowMoves = 0;
+        std::vector<float> vertGap(n, 1.0e9f);
+        std::vector<Vec3> push(n, Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<uint8_t> hasPush(n, 0);
+        std::vector<uint16_t> shadowHits(n, 0);
+        std::vector<uint8_t> triActive(tris.size(), 0);
         float worstContact = 0.0f;
         float worstFaceContact = 0.0f;
         int itersUsed = 0;
         float maxMove = 0.0f;
+        float stallBest = 1.0e30f;
+        int stallIter = 0;
+        bool stalled = false;
+        size_t lastMaxMover = 0;
         std::vector<Vec3> xPrev(n);
         for (int iteration = 0; iteration < kMaxIters; ++iteration) {
             xPrev = x;
@@ -8787,10 +8851,31 @@ static bool PathBSimV2Solve(
             }
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
                                stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
+            // TENSION STRAIN LIMIT (review B2): real cloth stretches <10%,
+            // then ROTATES into folds - the user's requirement from day one.
+            // Compliant stretch alone let hem edges reach 1.85-2.5x rest
+            // ("melting" + texture distortion). One-sided hard clamp,
+            // compression untouched (folds legitimately compress edges).
+            if (kStrainLimit > 0.0f) {
+                for (int r = 0; r < 2; ++r) {
+                    for (const auto& e : edges) {
+                        const float wA = invMass[e.a], wB = invMass[e.b];
+                        const float wSum = wA + wB;
+                        if (wSum <= 0.0f) continue;
+                        Vec3 d = Sub(x[e.b], x[e.a]);
+                        const float len = Len(d);
+                        const float maxLen = e.rest * kStrainLimit;
+                        if (len <= maxLen || len < 1.0e-9f) continue;
+                        Vec3 corr = Scale(d, (len - maxLen) / (len * wSum));
+                        x[e.a] = Add(x[e.a], Scale(corr, wA));
+                        x[e.b] = Sub(x[e.b], Scale(corr, wB));
+                    }
+                }
+            }
             PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
                                analyticVariant, boundaryVert);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
-            std::vector<float> vertGap(n, 1.0e9f);
+            std::fill(vertGap.begin(), vertGap.end(), 1.0e9f);
             for (size_t i = 0; i < n; ++i) {
                 if (invMass[i] <= 0.0f) continue;
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
@@ -8806,9 +8891,22 @@ static bool PathBSimV2Solve(
                 float dist = std::sqrt(d2);
                 float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
                 vertGap[i] = gap;
-                float floor = contactFloor[i];
+                float floor = vertHardFloor[i];
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
+                // corridor clamp: never push THROUGH the opposite body side
+                // (the old infeasibility). If the full target is inside the
+                // body, bisect toward the current position; if even half-way
+                // is inside, leave the vertex to the next iteration.
+                {
+                    float tGap = 0.0f;
+                    if (BVHSignedGap(body, target, tGap, nullptr) && tGap < 0.0f) {
+                        Vec3 mid = Scale(Add(target, x[i]), 0.5f);
+                        if (BVHSignedGap(body, mid, tGap, nullptr) && tGap < 0.0f)
+                            continue;
+                        target = mid;
+                    }
+                }
                 // Contact is a capped projection, not a teleport: the nearest
                 // body point between two features (the legs!) flips sides
                 // between iterations and an uncapped snap (measured up to 14u)
@@ -8816,10 +8914,8 @@ static bool PathBSimV2Solve(
                 // verts escape gradually and coherently with their neighbours.
                 Vec3 move = Sub(target, x[i]);
                 const float moveLen = Len(move);
-                const float kContactStep =
-                    std::max(0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
-                if (moveLen > kContactStep)
-                    move = Scale(move, kContactStep / moveLen);
+                if (moveLen > kContactStepC)
+                    move = Scale(move, kContactStepC / moveLen);
                 worstContact = std::max(worstContact, moveLen);
                 x[i] = Add(x[i], move);
                 stickyCp[i] = cp;
@@ -8828,23 +8924,58 @@ static bool PathBSimV2Solve(
                 ++contactMoves;
             }
             if (shadowOn) {
+                // Raw push field first, then a neighbour average BEFORE
+                // applying: the 1u shadow cells quantize the wall and the raw
+                // push left a lumpy silhouette (measured 12.2->18.5->16.4 by
+                // z-band vs production's smooth 17.4->16.3). Smoothing the
+                // DISPLACEMENT (not the positions) keeps folds (hem-smooth
+                // lesson) while the wall grows coherently (M4 jag lesson).
+                std::fill(push.begin(), push.end(), Vec3{0.0f, 0.0f, 0.0f});
+                std::fill(hasPush.begin(), hasPush.end(), (uint8_t)0);
+                int pushed = 0;
                 for (size_t i = 0; i < n; ++i) {
                     if (invMass[i] <= 0.0f) continue;
-                    if (vertGap[i] > kShadowGate) continue;
+                    // fight blacklist: still inside the shadow after 40
+                    // pushes this step = tube/pocket the cloth cannot leave
+                    // (sleeve under the arm) - infeasible, stop fighting.
+                    if (shadowHits[i] > 40) continue;
                     float ox = 0.0f, oy = 0.0f;
                     if (!GravityShadowPushOut(stepShadow, x[i], kFaceHard,
-                                              0.0f, kShadowMaxRing, ox, oy))
+                                              0.0f, kShadowRing, ox, oy))
                         continue;
-                    Vec3 move{ox - x[i].x, oy - x[i].y, 0.0f};
-                    const float moveLen = Len(move);
-                    const float kContactStep = std::max(
-                        0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
-                    if (moveLen > kContactStep)
-                        move = Scale(move, kContactStep / moveLen);
-                    x[i] = Add(x[i], move);
-                    ++shadowMoves;
+                    ++shadowHits[i];
+                    // never push THROUGH the body (inner-thigh wall case):
+                    // a target inside the body belongs to body contact.
+                    Vec3 tgt{ox, oy, x[i].z};
+                    float tgtGap = 0.0f;
+                    if (BVHSignedGap(body, tgt, tgtGap, nullptr) &&
+                        tgtGap < 0.0f)
+                        continue;
+                    push[i] = Vec3{ox - x[i].x, oy - x[i].y, 0.0f};
+                    hasPush[i] = 1;
+                    ++pushed;
                 }
-                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+                if (pushed > 0) {
+                    const float kContactStep = kContactStepC;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (invMass[i] <= 0.0f) continue;
+                        if (!hasPush[i]) continue;   // never spread onto clean verts
+                        Vec3 acc = push[i];
+                        float w = 1.0f;
+                        for (uint32_t nb : vertNeighbors[i]) {
+                            if (!hasPush[nb]) continue;
+                            acc = Add(acc, Scale(push[nb], 0.5f));
+                            w += 0.5f;
+                        }
+                        acc = Scale(acc, 1.0f / w);
+                        const float moveLen = Len(acc);
+                        if (moveLen > kContactStep)
+                            acc = Scale(acc, kContactStep / moveLen);
+                        x[i] = Add(x[i], acc);
+                        ++shadowMoves;
+                    }
+                    PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+                }
             }
             // FACE CONTACT IN THE BALANCE (deploy-gate lesson: facePen is the
             // user-visible leak class; the timid post-loop reconciliation let
@@ -8852,7 +8983,7 @@ static bool PathBSimV2Solve(
             // builds). Runs EVERY iteration, capped like vertex contact, with
             // a broad-phase skip from this iteration's vertex gaps.
             {
-                std::vector<uint8_t> triActive(tris.size(), 0);
+                std::fill(triActive.begin(), triActive.end(), (uint8_t)0);
                 for (size_t ti = 0; ti < tris.size(); ++ti) {
                     const auto& t = tris[ti];
                     for (int k = 0; k < 3; ++k) {
@@ -8862,27 +8993,46 @@ static bool PathBSimV2Solve(
                 }
                 faceContactMoves += PathBFaceContactProject(
                     x, tris, invMass, body, faceHardFloor,
-                    std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.25f)),
-                    ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f),
-                               0.05f, 1.0f),
+                    kFaceStepC, kFaceRelaxC,
                     worstFaceContact, &triActive);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
             itersUsed = iteration + 1;
             maxMove = 0.0f;
+            size_t maxMover = 0;
             for (size_t i = 0; i < n; ++i) {
                 if (fixed[i]) continue;
-                maxMove = std::max(maxMove, Len(Sub(x[i], xPrev[i])));
+                const float mv = Len(Sub(x[i], xPrev[i]));
+                if (mv > maxMove) { maxMove = mv; maxMover = i; }
             }
+            lastMaxMover = maxMover;
             // converge: equilibrium = the constraints return the mesh to
             // (almost) where the gravity dose found it.
             if (maxMove <= kEps) break;
+            // stall detector: burning to the cap without >1% improvement in
+            // 25 iterations is dishonest compute - break and say so.
+            if (maxMove < stallBest * 0.99f) {
+                stallBest = maxMove;
+                stallIter = iteration;
+            } else if (kStallWindow > 0 && iteration - stallIter >= kStallWindow) {
+                stalled = true;
+                break;
+            }
         }
         totalIters += itersUsed;
-        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f contactMoves=%d faceMoves=%d shadowMoves=%d worstContact=%.4f worstFace=%.4f",
-             step, kMorphSteps, itersUsed, maxMove, contactMoves,
-             faceContactMoves, shadowMoves, worstContact, worstFaceContact);
+        if (stalled) {
+            const size_t i = lastMaxMover;
+            HLog("path-b-shell: STALL culprit v%zu pos=(%.2f,%.2f,%.2f) gap=%.3f authored=%.3f shadowPushed=%d boundary=%d softA=%.3f",
+                 i, x[i].x, x[i].y, x[i].z,
+                 vertGap[i] < 1.0e8f ? vertGap[i] : -999.0f,
+                 authoredGapArr[i], (int)hasPush[i], (int)boundaryVert[i],
+                 softAnchor[i]);
+        }
+        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d worstContact=%.4f worstFace=%.4f",
+             step, kMorphSteps, itersUsed, maxMove, stalled ? " STALLED" : "",
+             contactMoves, faceContactMoves, shadowMoves, worstContact,
+             worstFaceContact);
     }
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
@@ -8897,8 +9047,7 @@ static bool PathBSimV2Solve(
         PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
     }
     {
-        BodyBVH fullBody;
-        BuildBodyBVH(morphedBody.verts, refBody.tris, fullBody);
+        const BodyBVH& fullBody = morphedBody;   // already built by the caller
         if (fullBody.valid) {
             std::vector<Vec3> lastAnchor(n);
             for (size_t i = 0; i < n; ++i)
