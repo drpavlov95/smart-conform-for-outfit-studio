@@ -1416,3 +1416,35 @@ Hem minZ 4.8 (prod 7.2, marco13 -5.6 overstretch) = comprimento físico.
 tethers do Stage 3 é o fix planejado); steps ainda stallam ~0.24-0.57 maxMove
 (localizado nas mangas; honesto, não mais 600-iter burn); self-collision hem;
 sim-mode ainda bypassa gate de integridade (flips chegam ao olho).
+
+## Marco 15 (2026-07-17): REVISÃO MAIOR — o alvo estava mal medido; hull WIP (sculpt-gate blocked)
+
+Pedido do usuário ("está na hora de fazer uma revisão maior") após 3 rodadas de
+"mesmíssima merda". O achado central: **o sculpt mantém o tecido 3.5-4u FORA do
+corpo no bumbum inteiro** (perfil traseiro 17.9-20.0 vs corpo 12-16.2) — um
+caimento em A. Produção (16.x) E todos os candidatos do sim (15-16.5) abraçam o
+corpo; a diferença entre eles (±1u, o que eu media) é RUÍDO perto do gap ao alvo
+(+3.5u). Por isso o olho do usuário reprovou tudo igualmente.
+
+FALHA DE PROCESSO admitida: o gate primário nunca foi o sculpt (regra de
+memória do projeto!) — trajetória surf_fwd: prod 0.756 → m13 0.90 → stage1
+1.07, piorando monotonicamente enquanto meus gates de pen/convergência
+passavam. REGRA NOVA: sculpt = gate primário, SEMPRE, antes de deploy.
+
+RADIAL RULE 2.0 (direção escolhida pelo usuário: "casco dentro do sim"):
+PathBDrapeHull — piso radial escalar por setor azimutal (96), convexificado
+verticalmente (corda tensa), suavizado, radial-pra-fora = SEMPRE factível
+(conserta a infactibilidade da radial 1.0 sem jogar fora a regra).
+- v1 (bodyMin+gap): não levantou o perfil — min-radius pega o VINCO entre as
+  nádegas, não a bochecha onde o tecido apoia.
+- v2 (autoral+crescimento): bumbum 16.4→17.2 mas sculpt-gate REPROVA (surf
+  1.44) — medição da relação: sculpt-autoral / crescimento = 0.5 no hem …
+  1.8-1.9 no bumbum/quadril = efeito ALAVANCA/TENDA (tira rígida pivotando no
+  cinto: desloca mais que o corpo no ápice, menos no hem).
+- DECISÃO: parar o tiro-ao-alvo de fórmulas. Próximo passo DESENHADO: fitar
+  offline (python) a transformada por-setor autoral→sculpt nos 4 sculpts
+  (blacksmith/falmer/yarl/vampire) — modelo candidato: rotação de tira rígida
+  em torno do pivô da banda fixa com contato no ápice + prumo abaixo — validar
+  cross-garment (generaliza ou não), SÓ ENTÃO implementar em C++.
+DRAPE_SHELL_HULL default 0 (off); shadow ring default 0 (hull subsume ao
+chegar). DLL live = marco 14. Corpus OFF verde.

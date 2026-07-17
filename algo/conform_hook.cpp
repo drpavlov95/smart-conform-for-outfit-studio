@@ -7666,6 +7666,160 @@ struct PathBShellEdge {
     float rest = 0.0f;
 };
 
+// RADIAL RULE 2.0 (revisao maior 2026-07-17): the user's hand sculpt keeps
+// the fabric at the AUTHORED standoff through the whole fall (back profile
+// 17.9-20.0 vs body ~12-16.2), bridging the lumbar hollow and the under-butt
+// with taut chords - while production AND every sim candidate hugged the
+// body at ~16. The naive radial floor (authored gap vs nearest point of the
+// WHOLE body) was infeasible in pinch corridors; this is the feasible form:
+// per azimuth SECTOR around the body axis, a scalar radial floor
+//   floor_r(theta, z) = upper-convex-envelope_z( body_r + authored_gap )
+// pushed strictly radially OUTWARD (always satisfiable), vertically
+// convexified (a hanging fabric cannot be concave between two contacts),
+// azimuthally smoothed. Subsumes the gravity-shadow plumb (the envelope
+// below the last contact IS the plumb line).
+struct PathBDrapeHull {
+    bool valid = false;
+    int nSectors = 96;
+    int nSlabs = 0;
+    float zMin = 0.0f;
+    float cx = 0.0f, cy = 0.0f;
+    std::vector<float> floorR;   // [sector*nSlabs + slab]; <0 = no constraint
+    inline int sectorOf(float x, float y) const {
+        const float a = std::atan2(y - cy, x - cx);
+        int sct = (int)std::floor((a + 3.14159265f) / (2.0f * 3.14159265f) * nSectors);
+        if (sct < 0) sct = 0;
+        if (sct >= nSectors) sct = nSectors - 1;
+        return sct;
+    }
+    inline float floorAt(float x, float y, float z) const {
+        if (!valid) return -1.0f;
+        const int slab = (int)std::floor(z - zMin);
+        if (slab < 0 || slab >= nSlabs) return -1.0f;
+        return floorR[(size_t)sectorOf(x, y) * nSlabs + slab];
+    }
+};
+
+static bool PathBBuildDrapeHull(
+    const std::vector<Vec3>& bodyVerts,
+    const std::vector<Vec3>& refBodyVerts,
+    const std::vector<Vec3>& clothBase,
+    const std::vector<float>& authoredGapArr,
+    const std::vector<uint8_t>& fixed,
+    float clearance,
+    PathBDrapeHull& out)
+{
+    out = PathBDrapeHull{};
+    if (bodyVerts.empty() || clothBase.empty()) return false;
+    // axis center from the body's horizontal centroid
+    double sx = 0.0, sy = 0.0;
+    for (const Vec3& v : bodyVerts) { sx += v.x; sy += v.y; }
+    out.cx = (float)(sx / bodyVerts.size());
+    out.cy = (float)(sy / bodyVerts.size());
+    float zLo = 1.0e30f, zHi = -1.0e30f;
+    for (size_t i = 0; i < clothBase.size(); ++i) {
+        if (fixed[i]) continue;
+        zLo = std::min(zLo, clothBase[i].z);
+        zHi = std::max(zHi, clothBase[i].z);
+    }
+    if (zHi <= zLo) return false;
+    out.zMin = std::floor(zLo) - 1.0f;
+    out.nSlabs = (int)std::ceil(zHi - out.zMin) + 2;
+    if (out.nSlabs <= 2 || out.nSlabs > 512) return false;
+    const int NS = out.nSectors, NZ = out.nSlabs;
+    // Profile = AUTHORED CLOTH radius per bin + body GROWTH per bin.
+    // The authored garment IS the designed drape surface (the sculpt is,
+    // measurably, that surface carried outward by the morph and bridged).
+    // Body radii use MIN per bin on BOTH bodies (first surface from the
+    // axis; the consistent bias cancels in the growth difference and arms
+    // never define the floor because the CLOTH bins the sectors).
+    std::vector<float> clothSum((size_t)NS * NZ, 0.0f);
+    std::vector<int> clothCnt((size_t)NS * NZ, 0);
+    for (size_t i = 0; i < clothBase.size(); ++i) {
+        if (fixed[i] || authoredGapArr[i] < -0.1f) continue;
+        const int slab = (int)std::floor(clothBase[i].z - out.zMin);
+        if (slab < 0 || slab >= NZ) continue;
+        const size_t k = (size_t)out.sectorOf(clothBase[i].x, clothBase[i].y) * NZ + slab;
+        clothSum[k] += std::hypot(clothBase[i].x - out.cx, clothBase[i].y - out.cy);
+        ++clothCnt[k];
+    }
+    std::vector<float> bodyR((size_t)NS * NZ, -1.0f);
+    std::vector<float> refR((size_t)NS * NZ, -1.0f);
+    for (const Vec3& v : bodyVerts) {
+        const int slab = (int)std::floor(v.z - out.zMin);
+        if (slab < 0 || slab >= NZ) continue;
+        float& br = bodyR[(size_t)out.sectorOf(v.x, v.y) * NZ + slab];
+        const float r = std::hypot(v.x - out.cx, v.y - out.cy);
+        if (br < 0.0f || r < br) br = r;
+    }
+    for (const Vec3& v : refBodyVerts) {
+        const int slab = (int)std::floor(v.z - out.zMin);
+        if (slab < 0 || slab >= NZ) continue;
+        float& br = refR[(size_t)out.sectorOf(v.x, v.y) * NZ + slab];
+        const float r = std::hypot(v.x - out.cx, v.y - out.cy);
+        if (br < 0.0f || r < br) br = r;
+    }
+    out.floorR.assign((size_t)NS * NZ, -1.0f);
+    for (int sct = 0; sct < NS; ++sct) {
+        std::vector<float> prof(NZ, -1.0f);
+        for (int z = 0; z < NZ; ++z) {
+            const size_t k = (size_t)sct * NZ + z;
+            if (clothCnt[k] == 0) continue;
+            float growth = 0.0f;
+            if (bodyR[k] >= 0.0f && refR[k] >= 0.0f)
+                growth = std::max(0.0f, bodyR[k] - refR[k]);
+            prof[z] = clothSum[k] / clothCnt[k] + growth;
+        }
+        // vertical upper CONVEX envelope (taut chord): sweep top->down twice
+        // keeping each point on/above the chord of its neighbours' hull.
+        // Simple monotone-chain on valid samples.
+        std::vector<int> zs;
+        for (int z = NZ - 1; z >= 0; --z) if (prof[z] >= 0.0f) zs.push_back(z);
+        if (zs.size() < 2) continue;
+        std::vector<int> hull;   // indices into zs, upper hull in (z, r)
+        for (int idx : zs) {
+            while (hull.size() >= 2) {
+                const int a = hull[hull.size() - 2], b = hull[hull.size() - 1];
+                // remove b if it is BELOW chord a->idx (keep upper hull)
+                const float t = (float)(b - a) / (float)(idx - a);
+                const float chordR = prof[a] + (prof[idx] - prof[a]) * t;
+                if (prof[b] <= chordR + 1.0e-4f) hull.pop_back();
+                else break;
+            }
+            hull.push_back(idx);
+        }
+        // fill floor from hull segments (linear between hull vertices)
+        for (size_t h = 0; h + 1 < hull.size(); ++h) {
+            const int a = hull[h], b = hull[h + 1];
+            for (int z = a; ; z += (b > a ? 1 : -1)) {
+                const float t = (b == a) ? 0.0f : (float)(z - a) / (float)(b - a);
+                out.floorR[(size_t)sct * NZ + z] = prof[a] + (prof[b] - prof[a]) * t;
+                if (z == b) break;
+            }
+        }
+    }
+    // azimuthal smoothing (2 passes, wrap-around), skipping invalid bins
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<float> sm = out.floorR;
+        for (int sct = 0; sct < NS; ++sct) {
+            const int sl = (sct + NS - 1) % NS, sr = (sct + 1) % NS;
+            for (int z = 0; z < NZ; ++z) {
+                const float c = out.floorR[(size_t)sct * NZ + z];
+                if (c < 0.0f) continue;
+                float acc = c * 2.0f, w = 2.0f;
+                const float l = out.floorR[(size_t)sl * NZ + z];
+                const float r = out.floorR[(size_t)sr * NZ + z];
+                if (l >= 0.0f) { acc += l; w += 1.0f; }
+                if (r >= 0.0f) { acc += r; w += 1.0f; }
+                sm[(size_t)sct * NZ + z] = acc / w;
+            }
+        }
+        out.floorR.swap(sm);
+    }
+    out.valid = true;
+    return true;
+}
+
 struct PathBShellHinge {
     std::array<uint16_t, 4> v{};
     float restAngle = 0.0f;
@@ -8731,10 +8885,21 @@ static bool PathBSimV2Solve(
         // (<=4 cells); the pathological between-legs push needs to cross the
         // whole leg region (>4 cells) and is skipped.
         const int kShadowRing =
-            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 4.0f));
+            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 0.0f));
         const bool shadowOn = kShadowRing > 0 &&
             BuildGravityShadow(bodyVerts, refBody.tris, kShadowCell,
                                shadowCeiling, stepShadow);
+        // RADIAL RULE 2.0: sector hull floor (see PathBDrapeHull above).
+        // Default ON; DRAPE_SHELL_HULL=0 for A/B against the raw sim.
+        PathBDrapeHull stepHull;
+        // WIP: formula v2 (authored+growth) FAILS the sculpt gate (surf 1.44
+        // vs 0.99 baseline) - the sculpt moves MORE than body growth at the
+        // butt (lever/tent ratio 1.3-1.9) and LESS at the hem (0.5). The
+        // correct per-sector transform will be FIT OFFLINE against all four
+        // hand sculpts before this defaults on. Sculpt gate blocks deploy.
+        const bool hullOn = EnvFloat("DRAPE_SHELL_HULL", 0.0f) > 0.5f &&
+            PathBBuildDrapeHull(bodyVerts, refBody.verts, baseVerts,
+                                authoredGapArr, fixed, clearance, stepHull);
 
         std::vector<Vec3> anchorTarget(n);
         for (size_t i = 0; i < n; ++i) {
@@ -8922,6 +9087,30 @@ static bool PathBSimV2Solve(
                 stickyN[i] = nrm;
                 stickyHas[i] = 1;
                 ++contactMoves;
+            }
+            if (hullOn) {
+                int hullMoves = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;   // authored-inside parity
+                    const float fr = stepHull.floorAt(x[i].x, x[i].y, x[i].z);
+                    if (fr < 0.0f) continue;
+                    const float dx = x[i].x - stepHull.cx;
+                    const float dy = x[i].y - stepHull.cy;
+                    const float r = std::hypot(dx, dy);
+                    if (r >= fr || r < 1.0e-4f) continue;
+                    // strictly radial-outward to the sector floor: always
+                    // feasible, capped like every other contact step.
+                    float need = fr - r;
+                    if (need > kContactStepC) need = kContactStepC;
+                    const float inv = 1.0f / r;
+                    x[i].x += dx * inv * need;
+                    x[i].y += dy * inv * need;
+                    ++hullMoves;
+                }
+                shadowMoves += hullMoves;
+                if (hullMoves > 0)
+                    PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             if (shadowOn) {
                 // Raw push field first, then a neighbour average BEFORE
