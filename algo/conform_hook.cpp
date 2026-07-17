@@ -8633,8 +8633,7 @@ static void PathBDumpVerts(const std::vector<Vec3>& verts, const char* file) {
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
     for (const Vec3& v : verts)
-        fprintf(f, "v %.6f %.6f %.6f
-", v.x, v.y, v.z);
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
     fclose(f);
 }
 static void PathBDumpTris(const std::vector<Vec3>& verts,
@@ -8646,11 +8645,9 @@ static void PathBDumpTris(const std::vector<Vec3>& verts,
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
     for (const Vec3& v : verts)
-        fprintf(f, "v %.6f %.6f %.6f
-", v.x, v.y, v.z);
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
     for (const auto& t : tris)
-        fprintf(f, "f %d %d %d
-", t[0] + 1, t[1] + 1, t[2] + 1);
+        fprintf(f, "f %d %d %d\n", t[0] + 1, t[1] + 1, t[2] + 1);
     fclose(f);
 }
 
