@@ -1362,3 +1362,20 @@ under-butt bridging.
 **Regras de deploy novas (permanentes)**: facePen visível bloqueia deploy;
 validação = render CORPO+ROUPA (tools/pathb_leakmap.py: mapa por classe/z-band
 + compostos); defeito conhecido no log nunca vai pro olho do usuário.
+
+## Marco 13 (2026-07-17): valley rule — prumo sob o bumbum via gravity-shadow (M4) no sim
+
+"continua igual" do usuário estava certo DE NOVO: o screenshot dele tinha o corpo
+oculto (fix do marco 12 invisível) e a silhueta lateral — tecido desenhando o
+bumbum e entrando no vão — era o item adiado. Física do defeito: contato empurra
+ao longo da NORMAL do corpo = molda o tecido às concavidades; tecido real pendura
+a PRUMO do ápice (sculpt cai reto). Produção já tinha a máquina: GravityShadow
+do M4. Integrado ao loop do sim: sombra por morph-step (corpo lerpado, teto =
+topo do tecido móvel), gate de gap 1.2 (só tecido perto do corpo, como o 0.85 da
+produção), push horizontal capado 0.25 + weld.
+
+Resultado: back_profile x7-14 — facefix afundava (z37:13.6, z46:14.3), valley
+segura 15.6-17.2 (produção plana ~16 via plumb guard). Leaks idênticos ao marco
+12 (móvel=0). Sculpt: surf fwd/rev 0.90/0.89 vs prod 0.76/0.79 (paridade aprox;
+indexed 5.1 = deslize TANGENCIAL do assentamento, métrica pune, superfície não).
+Corpus OFF verde, determinístico, Release deployado.

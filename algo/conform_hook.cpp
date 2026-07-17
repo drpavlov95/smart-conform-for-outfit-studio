@@ -8669,6 +8669,22 @@ static bool PathBSimV2Solve(
             failReason = "continuation BVH build failed";
             return false;
         }
+        // VALLEY RULE (the user's under-butt complaint): body contact pushes
+        // cloth out along the body NORMAL, which molds it INTO concavities
+        // (the under-butt hollow) - real cloth hangs PLUMB from the apex (the
+        // hand sculpt falls straight). The M4 gravity shadow is exactly that
+        // plumb surface: below the butt apex a column is "inside" until it
+        // leaves the silhouette. Gated to near-body verts (like production's
+        // 0.85 anti-tuck gate) so free-hanging cloth stays pure physics.
+        GravityShadow stepShadow;
+        float shadowCeiling = -1.0e30f;
+        for (size_t i = 0; i < n; ++i)
+            if (!fixed[i]) shadowCeiling = std::max(shadowCeiling, baseVerts[i].z);
+        const float kShadowGate =
+            std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_GAP", 1.2f));
+        const bool shadowOn = kShadowGate > 0.0f &&
+            BuildGravityShadow(bodyVerts, refBody.tris, kShadowCell,
+                               shadowCeiling, stepShadow);
 
         std::vector<Vec3> anchorTarget(n);
         for (size_t i = 0; i < n; ++i) {
@@ -8750,6 +8766,7 @@ static bool PathBSimV2Solve(
         std::vector<uint8_t> stickyHas(n, 0);
         int contactMoves = 0;
         int faceContactMoves = 0;
+        int shadowMoves = 0;
         float worstContact = 0.0f;
         float worstFaceContact = 0.0f;
         int itersUsed = 0;
@@ -8810,6 +8827,25 @@ static bool PathBSimV2Solve(
                 stickyHas[i] = 1;
                 ++contactMoves;
             }
+            if (shadowOn) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    if (vertGap[i] > kShadowGate) continue;
+                    float ox = 0.0f, oy = 0.0f;
+                    if (!GravityShadowPushOut(stepShadow, x[i], kFaceHard,
+                                              0.0f, kShadowMaxRing, ox, oy))
+                        continue;
+                    Vec3 move{ox - x[i].x, oy - x[i].y, 0.0f};
+                    const float moveLen = Len(move);
+                    const float kContactStep = std::max(
+                        0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
+                    if (moveLen > kContactStep)
+                        move = Scale(move, kContactStep / moveLen);
+                    x[i] = Add(x[i], move);
+                    ++shadowMoves;
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
             // FACE CONTACT IN THE BALANCE (deploy-gate lesson: facePen is the
             // user-visible leak class; the timid post-loop reconciliation let
             // the body poke through triangle interiors in all three shipped
@@ -8844,9 +8880,9 @@ static bool PathBSimV2Solve(
             if (maxMove <= kEps) break;
         }
         totalIters += itersUsed;
-        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f contactMoves=%d faceMoves=%d worstContact=%.4f worstFace=%.4f",
+        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f contactMoves=%d faceMoves=%d shadowMoves=%d worstContact=%.4f worstFace=%.4f",
              step, kMorphSteps, itersUsed, maxMove, contactMoves,
-             faceContactMoves, worstContact, worstFaceContact);
+             faceContactMoves, shadowMoves, worstContact, worstFaceContact);
     }
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
