@@ -33,6 +33,17 @@ static std::atomic<PfnDrapeSetShapePreset> g_setShapePreset{nullptr};
 static std::atomic<PfnDrapeSetProcessingIntensity> g_setProcessingIntensity{nullptr};
 static std::atomic<PfnDrapeSetSliderFilter> g_setSliderFilter{nullptr};
 static std::atomic_bool g_hookReady{false};
+// LAZY HOOK INSTALL (fix 2026-07-19): installing the conform detour from
+// InjectThread froze OutfitStudio on open, every time. MinHook SUSPENDS the
+// other threads to patch the target; suspending the UI thread during OS
+// startup left it never resuming - injection logged SUCCESS while the UI
+// thread stopped servicing messages (our posted redraw never ran). The hook
+// is not needed until the user actually clicks Smart Conform, so we now
+// install it ON the UI thread at first use, where MinHook never has to
+// suspend the thread doing the patching.
+typedef int (*PfnInstallHook)(void*, const char*, float, float);
+static std::atomic<PfnInstallHook> g_installHook{nullptr};
+static std::atomic_bool g_hookInstallTried{false};
 
 static HMODULE          g_selfMod         = nullptr;  // this proxy DLL's module
 static DWORD            g_osProcId        = 0;        // OutfitStudio PID (act only when it's focused)
@@ -291,6 +302,20 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
             ~RunFlag() { g_conformRunning.store(false, std::memory_order_release); }
         } runFlag;
         DbgLog("Smart Conform All clicked");
+        // Install the detour HERE, on the UI thread, the first time it is
+        // needed (see LAZY HOOK INSTALL). MinHook suspends other threads to
+        // patch - never the caller - so the UI thread cannot be left frozen.
+        if (!g_hookInstallTried.exchange(true, std::memory_order_acq_rel)) {
+            PfnInstallHook inst = g_installHook.load(std::memory_order_acquire);
+            if (inst) {
+                int rc = inst(hw, ExeDir().c_str(), 0.5f, 8.0f);
+                DbgLog("Smart Conform All: lazy hook install rc=%d", rc);
+                if (rc != 0) g_hookReady.store(false, std::memory_order_release);
+            } else {
+                DbgLog("Smart Conform All: install entry point missing");
+                g_hookReady.store(false, std::memory_order_release);
+            }
+        }
         PfnDrapeSetHookEnabled setHookEnabled = g_setHookEnabled.load(std::memory_order_acquire);
         DrapeHookApi api;
         api.setHookEnabled = setHookEnabled;
@@ -494,7 +519,10 @@ static DWORD WINAPI InjectThread(LPVOID) {
             auto pSetSliderFilter = reinterpret_cast<PfnDrapeSetSliderFilter>(
                 GetProcAddress(hAlgo, "DrapeSetSliderFilter"));
             if (pInstall) {
-                int rc = pInstall(hw, ExeDir().c_str(), 0.5f, 8.0f);
+                // DEFERRED: do not patch anything during startup (see the
+                // LAZY HOOK INSTALL note). Just publish the entry points.
+                g_installHook.store(pInstall, std::memory_order_release);
+                int rc = 0;
                 if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
                     pGetCurrentSliders && pClearShapePresets && pSetShapePreset &&
                     pSetSliderFilter) {
@@ -516,7 +544,7 @@ static DWORD WINAPI InjectThread(LPVOID) {
                     g_setSliderFilter.store(nullptr, std::memory_order_release);
                     g_hookReady.store(false, std::memory_order_release);
                 }
-                DbgLog("InjectThread: DrapeInstallConformHook rc=%d setEnabled=%p getShapes=%p getSliders=%p clearPresets=%p setPreset=%p setSliderFilter=%p ready=%d",
+                DbgLog("InjectThread: entry points published (hook install DEFERRED to first use) rc=%d setEnabled=%p getShapes=%p getSliders=%p clearPresets=%p setPreset=%p setSliderFilter=%p ready=%d",
                        rc, (void*)pSetHookEnabled, (void*)pGetCurrentShapes,
                        (void*)pGetCurrentSliders, (void*)pClearShapePresets,
                        (void*)pSetShapePreset, (void*)pSetSliderFilter,
