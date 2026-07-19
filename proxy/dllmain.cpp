@@ -9,6 +9,15 @@
 #include <thread>
 
 static constexpr UINT DRAPE_CMD_ID = 0xD4A9u;
+// Redraw request posted to the UI thread. DrawMenuBar() is a SYNCHRONOUS
+// cross-thread call when issued from InjectThread: it blocks until the
+// window's owning (UI) thread services it. With the conform detour already
+// installed, the UI thread can be inside a multi-second conform at that
+// moment -> InjectThread and the UI thread wait on each other and
+// OutfitStudio freezes on open (reproduced 2026-07-19; the log always ends
+// exactly between "InsertMenu" and "DrawMenuBar done"). We post instead, so
+// the redraw happens ON the UI thread and the injector never blocks.
+static constexpr UINT DRAPE_MSG_REDRAW_MENU = WM_APP + 0x4A9;
 
 static WNDPROC g_oldProc      = nullptr;
 HWND           g_osHwnd        = nullptr;  // OutfitStudio main window
@@ -270,6 +279,11 @@ static DWORD WINAPI KbPollThreadProc(LPVOID) {
 // ── WndProc subclass: intercept our menu command ──────────────────────
 
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == DRAPE_MSG_REDRAW_MENU) {
+        DrawMenuBar(hw);          // safe: we are ON the UI thread here
+        DbgLog("DrapeWndProc: menu bar redrawn on UI thread");
+        return 0;
+    }
     if (msg == WM_COMMAND && LOWORD(wp) == DRAPE_CMD_ID) {
         // Block re-entry (a second Ctrl+Alt+C during the modal dialog / processing).
         struct RunFlag {
@@ -403,8 +417,10 @@ static bool TryInjectMenu(HWND hw) {
     DbgLog("  TryInject: InsertMenu sep=%d item=%d", (int)r1, (int)r2);
     if (!r2) return false;
 
-    DrawMenuBar(hw);
-    DbgLog("  TryInject: menu injected + DrawMenuBar done");
+    // NEVER call DrawMenuBar from this (background) thread - see the
+    // DRAPE_MSG_REDRAW_MENU note above. Post it to the UI thread instead.
+    PostMessageA(hw, DRAPE_MSG_REDRAW_MENU, 0, 0);
+    DbgLog("  TryInject: menu injected, redraw posted to UI thread");
     return true;
 }
 
