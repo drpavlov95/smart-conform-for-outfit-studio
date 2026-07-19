@@ -8180,7 +8180,8 @@ static int PathBFaceContactProject(
     float relaxation,
     float& worstCorrection,
     const std::vector<uint8_t>* triActive = nullptr,
-    bool countOnly = false)
+    bool countOnly = false,
+    std::vector<uint32_t>* perVertexMoves = nullptr)
 {
     if (!body.valid || contactFloors.size() !=
             tris.size() * std::size(kTriangleSamples)) return 0;
@@ -8230,6 +8231,8 @@ static int PathBFaceContactProject(
                 if (mvLen > maxSampleStep && maxSampleStep > 0.0f)
                     mv = Scale(mv, maxSampleStep / mvLen);
                 x[vi[k]] = Add(x[vi[k]], mv);
+                if (perVertexMoves && perVertexMoves->size() == x.size())
+                    ++(*perVertexMoves)[vi[k]];
             }
             ++moved;
         }
@@ -8651,119 +8654,302 @@ static void PathBDumpTris(const std::vector<Vec3>& verts,
     fclose(f);
 }
 
-// CONVEX CLEFT BRIDGE (2026-07-19). The production HorizontalBridge is
-// deliberately conservative (it only lifts to the line between two flanking
-// shoulders and demands both profiles agree), and measured on the user's own
-// mesh it barely touched the gluteal cleft - his complaint "a saia nao pode
-// entrar na bunda" survived. This is the stronger form validated as a Python
-// prototype on his live scene and approved from the render: per z-slab, take
-// the AZIMUTHAL UPPER CONVEX ENVELOPE of the cloth radius and lift dips onto
-// it, but ONLY across bins where the BODY itself is concave (the cleft), so
-// genuine cloth folds elsewhere are untouched. Overlapping z-windows keep it
-// from banding; the caller smooths and re-floors afterwards.
+// Measurement-only trace for the contact-release investigation.  It records
+// which operator still acts on each material vertex at each morph step, without
+// changing solve order or positions.  The trace is opt-in because writing it on
+// every live slider update would be noisy and expensive.
+static void PathBDumpContactTrace(
+    const std::vector<Vec3>& base,
+    const std::vector<Vec3>& solved,
+    const std::vector<uint8_t>& fixed,
+    const std::vector<float>& authoredGap,
+    const BodyBVH& finalBody,
+    int steps,
+    const std::vector<uint32_t>& vertexContact,
+    const std::vector<uint32_t>& faceContact,
+    const std::vector<uint32_t>& channelFloor,
+    const std::vector<uint32_t>& channelCeiling,
+    const std::vector<uint8_t>& sticky,
+    const std::vector<float>& minimumGap)
+{
+    const size_t n = solved.size();
+    const size_t expected = n * (size_t)steps;
+    if (base.size() != n || fixed.size() != n || authoredGap.size() != n ||
+        vertexContact.size() != expected || faceContact.size() != expected ||
+        channelFloor.size() != expected || channelCeiling.size() != expected ||
+        sticky.size() != expected || minimumGap.size() != expected)
+        return;
+    const char* tmp = getenv("TEMP");
+    if (!tmp) return;
+    const std::string path = std::string(tmp) + "\\drape_live_contact_trace.csv";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    fprintf(f, "vertex,base_x,base_y,base_z,final_x,final_y,final_z,fixed,authored_gap,final_gap");
+    for (int step = 1; step <= steps; ++step)
+        fprintf(f, ",min_gap_s%d,vertex_contact_s%d,face_contact_s%d,channel_floor_s%d,channel_ceiling_s%d,sticky_s%d",
+                step, step, step, step, step, step);
+    fprintf(f, "\n");
+    for (size_t i = 0; i < n; ++i) {
+        float finalGap = 1.0e9f;
+        if (!BVHSignedGap(finalBody, solved[i], finalGap, nullptr))
+            finalGap = 1.0e9f;
+        fprintf(f, "%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%.6f,",
+                i, base[i].x, base[i].y, base[i].z,
+                solved[i].x, solved[i].y, solved[i].z,
+                fixed[i] ? 1 : 0, authoredGap[i]);
+        if (finalGap < 1.0e8f) fprintf(f, "%.6f", finalGap);
+        for (int step = 0; step < steps; ++step) {
+            const size_t k = (size_t)step * n + i;
+            fprintf(f, ",");
+            if (minimumGap[k] < 1.0e8f) fprintf(f, "%.6f", minimumGap[k]);
+            fprintf(f, ",%u,%u,%u,%u,%d",
+                    vertexContact[k], faceContact[k], channelFloor[k],
+                    channelCeiling[k], sticky[k] ? 1 : 0);
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    HLog("path-b-shell: contact trace dumped verts=%zu steps=%d -> %s",
+         n, steps, path.c_str());
+}
+
+// TRUE-2D CLEFT BRIDGE (2026-07-19).  The superseded implementation connected
+// samples by a straight line in (azimuth,radius); that is a spiral in XY, not a
+// Euclidean chord, and inflated already-convex sections.  This version builds
+// an actual monotone-chain hull in each XY cross-section and evaluates it with
+// ray/polygon intersection.  It is restricted to the posterior wedge and the
+// lower 55% of the body, so arms and the scapular/spine groove cannot qualify.
+// The body hull is only a concavity gate; cloth is lifted to ITS OWN hull.
+// Smoothing diffuses the scalar outward displacement, never vertex positions.
 static int PathBConvexCleftBridge(
     std::vector<Vec3>& x,
     const std::vector<Vec3>& bodyVerts,
     const std::vector<uint8_t>& movable,
+    const std::vector<std::vector<uint32_t>>& vertNeighbors,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
     float bodyConcaveMin,
-    float maxLift,
-    std::vector<uint8_t>& outLifted)
+    float maxLift)
 {
     const size_t n = x.size();
     if (n == 0 || bodyVerts.empty()) return 0;
-    constexpr int NB = 96;            // azimuth bins
-    const float zLo = -1.0e30f;
+
+    struct P2 { float x, y; };
+    auto cross2 = [](const P2& a, const P2& b) -> double {
+        return (double)a.x * b.y - (double)a.y * b.x;
+    };
+    auto sub2 = [](const P2& a, const P2& b) -> P2 {
+        return P2{a.x - b.x, a.y - b.y};
+    };
+    auto buildHull = [&](std::vector<P2> pts) -> std::vector<P2> {
+        if (pts.size() < 3) return {};
+        std::sort(pts.begin(), pts.end(), [](const P2& a, const P2& b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y);
+        });
+        pts.erase(std::unique(pts.begin(), pts.end(), [](const P2& a, const P2& b) {
+            return std::fabs(a.x - b.x) <= 1.0e-6f &&
+                   std::fabs(a.y - b.y) <= 1.0e-6f;
+        }), pts.end());
+        if (pts.size() < 3) return {};
+        std::vector<P2> lower, upper;
+        for (const P2& p : pts) {
+            while (lower.size() >= 2) {
+                const P2 a = sub2(lower[lower.size() - 1], lower[lower.size() - 2]);
+                const P2 b = sub2(p, lower[lower.size() - 1]);
+                if (cross2(a, b) > 1.0e-9) break;
+                lower.pop_back();
+            }
+            lower.push_back(p);
+        }
+        for (auto it = pts.rbegin(); it != pts.rend(); ++it) {
+            const P2& p = *it;
+            while (upper.size() >= 2) {
+                const P2 a = sub2(upper[upper.size() - 1], upper[upper.size() - 2]);
+                const P2 b = sub2(p, upper[upper.size() - 1]);
+                if (cross2(a, b) > 1.0e-9) break;
+                upper.pop_back();
+            }
+            upper.push_back(p);
+        }
+        lower.pop_back();
+        upper.pop_back();
+        lower.insert(lower.end(), upper.begin(), upper.end());
+        return lower;
+    };
+    const P2 center{g_refCenterX, g_refCenterY};
+    auto rayHullRadius = [&](const P2& dir, const std::vector<P2>& hull,
+                             float& radius) -> bool {
+        double best = -1.0;
+        for (size_t i = 0; i < hull.size(); ++i) {
+            const P2& a = hull[i];
+            const P2& b = hull[(i + 1) % hull.size()];
+            const P2 edge = sub2(b, a);
+            const double den = cross2(dir, edge);
+            if (std::fabs(den) <= 1.0e-10) continue;
+            const P2 rel = sub2(a, center);
+            const double t = cross2(rel, edge) / den;
+            const double u = cross2(rel, dir) / den;
+            if (t >= -1.0e-7 && u >= -1.0e-7 && u <= 1.0 + 1.0e-7)
+                best = std::max(best, t);
+        }
+        if (best < 0.0 || !std::isfinite(best)) return false;
+        radius = (float)best;
+        return true;
+    };
+
+    constexpr float kPiF = 3.14159265358979323846f;
+    const float halfAngle = 52.0f * kPiF / 180.0f;
+    const float sampleAngle = 5.0f * kPiF / 180.0f;
+    auto posteriorInfo = [&](const Vec3& v, float& theta, float& radius) -> bool {
+        const float lateral = v.x - g_refCenterX;
+        const float depth = -(v.y - g_refCenterY);  // Skyrim: BACK=-y
+        if (depth <= 0.0f) return false;
+        theta = std::atan2(lateral, depth);
+        if (std::fabs(theta) > halfAngle) return false;
+        radius = std::hypot(lateral, depth);
+        return radius > 1.0e-5f;
+    };
+
+    float bodyMinZ = 1.0e30f, bodyMaxZ = -1.0e30f;
+    for (const Vec3& v : bodyVerts) {
+        bodyMinZ = std::min(bodyMinZ, v.z);
+        bodyMaxZ = std::max(bodyMaxZ, v.z);
+    }
+    const float bodyZCeil = bodyMinZ + 0.55f * (bodyMaxZ - bodyMinZ);
     float minZ = 1.0e30f, maxZ = -1.0e30f;
     for (size_t i = 0; i < n; ++i) {
         if (!movable[i]) continue;
+        float theta = 0.0f, radius = 0.0f;
+        if (!posteriorInfo(x[i], theta, radius) || x[i].z > bodyZCeil) continue;
         minZ = std::min(minZ, x[i].z);
         maxZ = std::max(maxZ, x[i].z);
     }
     if (maxZ <= minZ) return 0;
-    (void)zLo;
 
-    std::vector<float> envAcc(n, 0.0f);
-    std::vector<int> envCnt(n, 0);
-
-    auto binOf = [&](const Vec3& v) {
-        float dx = v.x - g_refCenterX, dy = v.y - g_refCenterY;
-        float a = std::atan2(dy, dx);
-        int b = (int)std::floor((a + 3.14159265f) / (2.0f * 3.14159265f) * NB);
-        return b < 0 ? 0 : (b >= NB ? NB - 1 : b);
-    };
-    // LOCAL bridging envelope. A GLOBAL 360-degree convex hull is useless
-    // here: a torso cross-section with arms is "concave" almost everywhere
-    // against its own hull, so every bin qualified and the pass inflated the
-    // whole garment (measured: 1336 of 1838 movable verts lifted, sleeves
-    // puffed). Instead, for each bin take the HIGHEST CHORD that spans it
-    // within a limited angular window - that bridges a local dip (the cleft)
-    // and leaves the broad silhouette alone.
-    constexpr int kWin = 12;          // +-45 degrees at 96 bins
-    auto bridgeEnvelope = [&](const std::vector<float>& prof,
-                              std::vector<float>& env) {
-        env.assign(NB, -1.0f);
-        for (int b = 0; b < NB; ++b) {
-            if (prof[b] < 0.0f) continue;
-            float best = prof[b];
-            for (int dl = 1; dl <= kWin; ++dl) {
-                const int l = b - dl;
-                if (l < 0 || prof[l] < 0.0f) continue;
-                for (int dr = 1; dr <= kWin; ++dr) {
-                    const int r = b + dr;
-                    if (r >= NB || prof[r] < 0.0f) continue;
-                    const float t = (float)dl / (float)(dl + dr);
-                    const float chord = prof[l] + (prof[r] - prof[l]) * t;
-                    if (chord > best) best = chord;
-                }
-            }
-            env[b] = best;
-        }
-    };
-
-    std::vector<float> bodyProf(NB), clothProf(NB), bodyEnv, clothEnv;
-    for (float zc = minZ; zc <= maxZ; zc += 1.0f) {
-        std::fill(bodyProf.begin(), bodyProf.end(), -1.0f);
-        std::fill(clothProf.begin(), clothProf.end(), -1.0f);
+    std::vector<float> targetSum(n, 0.0f);
+    std::vector<int> targetCount(n, 0);
+    for (float zc = std::floor(minZ); zc <= std::ceil(maxZ); zc += 1.0f) {
+        std::vector<P2> bodyPts{center}, clothPts{center};
+        std::vector<std::pair<float, float>> bodyPolar;
+        std::vector<size_t> clothIds;
         for (const Vec3& v : bodyVerts) {
             if (v.z < zc - 1.5f || v.z >= zc + 1.5f) continue;
-            const int b = binOf(v);
-            const float r = std::hypot(v.x - g_refCenterX, v.y - g_refCenterY);
-            if (bodyProf[b] < 0.0f || r > bodyProf[b]) bodyProf[b] = r;
+            float theta = 0.0f, radius = 0.0f;
+            if (!posteriorInfo(v, theta, radius)) continue;
+            bodyPts.push_back(P2{v.x, v.y});
+            bodyPolar.emplace_back(theta, radius);
         }
         for (size_t i = 0; i < n; ++i) {
             if (!movable[i]) continue;
+            if (x[i].z > bodyZCeil) continue;
             if (x[i].z < zc - 1.5f || x[i].z >= zc + 1.5f) continue;
-            const int b = binOf(x[i]);
-            const float r = std::hypot(x[i].x - g_refCenterX, x[i].y - g_refCenterY);
-            if (clothProf[b] < 0.0f || r > clothProf[b]) clothProf[b] = r;
+            float theta = 0.0f, radius = 0.0f;
+            if (!posteriorInfo(x[i], theta, radius)) continue;
+            clothPts.push_back(P2{x[i].x, x[i].y});
+            clothIds.push_back(i);
         }
-        bridgeEnvelope(bodyProf, bodyEnv);
-        bridgeEnvelope(clothProf, clothEnv);
-        for (size_t i = 0; i < n; ++i) {
-            if (!movable[i]) continue;
-            if (x[i].z < zc - 1.5f || x[i].z >= zc + 1.5f) continue;
-            const int b = binOf(x[i]);
-            if (bodyEnv[b] < 0.0f || bodyProf[b] < 0.0f || clothEnv[b] < 0.0f) continue;
-            if (bodyEnv[b] - bodyProf[b] < bodyConcaveMin) continue;   // body not concave here
-            envAcc[i] += clothEnv[b];
-            envCnt[i] += 1;
+        if (bodyPolar.size() < 6 || clothIds.size() < 5) continue;
+        const std::vector<P2> bodyHull = buildHull(std::move(bodyPts));
+        const std::vector<P2> clothHull = buildHull(std::move(clothPts));
+        if (bodyHull.size() < 3 || clothHull.size() < 3) continue;
+
+        for (size_t i : clothIds) {
+            const float dx = x[i].x - g_refCenterX;
+            const float dy = x[i].y - g_refCenterY;
+            const float radius = std::hypot(dx, dy);
+            if (radius <= 1.0e-5f) continue;
+            const P2 dir{dx / radius, dy / radius};
+            float bodyHullR = 0.0f, clothHullR = 0.0f;
+            if (!rayHullRadius(dir, bodyHull, bodyHullR) ||
+                !rayHullRadius(dir, clothHull, clothHullR)) continue;
+            const float theta = std::atan2(dx, -dy);
+            float bodyActual = -1.0f;
+            for (const auto& sample : bodyPolar) {
+                if (std::fabs(sample.first - theta) <= sampleAngle)
+                    bodyActual = std::max(bodyActual, sample.second);
+            }
+            if (bodyActual < 0.0f || bodyHullR - bodyActual < bodyConcaveMin)
+                continue;
+            if (clothHullR <= radius + 0.05f) continue;
+            targetSum[i] += std::min(clothHullR, radius + maxLift);
+            ++targetCount[i];
         }
     }
 
-    int lifted = 0;
+    std::vector<float> seedLift(n, 0.0f);
     for (size_t i = 0; i < n; ++i) {
-        if (!movable[i] || envCnt[i] == 0) continue;
-        const float target = envAcc[i] / (float)envCnt[i];
+        if (!movable[i] || targetCount[i] == 0) continue;
+        const float target = targetSum[i] / (float)targetCount[i];
         const float dx = x[i].x - g_refCenterX, dy = x[i].y - g_refCenterY;
         const float r = std::hypot(dx, dy);
         if (r < 1.0e-4f || target <= r + 0.05f) continue;
-        const float nr = std::min(target, r + maxLift);
+        seedLift[i] = std::min(target - r, maxLift);
+    }
+    for (const auto& group : exactSeamGroups) {
+        float lift = 0.0f;
+        bool allMovable = true;
+        for (uint32_t vi : group) {
+            if (vi >= n || !movable[vi]) { allMovable = false; break; }
+            lift = std::max(lift, seedLift[vi]);
+        }
+        if (!allMovable) lift = 0.0f;
+        for (uint32_t vi : group) if (vi < n) seedLift[vi] = lift;
+    }
+
+    std::vector<uint8_t> seed(n, 0), band(n, 0), frontier(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        if (seedLift[i] <= 1.0e-6f) continue;
+        seed[i] = band[i] = frontier[i] = 1;
+    }
+    for (int ring = 0; ring < 2; ++ring) {
+        std::vector<uint8_t> next(n, 0);
+        for (size_t i = 0; i < n; ++i) {
+            if (!frontier[i]) continue;
+            for (uint32_t nb : vertNeighbors[i])
+                if (nb < n && movable[nb] && !band[nb]) next[nb] = 1;
+        }
+        for (size_t i = 0; i < n; ++i)
+            if (next[i]) band[i] = 1;
+        frontier.swap(next);
+    }
+    std::vector<float> smoothLift = seedLift;
+    for (int iter = 0; iter < 4; ++iter) {
+        std::vector<float> update = smoothLift;
+        for (size_t i = 0; i < n; ++i) {
+            if (!band[i] || seed[i] || vertNeighbors[i].empty()) continue;
+            float sum = 0.0f;
+            for (uint32_t nb : vertNeighbors[i]) sum += smoothLift[nb];
+            const float avg = sum / (float)vertNeighbors[i].size();
+            update[i] = 0.4f * smoothLift[i] + 0.6f * avg;
+        }
+        for (const auto& group : exactSeamGroups) {
+            float sum = 0.0f;
+            int count = 0;
+            for (uint32_t vi : group) {
+                if (vi >= n) continue;
+                sum += update[vi];
+                ++count;
+            }
+            if (count < 2) continue;
+            const float avg = sum / (float)count;
+            for (uint32_t vi : group) if (vi < n) update[vi] = avg;
+        }
+        smoothLift.swap(update);
+    }
+
+    const std::vector<Vec3> source = x;
+    int affected = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!movable[i] || smoothLift[i] <= 1.0e-6f) continue;
+        const float dx = source[i].x - g_refCenterX;
+        const float dy = source[i].y - g_refCenterY;
+        const float r = std::hypot(dx, dy);
+        if (r <= 1.0e-5f) continue;
+        const float nr = r + smoothLift[i];
         x[i].x = g_refCenterX + dx / r * nr;
         x[i].y = g_refCenterY + dy / r * nr;
-        outLifted[i] = 1;
-        ++lifted;
+        ++affected;
     }
-    return lifted;
+    return affected;
 }
 
 static bool PathBSimV2Solve(
@@ -8889,6 +9075,21 @@ static bool PathBSimV2Solve(
         fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
         raw[i] = DiffAt(rawDiff, (uint16_t)i);
         if (!fixed[i]) { areaSum += vertArea[i]; ++freeCount; }
+    }
+    // Isolated material-metric probe.  The default shell still uses authored
+    // (base/slim) lengths for free-free edges even though its fixed supports
+    // already follow the target slider.  That mismatch can contract a Heavy
+    // garment into the body.  The opt-in probe grades only intrinsic edge
+    // lengths to the target slider; raw positions never become an attractor.
+    const bool gradedRest = EnvToggle("DRAPE_SHELL_GRADED_REST", false);
+    std::vector<float> baseEdgeRest(edges.size(), 0.0f);
+    std::vector<float> targetEdgeRest(edges.size(), 0.0f);
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        baseEdgeRest[ei] = e.rest;
+        const Vec3 targetA = Add(baseVerts[e.a], raw[e.a]);
+        const Vec3 targetB = Add(baseVerts[e.b], raw[e.b]);
+        targetEdgeRest[ei] = Len(Sub(targetA, targetB));
     }
     {
         // capture the user's EXACT live scene once per solve
@@ -9084,7 +9285,6 @@ static bool PathBSimV2Solve(
         std::max(0.0f, EnvFloat("DRAPE_SHELL_CHAN_FLOOR_SLACK", 1.2f));
     const bool ceilOn =
         prodCeil.valid && EnvFloat("DRAPE_SHELL_CEIL", 1.0f) > 0.5f;
-
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
@@ -9118,6 +9318,21 @@ static bool PathBSimV2Solve(
         ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f), 0.05f, 1.0f);
     const int kStallWindow = (int)EnvFloat("DRAPE_SHELL_STALL", 25.0f);
     const float kStrainLimit = EnvFloat("DRAPE_SHELL_STRAIN_LIMIT", 1.10f);
+    const bool traceContact =
+        EnvToggle("DRAPE_SHELL_TRACE_CONTACT", false);
+    const size_t traceCount = n * (size_t)kMorphSteps;
+    std::vector<uint32_t> traceVertexContact, traceFaceContact,
+        traceChannelFloor, traceChannelCeiling;
+    std::vector<uint8_t> traceSticky;
+    std::vector<float> traceMinimumGap;
+    if (traceContact) {
+        traceVertexContact.assign(traceCount, 0);
+        traceFaceContact.assign(traceCount, 0);
+        traceChannelFloor.assign(traceCount, 0);
+        traceChannelCeiling.assign(traceCount, 0);
+        traceSticky.assign(traceCount, 0);
+        traceMinimumGap.assign(traceCount, 1.0e9f);
+    }
     float gradErr = 0.0f;
     const int analyticVariant = PathBCalibrateAnalyticGradients(baseVerts, hinges, 64, gradErr);
     HLog("path-b-shell: analytic dihedral calibration variant=%d maxErr=%.6f -> %s",
@@ -9125,6 +9340,9 @@ static bool PathBSimV2Solve(
          analyticVariant >= 0 ? "analytic" : "NUMERIC FALLBACK");
     int totalIters = 0;
     for (int step = 1; step <= kMorphSteps; ++step) {
+        const size_t traceOffset = (size_t)(step - 1) * n;
+        std::vector<uint32_t> faceMovesThisStep;
+        if (traceContact) faceMovesThisStep.assign(n, 0);
         float t = (float)step / (float)kMorphSteps;
         std::vector<Vec3> bodyVerts(refBody.verts.size());
         for (size_t i = 0; i < bodyVerts.size(); ++i)
@@ -9239,6 +9457,15 @@ static bool PathBSimV2Solve(
                      anchorRounds, worstAnchorFace, residCount, residWorst);
             }
         }
+        // Material metric follows the morph multiplicatively. Geometric
+        // interpolation would bias large slider ratios; log interpolation is
+        // positive and matches the already validated offline contract.
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            float rest = baseEdgeRest[ei];
+            if (gradedRest && rest > 1.0e-6f && targetEdgeRest[ei] > 1.0e-6f)
+                rest *= std::exp(t * std::log(targetEdgeRest[ei] / rest));
+            edges[ei].rest = rest;
+        }
         // Edges touching the pinned band: rest = the STEP's anchor-pose
         // length. With rest = base length and the fixed endpoint at its
         // conform-displaced position, these edges carried permanent
@@ -9331,6 +9558,9 @@ static bool PathBSimV2Solve(
                 float dist = std::sqrt(d2);
                 float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
                 vertGap[i] = gap;
+                if (traceContact)
+                    traceMinimumGap[traceOffset + i] =
+                        std::min(traceMinimumGap[traceOffset + i], gap);
                 float floor = vertHardFloor[i];
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
@@ -9362,6 +9592,7 @@ static bool PathBSimV2Solve(
                 stickyN[i] = nrm;
                 stickyHas[i] = 1;
                 ++contactMoves;
+                if (traceContact) ++traceVertexContact[traceOffset + i];
             }
             if (hullOn) {
                 int hullMoves = 0;
@@ -9482,6 +9713,10 @@ static bool PathBSimV2Solve(
                     if (r > hi) move = -std::min(r - hi, kContactStepC);
                     else if (r < lo) move = std::min(lo - r, kContactStepC);
                     if (move == 0.0f) continue;
+                    if (traceContact) {
+                        if (move > 0.0f) ++traceChannelFloor[traceOffset + i];
+                        else ++traceChannelCeiling[traceOffset + i];
+                    }
                     const float inv = 1.0f / r;
                     x[i].x += dx2 * inv * move;
                     x[i].y += dy2 * inv * move;
@@ -9505,7 +9740,8 @@ static bool PathBSimV2Solve(
                 faceContactMoves += PathBFaceContactProject(
                     x, tris, invMass, body, faceHardFloor,
                     kFaceStepC, kFaceRelaxC,
-                    worstFaceContact, &triActive);
+                    worstFaceContact, &triActive, /*countOnly=*/false,
+                    traceContact ? &faceMovesThisStep : nullptr);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
@@ -9529,6 +9765,12 @@ static bool PathBSimV2Solve(
             } else if (kStallWindow > 0 && iteration - stallIter >= kStallWindow) {
                 stalled = true;
                 break;
+            }
+        }
+        if (traceContact) {
+            for (size_t i = 0; i < n; ++i) {
+                traceFaceContact[traceOffset + i] = faceMovesThisStep[i];
+                traceSticky[traceOffset + i] = stickyHas[i] ? 1 : 0;
             }
         }
         totalIters += itersUsed;
@@ -9602,26 +9844,6 @@ static bool PathBSimV2Solve(
                 totalLifts += lifts;
                 if (lifts == 0) break;
             }
-            // STRONG pass: convex envelope over body concavities (the cleft).
-            // DEFAULT OFF (2026-07-19): this pass is geometrically WRONG as written -
-            // it treats a straight line in (azimuth, radius) space as a chord, but
-            // that is a spiral in the plane, so on a cross-section with varying
-            // radius it lifts points that are already convex. Measured: front
-            // 9.1 -> 11.0 and back 15.5 -> 18.3, i.e. it inflates the garment
-            // instead of bridging the cleft. Correct form needs a true 2D convex
-            // hull per z-slice; kept behind the flag until then.
-            if (EnvFloat("DRAPE_SHELL_CONVEX_CLEFT", 0.0f) > 0.5f) {
-                std::vector<uint8_t> movableMask(n, 0);
-                for (size_t i = 0; i < n; ++i)
-                    movableMask[i] = (!fixed[i] && authoredGapArr[i] >= -0.1f) ? 1 : 0;
-                const int convexLifts = PathBConvexCleftBridge(
-                    x, morphedBody.verts, movableMask,
-                    EnvFloat("DRAPE_SHELL_CLEFT_CONCAVE", 0.45f),
-                    EnvFloat("DRAPE_SHELL_CLEFT_MAXLIFT", 2.5f), lifted);
-                PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
-                totalLifts += convexLifts;
-                HLog("path-b-shell: convex cleft bridge lifts=%d", convexLifts);
-            }
             for (int sm = 0; sm < 4; ++sm) {
                 std::vector<Vec3> upd = x;
                 for (size_t i = 0; i < n; ++i) {
@@ -9637,6 +9859,25 @@ static bool PathBSimV2Solve(
             HLog("path-b-shell: cleft bridge lifts=%d (rounds<=%d)",
                  totalLifts, kBridgeRounds);
         }
+    }
+    // Strong cleft pass is independent of the legacy horizontal bridge and
+    // remains opt-in until its small live-scene correction is user-approved.
+    // It owns displacement-field smoothing internally; never feed its sparse
+    // seeds through the positional Laplacian above (that shrank panels by 4u
+    // for a real hull correction of only ~0.3u in the Python mirror).
+    if (EnvFloat("DRAPE_SHELL_CONVEX_CLEFT", 0.0f) > 0.5f) {
+        std::vector<uint8_t> movableMask(n, 0);
+        for (size_t i = 0; i < n; ++i)
+            movableMask[i] = (!fixed[i] && authoredGapArr[i] >= -0.1f) ? 1 : 0;
+        const int convexAffected = PathBConvexCleftBridge(
+            x, morphedBody.verts, movableMask, vertNeighbors, exactSeamGroups,
+            EnvFloat("DRAPE_SHELL_CLEFT_CONCAVE", 0.45f),
+            EnvFloat("DRAPE_SHELL_CLEFT_MAXLIFT", 2.5f));
+        std::vector<Vec3> bridgeAnchor(n);
+        for (size_t i = 0; i < n; ++i)
+            bridgeAnchor[i] = Add(baseVerts[i], raw[i]);
+        PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
+        HLog("path-b-shell: true-2d cleft bridge affected=%d", convexAffected);
     }
     {
         const BodyBVH& fullBody = morphedBody;   // already built by the caller
@@ -9681,6 +9922,12 @@ static bool PathBSimV2Solve(
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce
     // body penetration after the final contact projection.
+    if (traceContact) {
+        PathBDumpContactTrace(
+            baseVerts, x, fixed, authoredGapArr, morphedBody, kMorphSteps,
+            traceVertexContact, traceFaceContact, traceChannelFloor,
+            traceChannelCeiling, traceSticky, traceMinimumGap);
+    }
     out = std::move(x);
     return true;
 }

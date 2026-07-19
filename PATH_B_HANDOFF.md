@@ -1,29 +1,182 @@
 # Path B — operational handoff
 
-Updated: 2026-07-16 (America/Sao_Paulo)
+Updated: 2026-07-19 (America/Sao_Paulo)
 
 Branch: `wip/path-b-shell-solve`. The commit that contains this file is the
 authoritative checkpoint; run `git log -1 --oneline` instead of copying an old
 hash from this document.
 
+---
+
+# Codex continuation 2026-07-19 - true hull closed, release transition isolated
+
+## Installed/live state (do not confuse with the research build)
+
+The installed algorithm remains the user-tested Release DLL from the previous
+handoff. Both mod folders were re-verified after this session:
+
+- MD5 `AD9530E916B3B45AAF15393BB17B1E24`
+- SHA-256 `70FBC074335970D4EDE29A2EB9605DD5F99A4512532878971FB78A487CDA7A26`
+
+No Path-B experiment from this continuation is deployed. `DRAPE_SHELL_CONVEX_CLEFT`
+still defaults to `0`. Important build trap: the CMake target `drape_algo` has an
+unconditional POST_BUILD copy to both mod folders. A RelWithDebInfo validation
+build briefly copied itself there; it was immediately replaced with the exact
+Release DLL/hash above. Future compile-only validation must build in a tree with
+deployment disabled or restore the Release artifact immediately afterward.
+
+The exact live dumps captured before any harness replay are preserved (ignored)
+under `tmp/pathb/live_freeze_20260719_1903/`. Their SHA identities match the
+late-session handoff: authored `300C0D...`, body `A21F87...`, production
+`C36844...`, published `688DF7...`.
+
+## True 2D hull: implemented correctly, validated, still opt-in
+
+`tools/pathb_true_hull_spike.py` is the offline mirror and diagnostic. It has a
+synthetic monotone-chain/ray-intersection self-test, exact plane/triangle pelvis
+sections, continuous posterior profiles, front-only rejection, authored seam and
+face-integrity gates, and displacement-field smoothing. It deliberately does not
+smooth positions: the superseded positional Laplacian moved vertices up to `4.60u`
+for a real hull correction of only about `0.30u`.
+
+`algo/conform_hook.cpp::PathBConvexCleftBridge` now implements the same geometry:
+
+- true Euclidean XY hull per overlapping z-slab;
+- posterior wedge only (`BACK=-y`, half-angle 52 degrees);
+- lower-body ceiling at 55% of body height (excludes spine/scapula grooves);
+- body hull is only the concavity gate; cloth targets its own hull;
+- two material rings, scalar outward-displacement diffusion, exact-seam tying;
+- independent of the legacy HorizontalBridge positional smoother.
+
+On the frozen live scene the Python spike moves 50 posterior vertices, mean
+`0.06143u`, maximum `0.30137u`, zero front vertices, with source/candidate both
+`104` flips, `9` collapsed faces and seam split `0`. On the rebuilt corpus C++
+pilot it moves 49 posterior vertices (max `0.30161u`), zero front vertices, and
+keeps baseline/candidate at `103` flips, `9` collapsed and seam split `0`.
+Surface means improve slightly (`fwd 0.9075 -> 0.9064`, `rev 1.0855 -> 1.0839`).
+C++ vs Python mirror differs by only `0.000048u` mean / `0.01494u` max.
+
+Harness reproducibility from the rebuilt source:
+
+- OFF: `B553947D...EF7D`, identical over two runs;
+- ON: `B8ECEB96...2761`, identical over two runs;
+- default/OFF corpus: 18/18 shapes green.
+
+The focused evidence is `tmp/pathb/true_hull_cpp/CPP_true_hull_focused.png`.
+It proves the hull is safe and geometrically correct, but also that green and
+current orange almost overlap. This is a minor central-cleft repair, not the
+dominant remaining cloth-sim fix. Do not deploy it before the user sees/approves
+that focused image.
+
+## Dominant residual: contact-release transition, not horizontal cleft
+
+The live exact surface diagnostic separates two phenomena that earlier renders
+mixed together:
+
+- Horizontal XY sections at z 42/48/54/60 are already almost convex/flat across
+  the posterior center; their true-hull deficit is at most about `0.30u`.
+- Below roughly z=60 the panel already falls nearly plumb.
+- In the buttock/flank band (`5<|x|<11`, z=60..70), live cloth-to-body unsigned
+  distance is min/p10/p50/p90 `0.264/0.308/0.349/0.410u`: this is still the
+  support/contact transition.
+- In the central band (`|x|<3`, z=60..70), the corresponding median is `1.981u`.
+  The cloth center is free while the lateral panel remains near the body.
+
+Thus the visible under-butt curve is mostly the solver retaining body contact too
+far down the lateral panel, then releasing into an already-straight fall. It is
+not a long-range force on the lower hem and cannot be fixed by increasing gravity.
+
+Two tempting channel edits were falsified and removed; do not repeat them:
+
+1. Tightening `DRAPE_SHELL_CHAN_FLOOR_SLACK` globally from `1.2` to
+   `0.9/0.6/0.3` moved the profile outward but added respectively `4/13/8` face
+   flips relative to that build's baseline. A hard floor fights contact/stretch.
+2. A smooth authored-gap release blend (old slack in the worn band, `0.6` only
+   on authored-free cloth) still worsened surface means to `0.8849/1.0585` and
+   added 5 flips. It changed the nonlinear equilibrium non-locally. The code was
+   removed rather than left as another dead flag.
+
+## Contact trace: the contact is active, but it is the reaction
+
+`DRAPE_SHELL_TRACE_CONTACT=1` now writes
+`%TEMP%/drape_live_contact_trace.csv`.  It records, per material vertex and
+morph step, minimum/final body gap, fixed/sticky state, vertex and face contact,
+and both channel directions. `tools/pathb_contact_trace.py` summarizes it and
+can freeze region membership from a baseline with `--selection-trace`.  The
+trace is measurement-only: OFF and ON produced the identical Heavy OBJ SHA-256
+`B553947D...EF7D`.
+
+For the ten baseline material vertices in the posterior lateral transition
+(`5<|x|<11`, `z=60..70`), the final step shows:
+
+- all `10/10` under vertex contact (`117` events), face contact (`1786` events),
+  the channel ceiling (`279` events), and sticky memory;
+- median minimum gap `-0.7285u`, reconciled to final median `0.3567u`.
+
+So contact really persists.  But removing/arbitrating the channel proves it is
+not the root inward driver:
+
+- skipping the ceiling after contact improved surface mean only slightly and
+  raised flips `104 -> 152`; it was removed;
+- disabling the whole channel retained contact on `10/10`, worsened surface
+  fwd `0.9075 -> 1.0454`, and raised flips `104 -> 121`;
+- making bending 200x more compliant was almost a no-op (surface fwd `0.9078`,
+  flips `102`).
+
+Do not repeat channel or bending sweeps.  Contact is mostly reacting to an
+intrinsic-metric mismatch rather than magnetically attracting the cloth.
+
+## Graded-rest probe: real lever found, blocked on integrity/interlayer
+
+`DRAPE_SHELL_GRADED_REST=1` is a new default-OFF harness probe.  Free-free edge
+rest lengths follow `L(t)=Lbase*exp(t*log(Lraw/Lbase))`; raw positions are never
+targets.  This fixes the current inconsistency where free material keeps the
+base/slim metric while supports already follow Heavy. Two runs are byte-identical
+at SHA-256 `8EC751ED...EF6B`.
+
+On the exact same ten baseline material IDs, full graded rest changes the last
+step as follows:
+
+- final median body gap `0.3567 -> 0.8076u`;
+- median minimum gap `-0.7285 -> +0.3146u`;
+- vertex contact `10 verts / 117 events -> 4 / 4`;
+- face contact `10 / 1786 -> 8 / 702`;
+- surface fwd/rev means `0.9075/1.0855 -> 0.8041/0.9618`;
+- harness magnetism count `1101 -> 831`.
+
+This is the first measured mechanism that actually releases the affected panel
+and improves both surface directions.  It is not deployable yet: flips rise
+`104 -> 146`, collapsed faces `9 -> 12`, and torso-vs-BlackSmithBelt residuals
+rise from vertex/face `24/87` to `58/397` (worst about `3.12u`).  This confirms
+the next missing pieces: fold/self-intersection control for the newly available
+material and interlayer contact/order during the solve.  Do not tune the rest
+blend to hide those failures; keep full target metric as the physical contract
+and repair the integrity mechanisms.
+
+Immediate continuation:
+
+1. Map the 42 added flipped faces and 310 added Belt face conflicts to material
+   components/bands; distinguish local fold inversion from layer crossing.
+2. Add a broad-phase self/interlayer collision probe behind a separate flag,
+   with the Belt treated as the authored outer layer.
+3. Re-run full graded rest and require baseline-or-better flips/collapses and
+   interlayer residual before any visual/live pilot.
+4. Independently close the cross-build equilibrium drift gate before any DLL
+   deploy.  Determinism within one binary is already proven; equivalence across
+   Release/research builds is not.
+
 ## State at handoff
 
-- The transactional C++ Path-B pilot is implemented, rebuilt from the current
-  source, harness-validated, deployed to both Outfit Studio mod copies and
-  enabled live. Its scope is deliberately hard-coded to
-  `BlackSmithTorso` + `RM_Heavy` + the merged UI preset `Cloth` only. The code
-  accepts both historical fitted/loose enum values for old captures.
-- The feature is OFF by default. Live activation is the present
-  `shell_solve_on.flag`; `shell_solve_off.flag` is absent and, if created,
-  wins over both the ON flag and `DRAPE_SHELL_SOLVE=1`.
-- Deployed DLL SHA-256 (build plus both copies):
-  `6B325B888A4D1C9A0FA8AD63F7B3314FA62F619C4BE697C7A4F1BA305350B790`.
-- Current-source validation is green: OFF corpus `18/18`, three selftests,
-  Heavy ON twice byte-identical (`14C332CD...210F7`), and non-scoped
-  `BlackSmithBelt` ON/OFF byte-identical (`1944A076...D13`).
-- Measured Heavy harness latency is about `9.5 s` per conform. This is accepted
-  only for the narrow pilot; the all-pairs transactional gates are not ready
-  for universal rollout.
+- No experiment from this continuation is deployed.  Both installed DLLs must
+  remain the user-tested Release SHA-256 `70FBC074...A7A26` / MD5
+  `AD9530E9...B1E24` described at the top of this document.
+- Source scope remains hard-coded to `BlackSmithTorso` + `RM_Heavy` + the
+  merged UI preset `Cloth`; historical fitted/loose enums are accepted only for
+  captures. `CONVEX_CLEFT`, `TRACE_CONTACT`, and `GRADED_REST` all default OFF.
+- Current-source default Heavy is deterministic at `B553947D...EF7D`.  The
+  measurement trace is byte-identical to that result.
+- The local `shell_solve_on.flag` and `shell_transactions_off.flag` are runtime
+  user state, not files to stage. `shell_solve_off.flag`, if created, wins.
 - RM_Thin, Yarl, Vampire and every other garment remain on the legacy path.
   Do not broaden the pilot before a new multi-garment gate/review.
 - Falmer remains benched because its saved OSD ground truth is contaminated.
@@ -706,20 +859,18 @@ width. He wants the skirt to pass smoothly over the cleft like a curtain.
 - `6321996` ported the production `HorizontalBridge` into the sim as a final
   pass. It is honest but far too conservative — on his mesh it barely dented
   the cleft (the sim back is only slightly smoother than production).
-- `ac5d1ca` adds `PathBConvexCleftBridge`, **gated OFF, and it is wrong as
-  written**: it treats a straight line in (azimuth, radius) space as a chord,
+- `ac5d1ca` added the original `PathBConvexCleftBridge`, **gated OFF, and that
+  historical revision was wrong**: it treated a straight line in (azimuth, radius) space as a chord,
   but that is a spiral in the plane, so on a cross-section with varying radius
   it lifts points that are already convex. Measured on corpus: front
   9.1 → 11.0, back 15.5 → 18.3 — it inflates the garment instead of bridging.
   The Python prototype (`tools/pathb_shapematch_spike.py` lineage) hid this by
   restricting to the back arc, where the profile is nearly flat.
 
-**Concrete next step:** implement the bridge as a **true 2D convex hull per
-z-slice** (monotone chain over the cross-section points in the x-y plane),
-gate it to bins where the BODY is measurably inside its own hull (the cleft),
-push cloth onto the cloth hull there, then Laplacian-smooth the lifted band and
-let the existing hard reconciliation re-floor it. Validate by rendering the
-user's dumped live mesh, publish the render, get his approval BEFORE deploying.
+**Superseded/completed by Marco 20:** the bridge is now a true 2D convex hull
+per z-slice with a body-concavity gate and displacement-field smoothing.  It is
+safe but only a minor correction; the contact/graded-rest findings at the top
+of this handoff are the current continuation point. It remains default OFF.
 
 ## 5. Standing process rules (earned the hard way)
 

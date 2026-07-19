@@ -1,5 +1,69 @@
 # Static Shell Spike — Diário técnico
 
+## Marco 21 (2026-07-19): trace fecha magnetismo; metrica Heavy e o lever real
+
+Foi adicionado um trace measurement-only em `PathBSimV2Solve`, opt-in por
+`DRAPE_SHELL_TRACE_CONTACT=1`, mais o analisador
+`tools/pathb_contact_trace.py`. Ele registra por vertice e morph-step gap,
+contato vertex/face, floor/ceiling do canal e sticky. ON/OFF geram exatamente o
+mesmo OBJ `B553947D...EF7D`, portanto a medicao nao perturba o equilibrio.
+
+Nos mesmos 10 IDs materiais da transicao posterior lateral (`5<|x|<11`,
+`z=60..70` na baseline), o ultimo passo tinha contato vertex `10/10` (117
+eventos), face `10/10` (1786), ceiling `10/10` (279), min-gap mediano `-0.7285`
+e gap final `0.3567`. O contato persiste, mas e REACAO, nao atracao: arbitrar o
+ceiling depois do contato adicionou 48 flips e foi removido; canal todo OFF
+manteve contato em 10/10, piorou surface fwd `0.9075->1.0454` e flips
+`104->121`; bend 200x mais compliant quase nao mudou nada (`0.9078`, 102 flips).
+Nao repetir channel/bend sweeps.
+
+O probe fisico `DRAPE_SHELL_GRADED_REST=1` (default OFF) finalmente separou o
+defeito. Arestas free-free passam de metric base/slim para metric do slider por
+`L(t)=Lbase*exp(t*log(Lraw/Lbase))`, sem usar posicao raw como alvo. Nos mesmos
+10 IDs: gap final mediano `0.3567->0.8076`, min-gap `-0.7285->+0.3146`, contato
+vertex `10/117 -> 4/4`, face `10/1786 -> 8/702`; surface fwd/rev
+`0.9075/1.0855 -> 0.8041/0.9618`; magnetism `1101->831`. Logo a metrica slim em
+material Heavy e parte causal do imprint/magnetismo. Replay duplo e byte-identico
+em `8EC751ED...EF6B`.
+
+O probe NAO passa gate: flips `104->146`, collapse `9->12`, conflito do Torso
+com BlackSmithBelt vertex/face `24/87 -> 58/397`, worst ~`3.12u`. A folga real
+expoe as leis que ainda faltam: controle de fold/self-intersection e contato de
+camada com Belt como outer authored. Nao mascarar com blend parcial da metrica.
+Proximo passo: mapear os 42 flips + 310 face-conflicts adicionais por componente
+e banda, depois adicionar broad-phase self/interlayer behind flag e exigir
+integridade baseline-or-better antes de qualquer DLL/live pilot.
+
+## Marco 20 (2026-07-19): true 2D hull validado; defeito dominante e a soltura do contato
+
+O WIP convexo em `(azimute, raio)` foi substituido por hull Euclidiano XY real,
+primeiro no spike `tools/pathb_true_hull_spike.py` e depois no piloto C++ ainda
+default-OFF. O spike inclui selftest sintetico, cortes exatos triangulo/plano,
+perfil posterior continuo, gate de frente/costura/integridade e suavizacao do
+CAMPO DE DESLOCAMENTO. Suavizar posicoes estava errado: chegou a mover `4.60u`
+para um lift geometrico real de apenas `~0.30u`.
+
+No live congelado: 50 vertices posteriores, mean/max `0.06143/0.30137u`, frente
+0, integridade `104 flips / 9 collapse / seam 0` antes e depois. No C++ corpus:
+49 vertices, max `0.30161u`, frente 0, integridade `103/9/0` inalterada; surface
+fwd/rev `0.9075/1.0855 -> 0.9064/1.0839`. O espelho Python difere do C++ apenas
+`0.000048u` mean / `0.01494u` max. OFF e ON sao byte-identicos em replay duplo;
+corpus default 18/18 verde. Continua NAO deployado e default 0.
+
+O diagnostico focado falsificou o hull como solucao principal: as secoes XY do
+tecido atual ja estao quase retas. O residual vive na transicao vertical. No live,
+na faixa lateral `5<|x|<11,z=60..70`, gap body-cloth min/p10/p50/p90 e
+`0.264/0.308/0.349/0.410u`; no centro `|x|<3` a mediana e `1.981u`. A lateral
+ainda esta em suporte/contato enquanto o centro e a parte inferior ja estao livres
+e caem a prumo.
+
+Tighten global do canal (`slack 0.9/0.6/0.3`) adicionou `4/13/8` flips. Um blend
+suave por authored-gap tambem piorou surface e adicionou 5 flips; foi removido.
+Nao repetir floor/channel sweep. Proximo teste deve ser measurement-only: trace de
+ativacao de contato/canal por vertice e morph-step. Se contato persiste, corrigir
+a lei/timing de soltura; se ja cessou, o lever e transmissao rest/fold +
+self-collision. Gravidade e hull nao sao o proximo sweep.
+
 ## Current live correction (2026-07-12)
 
 Critical correction: the earlier live-OBJ analysis reversed the Y axis. `+Y` is
