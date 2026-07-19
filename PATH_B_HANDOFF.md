@@ -628,3 +628,117 @@ the default-preserving `algo/conform_hook.cpp` toggle.  Never stage the
 user-owned `corpus/golden/fur_blacksmith_rm_heavy.json`, the untracked
 `scripts/capture_outfitstudio_vfs.ps1`, or the runtime
 `shell_solve_on.flag`.  Do not use `git add -A`.
+
+---
+
+# Handoff 2026-07-19 (late session) — for Codex
+
+Branch `wip/path-b-shell-solve`. Checkpoint commit = the one containing this
+text; use `git log -1 --oneline`, do not trust hashes copied from prose.
+
+## 1. Deployed state RIGHT NOW
+
+- `drape-algo.dll` md5 `ad9530e9…`, `version.dll` from `53d09ab`, both mod
+  copies in sync. Corpus OFF 18/18 green, byte-identical determinism verified.
+- Live flags: `shell_solve_on`, `shell_transactions_off`,
+  `anticlip_safe_floor_on`, `posterior_chord_on`. (`shell_solve_off` was used
+  during the freeze bisect and has been removed — the sim is ON again.)
+- `DRAPE_SHELL_CONVEX_CLEFT` defaults **0** (see §4). `DRAPE_SHELL_HULL`
+  defaults 0. `DRAPE_SHELL_SHADOW_RETURN` defaults 0.
+
+## 2. The startup-freeze saga — resolved, root cause was NOT the solver
+
+Outfit Studio froze on open, every time, whenever the DLL was enabled. Root
+cause (found by the user, `d114ded` + `53d09ab`): MO2/usvfs intercepts
+`LoadLibraryExW(L"version.dll")` in `proxy/version_proxy.cpp::LoadReal()` and
+reroutes it to the **other copy of our own proxy** in the Drape mod folder, so
+the forwarded VERSION exports recurse on the UI thread. Fix = resolve
+`GetSystemDirectoryW()` + `\version.dll` absolutely and hard-fail if the
+resolved module is either proxy.
+
+Three additional latent bugs were found and fixed while bisecting. They did
+not cure this hang but are real and should stay fixed:
+
+| Commit | Bug | Evidence |
+|---|---|---|
+| `d4eb455` | `DrawMenuBar` called from InjectThread — synchronous cross-thread call into the UI thread | log always died between `InsertMenu` and the next line |
+| `00066f3` | MinHook install from InjectThread suspends the UI thread to patch | injection logged SUCCESS but the posted redraw was never serviced |
+| `96b0c1a` | heavy `drape-algo.dll` LoadLibrary during host startup | UI alive after injection, still hung |
+
+Net architectural gain: **startup is now free of all our heavy code**. The
+proxy only subclasses the WndProc and inserts the menu item; the algo DLL is
+loaded and the detour installed lazily, on the UI thread, at first click.
+Keep it that way — it is also the right shape for shipping.
+
+## 3. Seeing-pipeline findings (these invalidated a lot of earlier analysis)
+
+1. **My renders never reached the user.** For most of the project I described
+   images only I could see. Every visual claim must now be published as an
+   Artifact (or a file he opens). Two exist:
+   `claude.ai/code/artifact/0f94c4d2-…` (orientation audit) and
+   `…/12492e6f-…` (cleft proposal).
+2. **Corpus ≠ live.** I validated on the corpus capture while he judged his
+   live session; the two bodies differ materially (his butt back-extent 18.6
+   vs corpus 16.2; entry facePen 2226 vs 1231). The DLL now dumps his live
+   scene each solve: `%TEMP%\drape_live_{body,production,authored,published}.obj`.
+   **Careful:** running the harness overwrites those files with corpus data.
+3. **Orientation flip-flop, settled.** FRONT = **+y**, BACK = **−y**, decided
+   by LEG anatomy (calf bulges back, patella forward) in
+   `tools/pathb_view.py::Orientation.detect`, which refuses to guess when the
+   two voters disagree. Torso landmarks are ambiguous on a heavy body and
+   produced a confidently WRONG verdict earlier the same day. Any leakmap data
+   or profile table from before 2026-07-17 may carry the mirrored labels.
+
+## 4. Cloth state — where the actual work stands
+
+**User-confirmed defect (his words, confirmed against a render of his own
+mesh): "a saia não pode estar entrando na bunda em nenhum lugar"** — the
+skirt shrink-wraps each buttock and **dips into the gluteal cleft**. It is not
+penetration (measured: zero body-through-cloth faces at the butt) and not hem
+width. He wants the skirt to pass smoothly over the cleft like a curtain.
+
+**His calibration (he circled the best per view on a contact sheet):**
+- BACK → the sim's plumb fall (he preferred it over the sculpt itself)
+- FRONT and PROFILE → production is the ruler
+- The sculpt was circled nowhere ⇒ **directional rail, never a literal target**
+
+**What is in the code:**
+- `6321996` ported the production `HorizontalBridge` into the sim as a final
+  pass. It is honest but far too conservative — on his mesh it barely dented
+  the cleft (the sim back is only slightly smoother than production).
+- `ac5d1ca` adds `PathBConvexCleftBridge`, **gated OFF, and it is wrong as
+  written**: it treats a straight line in (azimuth, radius) space as a chord,
+  but that is a spiral in the plane, so on a cross-section with varying radius
+  it lifts points that are already convex. Measured on corpus: front
+  9.1 → 11.0, back 15.5 → 18.3 — it inflates the garment instead of bridging.
+  The Python prototype (`tools/pathb_shapematch_spike.py` lineage) hid this by
+  restricting to the back arc, where the profile is nearly flat.
+
+**Concrete next step:** implement the bridge as a **true 2D convex hull per
+z-slice** (monotone chain over the cross-section points in the x-y plane),
+gate it to bins where the BODY is measurably inside its own hull (the cleft),
+push cloth onto the cloth hull there, then Laplacian-smooth the lifted band and
+let the existing hard reconciliation re-floor it. Validate by rendering the
+user's dumped live mesh, publish the render, get his approval BEFORE deploying.
+
+## 5. Standing process rules (earned the hard way)
+
+1. **Sculpt is the primary gate** before any deploy, with an anti-overfit
+   guard: one global material parameter set, cross-garment check, and the
+   primary gate never drives a per-garment knob.
+2. **Every visual claim goes through `tools/pathb_view.py`** (anatomy-verified
+   axes, contact sheets, body+garment together) and is **published where he
+   can see it**.
+3. **Read the live debug log before theorising** about any test he ran.
+4. **No new geometric prosthesis without declaring it as one** and saying why.
+5. A defect that is already visible in our own logs must never be shipped for
+   his eye to find (the `facePen` lesson).
+
+## 6. Open, in priority order
+
+1. True 2D-hull cleft bridge (§4) — the one thing he actually asked for.
+2. The sim's back is right by his eye; the FRONT should read like production.
+3. Speed: ~13 s per conform. Now that the hook is lazy this is tolerable, but
+   it is still the reason a conform feels like a hang.
+4. Never re-landed: the "true final output" dump (`476e937`, reverted in
+   `992520d`) — useful, but verify it cannot affect startup.
