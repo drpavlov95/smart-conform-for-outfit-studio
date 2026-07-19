@@ -8651,6 +8651,121 @@ static void PathBDumpTris(const std::vector<Vec3>& verts,
     fclose(f);
 }
 
+// CONVEX CLEFT BRIDGE (2026-07-19). The production HorizontalBridge is
+// deliberately conservative (it only lifts to the line between two flanking
+// shoulders and demands both profiles agree), and measured on the user's own
+// mesh it barely touched the gluteal cleft - his complaint "a saia nao pode
+// entrar na bunda" survived. This is the stronger form validated as a Python
+// prototype on his live scene and approved from the render: per z-slab, take
+// the AZIMUTHAL UPPER CONVEX ENVELOPE of the cloth radius and lift dips onto
+// it, but ONLY across bins where the BODY itself is concave (the cleft), so
+// genuine cloth folds elsewhere are untouched. Overlapping z-windows keep it
+// from banding; the caller smooths and re-floors afterwards.
+static int PathBConvexCleftBridge(
+    std::vector<Vec3>& x,
+    const std::vector<Vec3>& bodyVerts,
+    const std::vector<uint8_t>& movable,
+    float bodyConcaveMin,
+    float maxLift,
+    std::vector<uint8_t>& outLifted)
+{
+    const size_t n = x.size();
+    if (n == 0 || bodyVerts.empty()) return 0;
+    constexpr int NB = 96;            // azimuth bins
+    const float zLo = -1.0e30f;
+    float minZ = 1.0e30f, maxZ = -1.0e30f;
+    for (size_t i = 0; i < n; ++i) {
+        if (!movable[i]) continue;
+        minZ = std::min(minZ, x[i].z);
+        maxZ = std::max(maxZ, x[i].z);
+    }
+    if (maxZ <= minZ) return 0;
+    (void)zLo;
+
+    std::vector<float> envAcc(n, 0.0f);
+    std::vector<int> envCnt(n, 0);
+
+    auto binOf = [&](const Vec3& v) {
+        float dx = v.x - g_refCenterX, dy = v.y - g_refCenterY;
+        float a = std::atan2(dy, dx);
+        int b = (int)std::floor((a + 3.14159265f) / (2.0f * 3.14159265f) * NB);
+        return b < 0 ? 0 : (b >= NB ? NB - 1 : b);
+    };
+    // LOCAL bridging envelope. A GLOBAL 360-degree convex hull is useless
+    // here: a torso cross-section with arms is "concave" almost everywhere
+    // against its own hull, so every bin qualified and the pass inflated the
+    // whole garment (measured: 1336 of 1838 movable verts lifted, sleeves
+    // puffed). Instead, for each bin take the HIGHEST CHORD that spans it
+    // within a limited angular window - that bridges a local dip (the cleft)
+    // and leaves the broad silhouette alone.
+    constexpr int kWin = 12;          // +-45 degrees at 96 bins
+    auto bridgeEnvelope = [&](const std::vector<float>& prof,
+                              std::vector<float>& env) {
+        env.assign(NB, -1.0f);
+        for (int b = 0; b < NB; ++b) {
+            if (prof[b] < 0.0f) continue;
+            float best = prof[b];
+            for (int dl = 1; dl <= kWin; ++dl) {
+                const int l = b - dl;
+                if (l < 0 || prof[l] < 0.0f) continue;
+                for (int dr = 1; dr <= kWin; ++dr) {
+                    const int r = b + dr;
+                    if (r >= NB || prof[r] < 0.0f) continue;
+                    const float t = (float)dl / (float)(dl + dr);
+                    const float chord = prof[l] + (prof[r] - prof[l]) * t;
+                    if (chord > best) best = chord;
+                }
+            }
+            env[b] = best;
+        }
+    };
+
+    std::vector<float> bodyProf(NB), clothProf(NB), bodyEnv, clothEnv;
+    for (float zc = minZ; zc <= maxZ; zc += 1.0f) {
+        std::fill(bodyProf.begin(), bodyProf.end(), -1.0f);
+        std::fill(clothProf.begin(), clothProf.end(), -1.0f);
+        for (const Vec3& v : bodyVerts) {
+            if (v.z < zc - 1.5f || v.z >= zc + 1.5f) continue;
+            const int b = binOf(v);
+            const float r = std::hypot(v.x - g_refCenterX, v.y - g_refCenterY);
+            if (bodyProf[b] < 0.0f || r > bodyProf[b]) bodyProf[b] = r;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (!movable[i]) continue;
+            if (x[i].z < zc - 1.5f || x[i].z >= zc + 1.5f) continue;
+            const int b = binOf(x[i]);
+            const float r = std::hypot(x[i].x - g_refCenterX, x[i].y - g_refCenterY);
+            if (clothProf[b] < 0.0f || r > clothProf[b]) clothProf[b] = r;
+        }
+        bridgeEnvelope(bodyProf, bodyEnv);
+        bridgeEnvelope(clothProf, clothEnv);
+        for (size_t i = 0; i < n; ++i) {
+            if (!movable[i]) continue;
+            if (x[i].z < zc - 1.5f || x[i].z >= zc + 1.5f) continue;
+            const int b = binOf(x[i]);
+            if (bodyEnv[b] < 0.0f || bodyProf[b] < 0.0f || clothEnv[b] < 0.0f) continue;
+            if (bodyEnv[b] - bodyProf[b] < bodyConcaveMin) continue;   // body not concave here
+            envAcc[i] += clothEnv[b];
+            envCnt[i] += 1;
+        }
+    }
+
+    int lifted = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!movable[i] || envCnt[i] == 0) continue;
+        const float target = envAcc[i] / (float)envCnt[i];
+        const float dx = x[i].x - g_refCenterX, dy = x[i].y - g_refCenterY;
+        const float r = std::hypot(dx, dy);
+        if (r < 1.0e-4f || target <= r + 0.05f) continue;
+        const float nr = std::min(target, r + maxLift);
+        x[i].x = g_refCenterX + dx / r * nr;
+        x[i].y = g_refCenterY + dy / r * nr;
+        outLifted[i] = 1;
+        ++lifted;
+    }
+    return lifted;
+}
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -9486,6 +9601,26 @@ static bool PathBSimV2Solve(
                 PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
                 totalLifts += lifts;
                 if (lifts == 0) break;
+            }
+            // STRONG pass: convex envelope over body concavities (the cleft).
+            // DEFAULT OFF (2026-07-19): this pass is geometrically WRONG as written -
+            // it treats a straight line in (azimuth, radius) space as a chord, but
+            // that is a spiral in the plane, so on a cross-section with varying
+            // radius it lifts points that are already convex. Measured: front
+            // 9.1 -> 11.0 and back 15.5 -> 18.3, i.e. it inflates the garment
+            // instead of bridging the cleft. Correct form needs a true 2D convex
+            // hull per z-slice; kept behind the flag until then.
+            if (EnvFloat("DRAPE_SHELL_CONVEX_CLEFT", 0.0f) > 0.5f) {
+                std::vector<uint8_t> movableMask(n, 0);
+                for (size_t i = 0; i < n; ++i)
+                    movableMask[i] = (!fixed[i] && authoredGapArr[i] >= -0.1f) ? 1 : 0;
+                const int convexLifts = PathBConvexCleftBridge(
+                    x, morphedBody.verts, movableMask,
+                    EnvFloat("DRAPE_SHELL_CLEFT_CONCAVE", 0.45f),
+                    EnvFloat("DRAPE_SHELL_CLEFT_MAXLIFT", 2.5f), lifted);
+                PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
+                totalLifts += convexLifts;
+                HLog("path-b-shell: convex cleft bridge lifts=%d", convexLifts);
             }
             for (int sm = 0; sm < 4; ++sm) {
                 std::vector<Vec3> upd = x;
