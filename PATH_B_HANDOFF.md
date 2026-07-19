@@ -572,6 +572,36 @@ visual candidate; raw itself contains the body-following pose.  The next
 research blocker is physical contact/support treatment plus fold control
 (ultimately self-collision), not another gravity-strength sweep.
 
+### Outfit Studio startup hang diagnosis (2026-07-19)
+
+The repeated startup freeze is in the thin `version.dll` proxy, not in the
+Path-B solver.  Windows recorded four consecutive `Application Hang` events;
+the latest installed proxy (`96b0c1a`, SHA-256
+`D808FA2767C192F2186FAD251E6520A24E9BB740D98593EA6EDE394A439FE864`) reached
+`DrapeWndProc: menu bar redrawn on UI thread` without loading
+`drape-algo.dll` or installing MinHook, and the process still hung.
+
+The usvfs log supplies the root cause.  `proxy/version_proxy.cpp::LoadReal()`
+calls `LoadLibraryExW(L"version.dll", ..., LOAD_LIBRARY_SEARCH_SYSTEM32)`, but
+MO2 intercepts the name before the Windows search policy is applied and
+reroutes it to:
+
+`.../mods/Drape - Cloth Aware Conform/CalienteTools/BodySlide/version.dll`
+
+That is another copy of the Drape proxy, not the Windows system DLL.  Its
+forwarded VERSION exports therefore resolve back to the same proxy and recurse
+or tail-loop on Outfit Studio's UI thread.  The per-process mutex only prevents
+the second copy from installing another menu; it cannot prevent export-forward
+recursion.  This also explains why deferring `DrawMenuBar`, MinHook and
+`drape-algo.dll` did not cure the final hang.
+
+Required fix: construct the absolute path returned by `GetSystemDirectoryW`
+plus `\\version.dll`, load that exact path, and hard-fail forwarding if the
+resolved module path is not inside the real system directory or equals either
+proxy module.  After that, retest through MO2/usvfs and verify both the usvfs
+load target and normal VERSION exports before revisiting any UI-thread cleanup.
+No diagnostic proxy was deployed at this checkpoint.
+
 ### Worktree ownership / safe staging
 
 The intended checkpoint allowlist is `PATH_B_HANDOFF.md`,
