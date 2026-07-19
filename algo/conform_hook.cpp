@@ -9558,18 +9558,15 @@ static void PathBDumpLivePublished(const std::vector<Vec3>& verts,
                                    const char* shape) {
     const char* tmp = getenv("TEMP");
     if (!tmp) return;
-    // DIAGNOSTIC: sim result at accept time, BEFORE the ~62 production
-    // post-passes still modify finalVerts. NOT what OS shows (see the true
-    // dump at the outDiff write). Kept to measure how much the post-passes move.
-    std::string path = std::string(tmp) + "\\drape_sim_accepted.obj";
+    std::string path = std::string(tmp) + "\\drape_live_published.obj";
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
-    fprintf(f, "# sim-accepted (pre post-passes) shape=%s verts=%zu\n", shape, verts.size());
+    fprintf(f, "# live published shape=%s verts=%zu\n", shape, verts.size());
     for (const Vec3& v : verts)
         fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
     fclose(f);
-    HLog("path-b-shell: sim-accepted mesh dumped (pre post-passes) -> %s (%zu verts)",
-         path.c_str(), verts.size());
+    HLog("path-b-shell: live publish dumped (%zu verts) -> %s",
+         verts.size(), path.c_str());
 }
 
 // The real solver body. NEVER call this directly outside the ApplyStaticClothPass
@@ -18838,13 +18835,6 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              finalIntegrity.bodyFacePenetrations, finalIntegrity.worstAreaRatio,
              finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
     }
-
-    // TRUE live dump (fix 2026-07-17): the sim-accepted dump is taken BEFORE
-    // ~62 production post-passes still modify finalVerts. THIS is the mesh OS
-    // actually renders (outDiff is written from it right below). The seeing
-    // pipeline must render THIS file, or my renders never match his eye.
-    if (pathBShellAccepted)
-        PathBDumpVerts(finalVerts, "drape_live_published.obj");
 
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
