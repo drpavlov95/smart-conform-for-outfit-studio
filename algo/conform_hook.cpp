@@ -19218,6 +19218,33 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
     }
 
+    // ── CANARY (diagnostic, flag-gated) ───────────────────────────────
+    // The user reports that every change either of us makes looks IDENTICAL in
+    // OutfitStudio, while our dumps show the meshes genuinely differ. Either
+    // our result never reaches his screen, or every change so far is too
+    // subtle to see. This settles it: an unmistakable displacement applied at
+    // the exact point the result is handed to the host. If a conform with
+    // canary_on.flag still looks normal, the plumbing is broken and THAT is
+    // the bug - no amount of solver work would ever have been visible.
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/canary_on.flag")) {
+        int canaryMoved = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const float dx = finalVerts[i].x - g_refCenterX;
+            const float dy = finalVerts[i].y - g_refCenterY;
+            const float r = std::hypot(dx, dy);
+            if (r < 1.0e-3f) continue;
+            finalVerts[i].x += dx / r * 5.0f;   // 5 units straight out
+            finalVerts[i].y += dy / r * 5.0f;
+            ++canaryMoved;
+        }
+        HLog("CANARY ACTIVE: pushed %d verts +5u radially for shape '%s' "
+             "slider '%s' - if OutfitStudio looks normal, our result is NOT "
+             "reaching the display", canaryMoved, shapeName.c_str(),
+             sliderName.c_str());
+    }
+#endif
+
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
         Vec3 finalDiff = Sub(finalVerts[i], baseVerts[i]);
