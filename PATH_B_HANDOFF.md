@@ -595,12 +595,30 @@ the second copy from installing another menu; it cannot prevent export-forward
 recursion.  This also explains why deferring `DrawMenuBar`, MinHook and
 `drape-algo.dll` did not cure the final hang.
 
-Required fix: construct the absolute path returned by `GetSystemDirectoryW`
-plus `\\version.dll`, load that exact path, and hard-fail forwarding if the
-resolved module path is not inside the real system directory or equals either
-proxy module.  After that, retest through MO2/usvfs and verify both the usvfs
-load target and normal VERSION exports before revisiting any UI-thread cleanup.
-No diagnostic proxy was deployed at this checkpoint.
+Fix implemented and deployed: `proxy/version_proxy.cpp` now constructs the
+absolute path returned by `GetSystemDirectoryW` plus `\\version.dll`, loads
+that exact path, verifies the module path returned by the loader, and fails
+cleanly instead of forwarding through an invalid module.  Release proxy
+SHA-256: `8108AEE92C0B74EF8E7BDEA226A293B844C2B60E48F32C4540211E161EBCE8F8`.
+The identical DLL is installed in both the BodySlide and Drape mod folders;
+the prior proxy is backed up under
+`tmp/startup_proxy_backup_20260719_1834/`.
+
+Validation passed on 2026-07-19:
+
+- `dumpbin` reports the same 17 named exports in the proxy and the Windows
+  System32 DLL;
+- a direct forwarded `GetFileVersionInfoSizeW` smoke returned `1932` bytes
+  with last-error zero;
+- an Outfit Studio instance launched through the MO2 shortcut stayed
+  responsive for every 0.5-second sample over 12 seconds, reached the normal
+  main window, and produced no new Windows `Application Hang` event;
+- the new run logged only the primary proxy attach, whereas the failing run
+  loaded a second mod proxy during VERSION forwarding.
+
+The test Outfit Studio process (`PID 9992`) was still responsive when the
+automated close message was blocked by the MO2 process privilege boundary; it
+can be closed normally by the interactive user.
 
 ### Worktree ownership / safe staging
 

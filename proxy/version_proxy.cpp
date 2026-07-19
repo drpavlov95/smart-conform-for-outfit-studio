@@ -1,14 +1,53 @@
 #define VER_H       // prevent winver.h from declaring VerFindFile* / VerInstallFile*
 #include <windows.h>
+#include <cwchar>
 
 // Load the real system version.dll once.
-// LOAD_LIBRARY_SEARCH_SYSTEM32 ensures we get the system copy, not ourselves.
+//
+// IMPORTANT: passing only L"version.dll" is not safe under MO2/usvfs.  Its
+// LoadLibrary hook reroutes the bare name to the highest-priority mod copy
+// before the Windows LOAD_LIBRARY_SEARCH_SYSTEM32 policy gets a chance to
+// select System32.  Since this DLL is itself named version.dll, that makes the
+// forwarded exports resolve back to the proxy and tail-loop on the caller.
+// Build and validate the absolute System32 path instead.
 static HMODULE LoadReal() {
-    static HMODULE h = LoadLibraryExW(L"version.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static HMODULE h = []() -> HMODULE {
+        wchar_t systemDir[MAX_PATH] = {};
+        const UINT dirLen = GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir));
+        if (dirLen == 0 || dirLen >= ARRAYSIZE(systemDir)) return nullptr;
+
+        wchar_t systemDll[MAX_PATH] = {};
+        if (swprintf_s(systemDll, L"%ls\\version.dll", systemDir) < 0) return nullptr;
+
+        HMODULE real = LoadLibraryExW(
+            systemDll,
+            nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!real) return nullptr;
+
+        // Do not trust the loader flags alone: verify the module that usvfs
+        // actually returned.  A mismatch must never be used for forwarding.
+        wchar_t loadedPath[MAX_PATH] = {};
+        const DWORD loadedLen = GetModuleFileNameW(real, loadedPath, ARRAYSIZE(loadedPath));
+        if (loadedLen == 0 || loadedLen >= ARRAYSIZE(loadedPath) ||
+            _wcsicmp(loadedPath, systemDll) != 0) {
+            FreeLibrary(real);
+            return nullptr;
+        }
+
+        return real;
+    }();
     return h;
 }
 static FARPROC Sym(const char* name) {
-    return GetProcAddress(LoadReal(), name);
+    HMODULE real = LoadReal();
+    FARPROC proc = real ? GetProcAddress(real, name) : nullptr;
+    if (!proc) {
+        // A clean fail-fast is preferable to jumping through a null pointer or
+        // ever falling back to another proxy copy.
+        RaiseFailFastException(nullptr, nullptr, 0);
+    }
+    return proc;
 }
 
 // ── Exports ──────────────────────────────────────────────────────────
