@@ -44,6 +44,7 @@ static std::atomic_bool g_hookReady{false};
 typedef int (*PfnInstallHook)(void*, const char*, float, float);
 static std::atomic<PfnInstallHook> g_installHook{nullptr};
 static std::atomic_bool g_hookInstallTried{false};
+static std::atomic_bool g_algoLoadTried{false};
 
 static HMODULE          g_selfMod         = nullptr;  // this proxy DLL's module
 static DWORD            g_osProcId        = 0;        // OutfitStudio PID (act only when it's focused)
@@ -289,6 +290,75 @@ static DWORD WINAPI KbPollThreadProc(LPVOID) {
 
 // ── WndProc subclass: intercept our menu command ──────────────────────
 
+// LAZY ALGO LOAD (fix 2026-07-19): loading the heavy drape-algo.dll (and
+// running all of its static initializers) in the middle of OutfitStudio's
+// startup froze the app on open. Nothing here is needed until the user
+// actually clicks Smart Conform, so the whole load now happens on the UI
+// thread at first use. Startup is left completely free of our heavy code.
+static void EnsureAlgoLoaded(HWND hw) {
+    if (g_algoLoadTried.exchange(true, std::memory_order_acq_rel)) return;
+    {
+        std::string algoPath = ExeDir() + "drape-algo.dll";
+        HMODULE hAlgo = LoadLibraryA(algoPath.c_str());
+        if (hAlgo) {
+            typedef int (*PfnInstall)(void*, const char*, float, float);
+            auto pInstall = reinterpret_cast<PfnInstall>(
+                GetProcAddress(hAlgo, "DrapeInstallConformHook"));
+            auto pSetHookEnabled = reinterpret_cast<PfnDrapeSetHookEnabled>(
+                GetProcAddress(hAlgo, "DrapeSetHookEnabled"));
+            auto pGetCurrentShapes = reinterpret_cast<PfnDrapeGetCurrentShapes>(
+                GetProcAddress(hAlgo, "DrapeGetCurrentShapes"));
+            auto pGetCurrentSliders = reinterpret_cast<PfnDrapeGetCurrentSliders>(
+                GetProcAddress(hAlgo, "DrapeGetCurrentSliders"));
+            auto pClearShapePresets = reinterpret_cast<PfnDrapeClearShapePresets>(
+                GetProcAddress(hAlgo, "DrapeClearShapePresets"));
+            auto pSetShapePreset = reinterpret_cast<PfnDrapeSetShapePreset>(
+                GetProcAddress(hAlgo, "DrapeSetShapePreset"));
+            auto pSetIntensity = reinterpret_cast<PfnDrapeSetProcessingIntensity>(
+                GetProcAddress(hAlgo, "DrapeSetProcessingIntensity"));
+            auto pSetSliderFilter = reinterpret_cast<PfnDrapeSetSliderFilter>(
+                GetProcAddress(hAlgo, "DrapeSetSliderFilter"));
+            if (pInstall) {
+                // DEFERRED: do not patch anything during startup (see the
+                // LAZY HOOK INSTALL note). Just publish the entry points.
+                g_installHook.store(pInstall, std::memory_order_release);
+                int rc = 0;
+                if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
+                    pGetCurrentSliders && pClearShapePresets && pSetShapePreset &&
+                    pSetSliderFilter) {
+                    g_setHookEnabled.store(pSetHookEnabled, std::memory_order_release);
+                    g_getCurrentShapes.store(pGetCurrentShapes, std::memory_order_release);
+                    g_getCurrentSliders.store(pGetCurrentSliders, std::memory_order_release);
+                    g_clearShapePresets.store(pClearShapePresets, std::memory_order_release);
+                    g_setShapePreset.store(pSetShapePreset, std::memory_order_release);
+                    g_setProcessingIntensity.store(pSetIntensity, std::memory_order_release);
+                    g_setSliderFilter.store(pSetSliderFilter, std::memory_order_release);
+                    g_hookReady.store(true, std::memory_order_release);
+                } else {
+                    g_setHookEnabled.store(nullptr, std::memory_order_release);
+                    g_getCurrentShapes.store(nullptr, std::memory_order_release);
+                    g_getCurrentSliders.store(nullptr, std::memory_order_release);
+                    g_clearShapePresets.store(nullptr, std::memory_order_release);
+                    g_setShapePreset.store(nullptr, std::memory_order_release);
+                    g_setProcessingIntensity.store(nullptr, std::memory_order_release);
+                    g_setSliderFilter.store(nullptr, std::memory_order_release);
+                    g_hookReady.store(false, std::memory_order_release);
+                }
+                DbgLog("InjectThread: entry points published (hook install DEFERRED to first use) rc=%d setEnabled=%p getShapes=%p getSliders=%p clearPresets=%p setPreset=%p setSliderFilter=%p ready=%d",
+                       rc, (void*)pSetHookEnabled, (void*)pGetCurrentShapes,
+                       (void*)pGetCurrentSliders, (void*)pClearShapePresets,
+                       (void*)pSetShapePreset, (void*)pSetSliderFilter,
+                       g_hookReady.load(std::memory_order_relaxed) ? 1 : 0);
+            } else {
+                DbgLog("InjectThread: DrapeInstallConformHook not found");
+            }
+        } else {
+            DbgLog("InjectThread: failed to load drape-algo.dll for hook");
+        }
+    }
+
+}
+
 static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == DRAPE_MSG_REDRAW_MENU) {
         DrawMenuBar(hw);          // safe: we are ON the UI thread here
@@ -305,6 +375,7 @@ static LRESULT CALLBACK DrapeWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         // Install the detour HERE, on the UI thread, the first time it is
         // needed (see LAZY HOOK INSTALL). MinHook suspends other threads to
         // patch - never the caller - so the UI thread cannot be left frozen.
+        EnsureAlgoLoaded(hw);
         if (!g_hookInstallTried.exchange(true, std::memory_order_acq_rel)) {
             PfnInstallHook inst = g_installHook.load(std::memory_order_acquire);
             if (inst) {
@@ -493,69 +564,6 @@ static DWORD WINAPI InjectThread(LPVOID) {
     // Install the Ctrl+Alt+C shortcut via the polling thread (see KbPollThreadProc).
     g_osProcId = GetCurrentProcessId();
     CreateThread(nullptr, 0, KbPollThreadProc, nullptr, 0, nullptr);
-
-    // Install the in-memory "Smart Conform" hook: load the heavy DLL (its nifly
-    // static initializers run now, after OutfitStudio is up, so no startup crash)
-    // and let it hook Automorph::GenerateResultDiff.
-    {
-        std::string algoPath = ExeDir() + "drape-algo.dll";
-        HMODULE hAlgo = LoadLibraryA(algoPath.c_str());
-        if (hAlgo) {
-            typedef int (*PfnInstall)(void*, const char*, float, float);
-            auto pInstall = reinterpret_cast<PfnInstall>(
-                GetProcAddress(hAlgo, "DrapeInstallConformHook"));
-            auto pSetHookEnabled = reinterpret_cast<PfnDrapeSetHookEnabled>(
-                GetProcAddress(hAlgo, "DrapeSetHookEnabled"));
-            auto pGetCurrentShapes = reinterpret_cast<PfnDrapeGetCurrentShapes>(
-                GetProcAddress(hAlgo, "DrapeGetCurrentShapes"));
-            auto pGetCurrentSliders = reinterpret_cast<PfnDrapeGetCurrentSliders>(
-                GetProcAddress(hAlgo, "DrapeGetCurrentSliders"));
-            auto pClearShapePresets = reinterpret_cast<PfnDrapeClearShapePresets>(
-                GetProcAddress(hAlgo, "DrapeClearShapePresets"));
-            auto pSetShapePreset = reinterpret_cast<PfnDrapeSetShapePreset>(
-                GetProcAddress(hAlgo, "DrapeSetShapePreset"));
-            auto pSetIntensity = reinterpret_cast<PfnDrapeSetProcessingIntensity>(
-                GetProcAddress(hAlgo, "DrapeSetProcessingIntensity"));
-            auto pSetSliderFilter = reinterpret_cast<PfnDrapeSetSliderFilter>(
-                GetProcAddress(hAlgo, "DrapeSetSliderFilter"));
-            if (pInstall) {
-                // DEFERRED: do not patch anything during startup (see the
-                // LAZY HOOK INSTALL note). Just publish the entry points.
-                g_installHook.store(pInstall, std::memory_order_release);
-                int rc = 0;
-                if (rc == 0 && pSetHookEnabled && pGetCurrentShapes &&
-                    pGetCurrentSliders && pClearShapePresets && pSetShapePreset &&
-                    pSetSliderFilter) {
-                    g_setHookEnabled.store(pSetHookEnabled, std::memory_order_release);
-                    g_getCurrentShapes.store(pGetCurrentShapes, std::memory_order_release);
-                    g_getCurrentSliders.store(pGetCurrentSliders, std::memory_order_release);
-                    g_clearShapePresets.store(pClearShapePresets, std::memory_order_release);
-                    g_setShapePreset.store(pSetShapePreset, std::memory_order_release);
-                    g_setProcessingIntensity.store(pSetIntensity, std::memory_order_release);
-                    g_setSliderFilter.store(pSetSliderFilter, std::memory_order_release);
-                    g_hookReady.store(true, std::memory_order_release);
-                } else {
-                    g_setHookEnabled.store(nullptr, std::memory_order_release);
-                    g_getCurrentShapes.store(nullptr, std::memory_order_release);
-                    g_getCurrentSliders.store(nullptr, std::memory_order_release);
-                    g_clearShapePresets.store(nullptr, std::memory_order_release);
-                    g_setShapePreset.store(nullptr, std::memory_order_release);
-                    g_setProcessingIntensity.store(nullptr, std::memory_order_release);
-                    g_setSliderFilter.store(nullptr, std::memory_order_release);
-                    g_hookReady.store(false, std::memory_order_release);
-                }
-                DbgLog("InjectThread: entry points published (hook install DEFERRED to first use) rc=%d setEnabled=%p getShapes=%p getSliders=%p clearPresets=%p setPreset=%p setSliderFilter=%p ready=%d",
-                       rc, (void*)pSetHookEnabled, (void*)pGetCurrentShapes,
-                       (void*)pGetCurrentSliders, (void*)pClearShapePresets,
-                       (void*)pSetShapePreset, (void*)pSetSliderFilter,
-                       g_hookReady.load(std::memory_order_relaxed) ? 1 : 0);
-            } else {
-                DbgLog("InjectThread: DrapeInstallConformHook not found");
-            }
-        } else {
-            DbgLog("InjectThread: failed to load drape-algo.dll for hook");
-        }
-    }
 
     // Retry injection up to 20 times (menu bar may not be ready immediately)
     for (int attempt = 0; attempt < 20; ++attempt) {
