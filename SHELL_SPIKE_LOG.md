@@ -1635,3 +1635,33 @@ equivale a seguir a pele. A alavanca não está na ancoragem.
 REGRA NOVA: imprint é a métrica primária de aceitação (junto do sculpt);
 magnetismCount é diagnóstico secundário e nunca prova de progresso.
 ALVO: imprint < 0.0845 (bater a produção) antes de qualquer deploy visual.
+
+## Marco 21 (2026-07-20): a rigidez NÃO é a alavanca do imprint — o acoplamento é
+
+Caça ao imprint (métrica que bate com o olho do usuário; PRODUÇÃO=0.0845).
+
+ABLAÇÃO (física pura, sem próteses):
+  completa 0.181 | sem contato 0.129 | SEM GRAVIDADE 0.037 | sem os dois 0.103
+Gravidade é a fonte dominante: ela prensa o tecido no corpo.
+
+BENDING — mecanismo consertado, hipótese falsificada:
+- Causa da inércia achada: PathBBendingJacobi escala cada correção por
+  0.45/count (~6 dobradiças/vértice => ~7% aplicado); o momento não viaja os
+  ~30 anéis da cintura à barra. Compliance era botão morto (varredura 1e-4..0
+  movia imprint <0.008 e o resíduo PIORAVA no rígido máximo).
+- GS colorido (lotes sem conflito, aplicação imediata): resíduo p95 59.3->45.4.
+- Bending por ÚLTIMO (depois do contato): resíduo p95 ->36.6. Ele agora VENCE.
+- MAS o imprint sobe monotonicamente: 0.181 (Jacobi) -> 0.194 (GS) -> 0.219
+  (GS último). Quanto MELHOR o tecido preserva a curvatura autoral, MAIS ele
+  copia o corpo.
+
+CONCLUSÃO: o imprint não vem de falta de rigidez. Vem do tecido livre estar
+rigidamente ACOPLADO às âncoras, que seguem o corpo — painel coeso = painel
+carregado fielmente pelo corpo. A produção ganha porque seu campo de
+deslocamento DECAI com a distância (tecido longe se move menos), enquanto o
+sim propaga o movimento das âncoras por toda a peça via stretch+bend.
+
+PRÓXIMA DIREÇÃO: desacoplar. O tecido livre precisa pendurar sob gravidade
+restringido só por TENSÃO a partir dos apoios, sem herdar o campo de
+deslocamento do corpo. Não tentar mais varreduras de rigidez (falsificado
+aqui e por Codex antes).

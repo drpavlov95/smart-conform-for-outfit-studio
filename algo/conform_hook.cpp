@@ -9419,6 +9419,7 @@ static bool PathBSimV2Solve(
 
     // Bending solver choice: Jacobi (legacy, measured inert) vs colored GS.
     const bool bendGS = EnvFloat("DRAPE_SHELL_BEND_GS", 0.0f) > 0.5f;
+    const bool bendLast = EnvFloat("DRAPE_SHELL_BEND_LAST", 0.0f) > 0.5f;
     std::vector<std::vector<uint32_t>> hingeBatches;
     if (bendGS) {
         hingeBatches = PathBColorHinges(hinges, n);
@@ -9910,6 +9911,20 @@ static bool PathBSimV2Solve(
                     kFaceStepC, kFaceRelaxC,
                     worstFaceContact, &triActive, /*countOnly=*/false,
                     traceContact ? &faceMovesThisStep : nullptr);
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
+            // BENDING LAST (ordering probe 2026-07-20): bending currently runs
+            // before contact, so contact/face/weld overwrite whatever shape it
+            // established - measured as an INVERTED stiffness response (more
+            // stiffness => residual further from rest). Giving it the last word
+            // on shape tests whether it is weak or merely overruled.
+            if (bendLast) {
+                if (bendGS)
+                    PathBBendingColoredGS(x, hinges, hingeBatches, invMass, bendLambda,
+                                          bendCompliance, analyticVariant, boundaryVert, 1.0f);
+                else
+                    PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
+                                       analyticVariant, boundaryVert);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
