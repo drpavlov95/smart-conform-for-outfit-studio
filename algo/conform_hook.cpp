@@ -9293,6 +9293,54 @@ static bool PathBSimV2Solve(
         std::max(0.0f, EnvFloat("DRAPE_SHELL_CHAN_FLOOR_SLACK", 1.2f));
     const bool ceilOn =
         prodCeil.valid && EnvFloat("DRAPE_SHELL_CEIL", 1.0f) > 0.5f;
+    // ── SKIN-BOUND SUPPORT (user request 2026-07-19: "gravidade real com
+    // cloth sim e ancoragem de vertices/edges") ────────────────────────────
+    // Until now the "anchor" for the worn band was the VANILLA CONFORM pose
+    // (baseVerts + raw*t). That is smart conform wearing a physics costume:
+    // the band is dragged to wherever vanilla put it and the free cloth just
+    // falls onto the body from there. A physical support instead BINDS each
+    // band vertex to the SKIN once, in the authored pose (nearest body
+    // triangle + barycentric coords + signed normal offset), and TRANSPORTS
+    // that binding through the morph. Normal force and friction pinning worn
+    // cloth to skin is real physics; copying vanilla's answer is not.
+    // Gated by DRAPE_SHELL_SKIN_BIND / skin_bind_on.flag for A/B.
+    bool skinBind = EnvToggle("DRAPE_SHELL_SKIN_BIND", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (fs::exists("E:/SkyrimDev/Drape/skin_bind_on.flag")) skinBind = true;
+#endif
+    struct SkinBind { int tri = -1; float w0 = 0, w1 = 0, w2 = 0, off = 0; };
+    std::vector<SkinBind> skinBinds;
+    if (skinBind) {
+        skinBinds.assign(n, SkinBind{});
+        int bound = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!fixed[i]) continue;
+            // Only the TRUE contact band binds to skin. Authored-inside cloth
+            // (knee straps sit -4..-6u inside the body by design) has a huge
+            // signed offset, so any rotation of its host triangle's normal
+            // slings it: measured worst edge 10.77x with both ends pinned,
+            // which nothing downstream can repair. Those keep the vanilla
+            // anchor, matching the authored-inside parity rule used elsewhere.
+            if (authoredGapArr[i] < 0.0f) continue;
+            Vec3 cp{0, 0, 0}, nrm{0, 0, 1};
+            float d2 = 0.0f;
+            int triIdx = -1;
+            float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+            if (!BVHClosestPointEx(refBody, baseVerts[i], cp, nrm, d2,
+                                   &triIdx, &bu, &bv, &bw)) continue;
+            if (triIdx < 0 || (size_t)triIdx >= refBody.tris.size()) continue;
+            SkinBind sb;
+            sb.tri = triIdx;
+            sb.w0 = bu; sb.w1 = bv; sb.w2 = bw;
+            sb.off = Dot(Sub(baseVerts[i], cp), nrm);   // signed authored standoff
+            skinBinds[i] = sb;
+            ++bound;
+        }
+        HLog("path-b-shell: skin-bound support ACTIVE - %d/%zu band verts bound "
+             "to the authored skin (vanilla pose is no longer the anchor)",
+             bound, n);
+    }
+
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
@@ -9405,6 +9453,22 @@ static bool PathBSimV2Solve(
         std::vector<Vec3> anchorTarget(n);
         for (size_t i = 0; i < n; ++i) {
             anchorTarget[i] = Add(baseVerts[i], Scale(raw[i], t));
+            if (skinBind && fixed[i] && skinBinds[i].tri >= 0) {
+                // transport the authored binding through the lerped body
+                const auto& bt = refBody.tris[(size_t)skinBinds[i].tri];
+                const Vec3& A = bodyVerts[bt[0]];
+                const Vec3& B = bodyVerts[bt[1]];
+                const Vec3& C = bodyVerts[bt[2]];
+                Vec3 fn = Cross(Sub(B, A), Sub(C, A));
+                const float fl = Len(fn);
+                if (fl > 1.0e-9f) {
+                    fn = Scale(fn, 1.0f / fl);
+                    const Vec3 onSkin =
+                        Add(Add(Scale(A, skinBinds[i].w0), Scale(B, skinBinds[i].w1)),
+                            Scale(C, skinBinds[i].w2));
+                    anchorTarget[i] = Add(onSkin, Scale(fn, skinBinds[i].off));
+                }
+            }
             // Anchors must not sit INSIDE the continuation body: a fixed
             // vertex at a vanilla position up to 4.3u deep drags its free
             // neighbours into a permanent tug-of-war with the capped contact
