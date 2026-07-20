@@ -80,6 +80,23 @@ class Orientation:
         return out
 
 
+
+def _cull(verts, tris, azim, elev=4.0):
+    """Backface culling, exactly like OutfitStudio's renderer. WITHOUT this the
+    render draws every triangle double-sided, so an INVERTED face still shows
+    as solid surface - which is why a 60-face hole in the sleeves was invisible
+    in my images while the user saw it immediately (2026-07-20). Culling makes
+    inverted faces disappear, so the hole appears here too."""
+    a = np.radians(azim); e = np.radians(elev)
+    view = np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+    tri = verts[tris]
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    ln = np.linalg.norm(n, axis=1)
+    keep = ln > 1e-12
+    n[keep] /= ln[keep][:, None]
+    # keep faces whose outward normal faces the camera
+    return keep & ((n @ view) > 0.0)
+
 def _shade(tris_xyz, light=(0.3, -0.5, 0.8)):
     n = np.cross(tris_xyz[:, 1] - tris_xyz[:, 0], tris_xyz[:, 2] - tris_xyz[:, 0])
     n /= np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None]
@@ -111,13 +128,14 @@ def render_views(out_prefix, orient, garment_v, garment_t, body_v, body_t,
     for name in views:
         fig = plt.figure(figsize=(6, 9))
         ax = fig.add_subplot(111, projection="3d")
-        bt = body_v[body_t]
+        bt = body_v[body_t[_cull(body_v, body_t, cam[name])]]
         bs = _shade(bt)
         pc = Poly3DCollection(bt, facecolors=np.column_stack(
             [bs * 0.45, bs * 0.35, bs * 0.32, np.ones(len(bt))]),
             edgecolors="none")
         ax.add_collection3d(pc)
-        gt_ = garment_v[garment_t]
+        gvis = garment_t[_cull(garment_v, garment_t, cam[name])]
+        gt_ = garment_v[gvis]
         gs = _shade(gt_)
         gc = Poly3DCollection(gt_, facecolors=np.column_stack(
             [gs * 0.82, gs * 0.78, gs * 0.70, np.ones(len(gt_))]),
@@ -164,13 +182,13 @@ def contact_sheet(out_path, orient, columns, garment_t, body_v, body_t,
         for ci, (label, gv) in enumerate(columns):
             ax = fig.add_subplot(nrow, ncol, ri * ncol + ci + 1,
                                  projection="3d")
-            bt = body_v[body_t]
+            bt = body_v[body_t[_cull(body_v, body_t, cam[vname])]]
             bs = _shade(bt)
             ax.add_collection3d(Poly3DCollection(
                 bt, facecolors=np.column_stack(
                     [bs * 0.45, bs * 0.35, bs * 0.32, np.ones(len(bt))]),
                 edgecolors="none"))
-            gt_ = gv[garment_t]
+            gt_ = gv[garment_t[_cull(gv, garment_t, cam[vname])]]
             gs = _shade(gt_)
             ax.add_collection3d(Poly3DCollection(
                 gt_, facecolors=np.column_stack(
