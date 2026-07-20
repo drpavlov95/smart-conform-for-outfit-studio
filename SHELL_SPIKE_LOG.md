@@ -1601,3 +1601,37 @@ m14). Corpus OFF 18/18, determinístico byte-idêntico, Release deployado nas
 "mais justo que ambos" nunca foi endossado), retorno uniforme (marco 18).
 
 Validação pendente: OLHO DO USUÁRIO no OS (reiniciar) + círculos no overlay.
+
+## Marco 20 (2026-07-20): a métrica que bate com o olho do usuário — e a produção ganha de nós
+
+Depois do fix do validador (nosso resultado finalmente chega à tela), a
+primeira avaliação honesta. IMPRINT (pathb_local_metrics.measure_imprint =
+o quanto a superfície do tecido COPIA a forma do corpo, que é exatamente a
+queixa "efeito à distância / mostra a anatomia"):
+
+| config            | energia | correlação |
+|-------------------|---------|------------|
+| PRODUÇÃO          | 0.0845  | +0.340     |
+| sim atual         | 0.1835  | +0.427     |
+| + skin-bind       | 0.2104  | +0.461     |
+| + graded rest     | 0.2585  | +0.507     |
+| skin + graded     | 0.2687  | +0.505     |
+
+**A produção é a melhor em tudo.** Nosso sim copia o corpo 2.2x mais que ela;
+graded rest 3x. O usuário reprovou TODAS as rodadas e estava certo em todas.
+
+Por que erramos tanto tempo: usávamos magnetismCount como prova de progresso
+(graded rest: 1131->838 = "melhorou"), mas ele não mede cópia-de-forma. O
+imprint mede, e diz o contrário. Afastamento também engana: graded rest
+aproxima do autoral (2.40 -> 3.77u, autoral 5.04u) e ainda assim piora o
+imprint, porque afasta o tecido MANTENDO a forma do corpo = cópia maior e
+flutuante ("tenda que mostra a anatomia").
+
+Achado negativo registrado: SKIN-BIND é INERTE (magnetismo 1131->1133,
+imprint piora). A crítica conceitual estava certa (a âncora era a resposta do
+vanilla) mas sem efeito prático: para a banda JUSTA, o conform vanilla já
+equivale a seguir a pele. A alavanca não está na ancoragem.
+
+REGRA NOVA: imprint é a métrica primária de aceitação (junto do sculpt);
+magnetismCount é diagnóstico secundário e nunca prova de progresso.
+ALVO: imprint < 0.0845 (bater a produção) antes de qualquer deploy visual.
