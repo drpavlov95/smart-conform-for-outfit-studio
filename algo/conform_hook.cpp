@@ -9919,6 +9919,53 @@ static bool PathBSimV2Solve(
                  finalRounds, finalMoves, worstFinalFace);
         }
     }
+    // FINAL STRAIN LIMIT (2026-07-19). THE bug behind "nothing ever changes":
+    // the host validator rejects the whole shape when any edge exceeds
+    // kMaxStretchCeiling (8x) and silently falls back to vanilla - so every
+    // result we ever computed for BlackSmithTorso was thrown away and the user
+    // saw vanilla, every single time. Measured: production peaks at 4.1x, our
+    // output at 9.2x, and it was exactly TWO edges out of 6284 (short ones,
+    // rest 0.26-0.36u, torn at the pinned-band boundary). The in-loop limiter
+    // could not catch them because the cleft bridge, the hard reconciliation
+    // and the production post-passes all run AFTER it. This is a tension-only
+    // clamp, fixed verts immovable, applied as the very last thing we do.
+    {
+        const float kFinalStrain =
+            std::max(1.05f, EnvFloat("DRAPE_SHELL_FINAL_STRAIN", 2.0f));
+        int clamped = 0;
+        float worstBefore = 0.0f, worstAfter = 0.0f;
+        for (const auto& e : edges) {
+            if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
+            worstBefore = std::max(worstBefore, Len(Sub(x[e.a], x[e.b])) / e.rest);
+        }
+        for (int round = 0; round < 24; ++round) {
+            int moved = 0;
+            for (const auto& e : edges) {
+                if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
+                const float wA = fixed[e.a] ? 0.0f : 1.0f;
+                const float wB = fixed[e.b] ? 0.0f : 1.0f;
+                const float wSum = wA + wB;
+                if (wSum <= 0.0f) continue;          // both pinned: not ours to fix
+                Vec3 d = Sub(x[e.b], x[e.a]);
+                const float len = Len(d);
+                const float maxLen = e.rest * kFinalStrain;
+                if (len <= maxLen || len < 1.0e-9f) continue;
+                Vec3 corr = Scale(d, (len - maxLen) / (len * wSum));
+                x[e.a] = Add(x[e.a], Scale(corr, wA));
+                x[e.b] = Sub(x[e.b], Scale(corr, wB));
+                ++moved;
+            }
+            clamped += moved;
+            if (moved == 0) break;
+        }
+        PathBSeamWeld(x, exactSeamGroups, fixed, x);   // fixed verts never moved above
+        for (const auto& e : edges) {
+            if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
+            worstAfter = std::max(worstAfter, Len(Sub(x[e.a], x[e.b])) / e.rest);
+        }
+        HLog("path-b-shell: final strain limit %.2fx corrections=%d worst %.2fx -> %.2fx (host rejects above 8x)",
+             kFinalStrain, clamped, worstBefore, worstAfter);
+    }
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce
     // body penetration after the final contact projection.
