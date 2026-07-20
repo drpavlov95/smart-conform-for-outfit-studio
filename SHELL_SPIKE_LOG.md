@@ -1665,3 +1665,32 @@ PRÓXIMA DIREÇÃO: desacoplar. O tecido livre precisa pendurar sob gravidade
 restringido só por TENSÃO a partir dos apoios, sem herdar o campo de
 deslocamento do corpo. Não tentar mais varreduras de rigidez (falsificado
 aqui e por Codex antes).
+
+## Marco 22 (2026-07-20): o buraco na axila — falha de método, não de física
+
+O usuário abriu o build do marco 21 e viu um BURACO enorme nos braços/axila.
+Minhas três métricas (imprint 0.181->0.067, barra z 2.0->6.8, sculpt
+1.085->0.988) tinham TODAS melhorado. Média não enxerga buraco.
+
+MEDIÇÃO: faces INVERTIDAS. produção=1 total / 0 nos braços. Nosso sim=94 total
+/ 60 nos braços (antes da mudança de gravidade: 117 / 74). O buraco é face
+invertida renderizando como vazio.
+
+DEFEITO ANTIGO, recém-visível: existia igual antes do ajuste de gravidade —
+só apareceu agora porque o fix do validador (marco 20) fez nosso resultado
+finalmente chegar à tela. Todo deploy anterior tinha o buraco; ninguém via.
+
+CAUSA ISOLADA (ablação): NÃO é gravidade, NÃO é contato, NÃO são os grampos
+de tensão — tirar os grampos PIORA (59 -> 78). Com gravidade e contato
+desligados e nenhum limitador, ainda dá 78 flips nos braços. Logo nasce no
+núcleo: âncoras + stretch/bend nas MANGAS (tubos finos invertem fácil).
+
+FERRAMENTA NOVA (obrigatória antes de qualquer deploy):
+tools/pathb_defect_gate.py — checa POR REGIÃO contra a produção: faces
+invertidas (total e braços), faces colapsadas, costuras abertas, esticamento
+máximo vs o teto 8.0 do host. Ele bloqueia o build do marco 21 em 3 dos 5
+itens. Métrica agregada nunca mais decide deploy sozinha.
+
+ESTADO: sim DESLIGADO na máquina do usuário (shell_solve_off.flag); ele volta
+à produção, que é limpa. O sim não volta a ser deployado enquanto os flips de
+braço não caírem a ~0.
