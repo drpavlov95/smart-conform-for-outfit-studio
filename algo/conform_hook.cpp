@@ -9081,7 +9081,15 @@ static bool PathBSimV2Solve(
     // already follow the target slider.  That mismatch can contract a Heavy
     // garment into the body.  The opt-in probe grades only intrinsic edge
     // lengths to the target slider; raw positions never become an attractor.
-    const bool gradedRest = EnvToggle("DRAPE_SHELL_GRADED_REST", false);
+    bool gradedRest = EnvToggle("DRAPE_SHELL_GRADED_REST", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    // Live A/B: free-free rest lengths follow the target metric instead of the
+    // base/slim one. Measured on corpus it cuts the final strain clamp's work
+    // 5288 -> 637 corrections (the clamp is what visibly crumples the dress),
+    // magnetism 1131 -> 838 and body penetration 147 -> 115, at the cost of
+    // flips 98 -> 140 and torso-vs-belt face residual 79 -> 397.
+    if (fs::exists("E:/SkyrimDev/Drape/graded_rest_on.flag")) gradedRest = true;
+#endif
     std::vector<float> baseEdgeRest(edges.size(), 0.0f);
     std::vector<float> targetEdgeRest(edges.size(), 0.0f);
     for (size_t ei = 0; ei < edges.size(); ++ei) {
