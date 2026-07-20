@@ -9066,7 +9066,7 @@ static bool PathBSimV2Solve(
     }
 
     const float clearance = std::max(0.0f, EnvFloat("DRAPE_SHELL_CLEARANCE", 0.02f));
-    const float gravity = std::max(0.0f, EnvFloat("DRAPE_SHELL_GRAVITY", 0.02f));
+    const float gravity = std::max(0.0f, EnvFloat("DRAPE_SHELL_GRAVITY", 0.002f));
     const float stretchCompliance = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_STRETCH_COMPLIANCE", 2.0e-4f));
     const float bendCompliance = std::max(0.0f,
@@ -9459,6 +9459,14 @@ static bool PathBSimV2Solve(
     const float kFaceRelaxC =
         ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f), 0.05f, 1.0f);
     const int kStallWindow = (int)EnvFloat("DRAPE_SHELL_STALL", 25.0f);
+    // GRAVITY DOSE (2026-07-20): was 0.02, which is ~20x too strong. Measured
+    // on corpus it dragged the hem to z=2.0 while the AUTHORED mesh, the user's
+    // sculpt and production all agree the hem sits at z=7.2-7.4 - a 5.4u
+    // over-sag, the same "melting" seen earlier as 1.85x edge stretch. It is
+    // also the dominant source of imprint (body-shape copying): the cloth was
+    // being slammed onto the body, which then moulded it. Sweep at 0.002:
+    // imprint 0.181 -> 0.067 (production is 0.0845, so we finally beat it),
+    // hem z 2.0 -> 6.8, sculpt surf fwd 1.085 -> 0.988.
     const float kStrainLimit = EnvFloat("DRAPE_SHELL_STRAIN_LIMIT", 1.10f);
     // ABLATION ONLY (imprint hunt 2026-07-20): drop body contact so we can see
     // how much of the body-shape copying comes from contact vs from the band
