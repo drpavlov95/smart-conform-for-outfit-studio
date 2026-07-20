@@ -9089,6 +9089,7 @@ static bool PathBSimV2Solve(
     // 6-8x; measured here as maxEdge 8.77 + 167 flips at the seam of the
     // freed region). gap<=lo -> worn/fixed; lo..hi -> mass ramps from
     // infinite to the area mass; >hi -> fully free.
+    const bool kSkirtOnly = EnvFloat("DRAPE_SHELL_SKIRT_ONLY", 0.0f) > 0.5f;
     const float kAttachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
     const float kAttachHi = std::max(kAttachLo + 0.05f,
         EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
@@ -9149,6 +9150,22 @@ static bool PathBSimV2Solve(
     size_t freeCount = 0;
     for (size_t i = 0; i < n; ++i) {
         fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
+        // SCOPE THE PHYSICS (probe 2026-07-20): sleeves are fitted TUBES on the
+        // arms, not hanging cloth. Treating them as free drape inverts their
+        // faces (72 of our 98 flipped faces live there; production has ZERO),
+        // and neither gravity, contact, strain clamps nor the attach threshold
+        // changes that. Drape physics has nothing to offer a fitted sleeve, so
+        // this pins the arm region and lets production keep it.
+        if (kSkirtOnly) {
+            // Feathered, not a hard cut: an abrupt pinned/free boundary tore
+            // the edges across it (measured max stretch 21.4x, above the host's
+            // 8x ceiling). Pin only the INTERIOR of the arm region and let the
+            // solver keep a transition band, so no edge straddles a cliff.
+            const float ax = std::fabs(baseVerts[i].x), az = baseVerts[i].z;
+            const float armX = EnvFloat("DRAPE_SHELL_ARM_X", 22.0f);
+            const float armZ = EnvFloat("DRAPE_SHELL_ARM_Z", 96.0f);
+            if (ax > armX || az > armZ) fixed[i] = 1;
+        }
         raw[i] = DiffAt(rawDiff, (uint16_t)i);
         if (!fixed[i]) { areaSum += vertArea[i]; ++freeCount; }
     }
@@ -9602,10 +9619,28 @@ static bool PathBSimV2Solve(
                                fixed[tris[ti][2]] ? 1 : 0;
             float worstAnchorFace = 0.0f;
             int anchorRounds = 0;
+            // Cap the TOTAL displacement of each anchor target. The cleanup
+            // could previously move one 0.5u per round for 40 rounds with no
+            // aggregate limit; measured, it tore pinned-to-pinned edges to
+            // 21.4x rest (rest 0.36u at the cuff) - and those are exactly the
+            // edges the final strain clamp cannot repair, because it refuses
+            // to move pinned vertices. The floor matters, but not at the cost
+            // of shredding the band it is cleaning.
+            const std::vector<Vec3> anchorOrig = anchorTarget;
+            const float kAnchorCap =
+                std::max(0.05f, EnvFloat("DRAPE_SHELL_ANCHOR_CAP", 0.6f));
             for (; anchorRounds < 40; ++anchorRounds) {
                 const int moved = PathBFaceContactProject(
                     anchorTarget, tris, anchorMass, body, faceHardFloor,
                     0.5f, 1.0f, worstAnchorFace, &triFixed);
+                for (size_t k = 0; k < n; ++k) {
+                    if (!fixed[k]) continue;
+                    Vec3 d = Sub(anchorTarget[k], anchorOrig[k]);
+                    const float dl = Len(d);
+                    if (dl > kAnchorCap)
+                        anchorTarget[k] = Add(anchorOrig[k],
+                                              Scale(d, kAnchorCap / dl));
+                }
                 if (moved == 0) break;
             }
             for (const auto& group : exactSeamGroups) {
