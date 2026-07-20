@@ -8138,6 +8138,82 @@ static void PathBBendingJacobi(
             x[i] = Add(x[i], Scale(delta[i], 0.45f / count[i]));
 }
 
+// Conflict-free greedy coloring: no two hinges in a batch share a vertex, so
+// a batch can be applied at full strength without racing. Deterministic
+// (constraint order fixed, lowest feasible batch wins).
+static std::vector<std::vector<uint32_t>> PathBColorHinges(
+    const std::vector<PathBShellHinge>& hinges, size_t n)
+{
+    std::vector<std::vector<uint32_t>> batches;
+    std::vector<std::vector<uint32_t>> stamp;   // per batch: last hinge id per vert
+    std::vector<uint32_t> mark;
+    for (uint32_t hi = 0; hi < (uint32_t)hinges.size(); ++hi) {
+        const auto& h = hinges[hi];
+        size_t b = 0;
+        for (;; ++b) {
+            if (b == batches.size()) {
+                batches.emplace_back();
+                stamp.emplace_back(n, 0xFFFFFFFFu);
+            }
+            bool clash = false;
+            for (int lv = 0; lv < 4 && !clash; ++lv)
+                if (stamp[b][h.v[(size_t)lv]] != 0xFFFFFFFFu) clash = true;
+            if (!clash) break;
+        }
+        for (int lv = 0; lv < 4; ++lv) stamp[b][h.v[(size_t)lv]] = hi;
+        batches[b].push_back(hi);
+    }
+    return batches;
+}
+
+// Colored Gauss-Seidel bending. The Jacobi version scaled every correction by
+// 0.45/count (~6 hinges per vertex => ~7% of the correction applied), so the
+// bending moment could not propagate the ~30 hinge rows from the waist to the
+// hem: stiffness never arrived and the compliance knob was inert. Measured
+// 2026-07-20: sweeping compliance over 1e-4..0 moved imprint by <0.008 and
+// the dihedral residual got WORSE at maximum stiffness (p95 59deg -> 65deg),
+// which is only possible if the constraint is doing nothing. GS applies each
+// conflict-free batch immediately at full strength, so later batches see the
+// earlier corrections and the moment actually travels.
+static void PathBBendingColoredGS(
+    std::vector<Vec3>& x,
+    const std::vector<PathBShellHinge>& hinges,
+    const std::vector<std::vector<uint32_t>>& batches,
+    const std::vector<float>& invMass,
+    std::vector<float>& lambdas,
+    float compliance,
+    int analyticVariant,
+    const std::vector<uint8_t>& boundary,
+    float relaxation)
+{
+    for (const auto& batch : batches) {
+        for (uint32_t hi : batch) {
+            const auto& h = hinges[hi];
+            auto local = PathBHingeLocal(x, h);
+            const float c = PathBWrapAngle(PathBSignedDihedral(local) - h.restAngle);
+            float effCompliance = compliance;
+            if (!boundary.empty() &&
+                (boundary[h.v[0]] || boundary[h.v[1]] ||
+                 boundary[h.v[2]] || boundary[h.v[3]]))
+                effCompliance = compliance * 0.05f;
+            auto grad = analyticVariant >= 0
+                ? PathBDihedralGradientsAnalytic(local, analyticVariant)
+                : PathBDihedralGradientsNumeric(local);
+            float denom = effCompliance;
+            for (int lv = 0; lv < 4; ++lv)
+                denom += invMass[h.v[(size_t)lv]] * Len2(grad[(size_t)lv]);
+            if (denom <= 1.0e-30f) continue;
+            const float dl = relaxation * (-c - effCompliance * lambdas[hi]) / denom;
+            lambdas[hi] += dl;
+            for (int lv = 0; lv < 4; ++lv) {
+                const uint16_t vi = h.v[(size_t)lv];
+                if (invMass[vi] <= 0.0f) continue;
+                x[vi] = Add(x[vi], Scale(grad[(size_t)lv], invMass[vi] * dl));
+            }
+        }
+    }
+}
+
 static void PathBSeamWeld(
     std::vector<Vec3>& x,
     const std::vector<std::vector<uint32_t>>& seamGroups,
@@ -9341,6 +9417,15 @@ static bool PathBSimV2Solve(
              bound, n);
     }
 
+    // Bending solver choice: Jacobi (legacy, measured inert) vs colored GS.
+    const bool bendGS = EnvFloat("DRAPE_SHELL_BEND_GS", 0.0f) > 0.5f;
+    std::vector<std::vector<uint32_t>> hingeBatches;
+    if (bendGS) {
+        hingeBatches = PathBColorHinges(hinges, n);
+        HLog("path-b-shell: bending = colored GS (%zu batches for %zu hinges)",
+             hingeBatches.size(), hinges.size());
+    }
+
     std::vector<Vec3> x = baseVerts;
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
@@ -9374,6 +9459,11 @@ static bool PathBSimV2Solve(
         ClampRange(EnvFloat("DRAPE_SHELL_FACE_RELAX", 0.75f), 0.05f, 1.0f);
     const int kStallWindow = (int)EnvFloat("DRAPE_SHELL_STALL", 25.0f);
     const float kStrainLimit = EnvFloat("DRAPE_SHELL_STRAIN_LIMIT", 1.10f);
+    // ABLATION ONLY (imprint hunt 2026-07-20): drop body contact so we can see
+    // how much of the body-shape copying comes from contact vs from the band
+    // anchors dragging free cloth. Produces penetrating meshes; never ship on.
+    const bool kNoContact = EnvFloat("DRAPE_SHELL_NO_CONTACT", 0.0f) > 0.5f;
+    const bool kNoGravity = EnvFloat("DRAPE_SHELL_NO_GRAVITY", 0.0f) > 0.5f;
     const bool traceContact =
         EnvToggle("DRAPE_SHELL_TRACE_CONTACT", false);
     const size_t traceCount = n * (size_t)kMorphSteps;
@@ -9586,7 +9676,7 @@ static bool PathBSimV2Solve(
                 // SIM CORE 2: gravity is a uniform ACCELERATION on every free
                 // vertex - mass-independent, exactly like the real thing. Mass
                 // (area) only weights how constraints share their corrections.
-                x[i].z -= gravity;
+                if (!kNoGravity) x[i].z -= gravity;
             }
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
                                stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
@@ -9611,11 +9701,16 @@ static bool PathBSimV2Solve(
                     }
                 }
             }
-            PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
-                               analyticVariant, boundaryVert);
+            if (bendGS)
+                PathBBendingColoredGS(x, hinges, hingeBatches, invMass, bendLambda,
+                                      bendCompliance, analyticVariant, boundaryVert,
+                                      ClampRange(EnvFloat("DRAPE_SHELL_BEND_RELAX", 1.0f), 0.1f, 1.0f));
+            else
+                PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
+                                   analyticVariant, boundaryVert);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             std::fill(vertGap.begin(), vertGap.end(), 1.0e9f);
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n && !kNoContact; ++i) {
                 if (invMass[i] <= 0.0f) continue;
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                 float d2 = 0.0f;
@@ -9666,6 +9761,7 @@ static bool PathBSimV2Solve(
                 ++contactMoves;
                 if (traceContact) ++traceVertexContact[traceOffset + i];
             }
+            if (kNoContact) { /* ablation: contact disabled */ } else
             if (hullOn) {
                 int hullMoves = 0;
                 for (size_t i = 0; i < n; ++i) {
@@ -9809,7 +9905,7 @@ static bool PathBSimV2Solve(
                         if (g < 2.5f) { triActive[ti] = 1; break; }
                     }
                 }
-                faceContactMoves += PathBFaceContactProject(
+                if (!kNoContact) faceContactMoves += PathBFaceContactProject(
                     x, tris, invMass, body, faceHardFloor,
                     kFaceStepC, kFaceRelaxC,
                     worstFaceContact, &triActive, /*countOnly=*/false,
