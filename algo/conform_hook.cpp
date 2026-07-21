@@ -9089,7 +9089,10 @@ static bool PathBSimV2Solve(
     // 6-8x; measured here as maxEdge 8.77 + 167 flips at the seam of the
     // freed region). gap<=lo -> worn/fixed; lo..hi -> mass ramps from
     // infinite to the area mass; >hi -> fully free.
-    const bool kSkirtOnly = EnvFloat("DRAPE_SHELL_SKIRT_ONLY", 0.0f) > 0.5f;
+    // DEFAULT ON (2026-07-20): sleeves are fitted tubes; drape physics
+    // inverted 72 of their faces while production ships them clean. The
+    // pilot's value is the skirt. Scoping is declared, not hidden.
+    const bool kSkirtOnly = EnvFloat("DRAPE_SHELL_SKIRT_ONLY", 1.0f) > 0.5f;
     const float kAttachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
     const float kAttachHi = std::max(kAttachLo + 0.05f,
         EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
@@ -9592,14 +9595,78 @@ static bool PathBSimV2Solve(
             // out to the contact floor - the production pipeline floors these
             // verts at the end anyway, so this matches the published look.
             if (fixed[i]) {
+                // AUTHORED-INSIDE PARITY (fix 2026-07-20). Cloth the artist
+                // placed INSIDE the body (knee straps at -4..-6u) must keep its
+                // authored depth, exactly as every other pass here already
+                // grants it. Projecting its anchor out to the contact floor
+                // moved pinned vertices by up to 8.1u - measured by the
+                // pinned-drift audit as 650 drifted verts right after the morph
+                // loop - which is what tore edges whose BOTH ends are pinned to
+                // 21.4x rest, above the host's 8x rejection ceiling.
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                 float d2 = 0.0f;
-                if (BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
+                if (authoredGapArr[i] >= -0.1f &&
+                    BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
                     const float dist = std::sqrt(d2);
                     const float gap =
                         Dot(Sub(anchorTarget[i], cp), nrm) < 0.0f ? -dist : dist;
-                    const float floor = contactFloor[i];
-                    if (gap < floor) anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                    // Use the FEASIBLE floor (fabric thickness), not the
+                    // radial one. Marco 14 demoted max(authoredGap, clearance)
+                    // for contact because it is infeasible, but this anchor
+                    // projection kept it - so a pinned vertex whose authored
+                    // gap is 6.0u was shoved 7.9u to satisfy a 6u standoff
+                    // (measured on v336), which is the pinned-vertex tear.
+                    const float floor = vertHardFloor[i];
+                    if (floor > -1.0e8f && gap < floor)
+                        anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                }
+                x[i] = anchorTarget[i];
+            }
+        }
+        // ANCHOR COHERENCE (2026-07-20): the projection above moves each
+        // pinned target INDIVIDUALLY, so neighbouring anchors get pushed in
+        // different directions and their shared faces invert - the remaining
+        // 40 flips concentrate at z70-94 in the tight band (gap 0.2-0.5),
+        // exactly where projection displacement varies most. Smooth the
+        // DISPLACEMENT field (target minus nominal) among pinned neighbours:
+        // folds live in the nominal pose and are preserved; only the
+        // projection's disagreement is averaged away. Then re-floor once so
+        // smoothing cannot push a target back inside the body.
+        if (EnvFloat("DRAPE_SHELL_ANCHOR_SMOOTH", 1.0f) > 0.5f) {
+            std::vector<Vec3> disp(n, Vec3{0.0f, 0.0f, 0.0f});
+            for (size_t i = 0; i < n; ++i)
+                if (fixed[i])
+                    disp[i] = Sub(anchorTarget[i],
+                                  Add(baseVerts[i], Scale(raw[i], t)));
+            for (int pass = 0; pass < 2; ++pass) {
+                std::vector<Vec3> sm = disp;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!fixed[i] || vertNeighbors[i].empty()) continue;
+                    Vec3 acc = Scale(disp[i], 2.0f);
+                    float w = 2.0f;
+                    for (uint32_t nb : vertNeighbors[i]) {
+                        if (!fixed[nb]) continue;
+                        acc = Add(acc, disp[nb]);
+                        w += 1.0f;
+                    }
+                    sm[i] = Scale(acc, 1.0f / w);
+                }
+                disp.swap(sm);
+            }
+            for (size_t i = 0; i < n; ++i) {
+                if (!fixed[i]) continue;
+                anchorTarget[i] = Add(Add(baseVerts[i], Scale(raw[i], t)), disp[i]);
+                if (authoredGapArr[i] >= -0.1f) {
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
+                        const float dist = std::sqrt(d2);
+                        const float gap =
+                            Dot(Sub(anchorTarget[i], cp), nrm) < 0.0f ? -dist : dist;
+                        const float floor = vertHardFloor[i];
+                        if (floor > -1.0e8f && gap < floor)
+                            anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                    }
                 }
                 x[i] = anchorTarget[i];
             }
@@ -10008,6 +10075,17 @@ static bool PathBSimV2Solve(
                  authoredGapArr[i], (int)hasPush[i], (int)boundaryVert[i],
                  softAnchor[i]);
         }
+        {
+            int stepFlips = 0;
+            for (const auto& tr : tris) {
+                const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
+                                      Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
+                const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
+                                      Sub(x[tr[2]], x[tr[0]]));
+                if (Len2(nb) > 1e-18f && Dot(nb, nx) < 0.0f) ++stepFlips;
+            }
+            HLog("path-b-shell: flips-after-step=%d: %d", step, stepFlips);
+        }
         HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d worstContact=%.4f worstFace=%.4f",
              step, kMorphSteps, itersUsed, maxMove, stalled ? " STALLED" : "",
              contactMoves, faceContactMoves, shadowMoves, worstContact,
@@ -10015,6 +10093,28 @@ static bool PathBSimV2Solve(
     }
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
+    // Drift probes at every post-loop stage, to name the culprit exactly.
+    auto driftAt = [&](const char* stage) {
+        float worst = 0.0f; int cnt = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!fixed[i]) continue;
+            const float d = Len(Sub(x[i], Add(baseVerts[i], raw[i])));
+            if (d > 0.05f) ++cnt;
+            worst = std::max(worst, d);
+        }
+        int flips = 0;
+        for (const auto& tr : tris) {
+            const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
+                                  Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
+            const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
+                                  Sub(x[tr[2]], x[tr[0]]));
+            if (Len2(nb) > 1e-18f && Dot(nb, nx) < 0.0f) ++flips;
+        }
+        HLog("path-b-shell: drift@%-22s drifted=%4d worst=%.3fu flips=%d",
+             stage, cnt, worst, flips);
+    };
+    driftAt("after-morph-loop");
+
     // defensive final weld: live meshes can differ slightly from the capture
     // (the 22:59 live conform left one twin pair 0.06u apart and the seam gate
     // rejected the WHOLE sim, publishing production - the 'no gravity at all'
@@ -10025,6 +10125,7 @@ static bool PathBSimV2Solve(
             lastAnchor[i] = Add(baseVerts[i], raw[i]);
         PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
     }
+    driftAt("after-defensive-weld");
     // CLEFT BRIDGE (user 2026-07-17 "a saia nao pode entrar na bunda"): the
     // solved skirt shrink-wraps the buttocks and dips into the gluteal cleft.
     // Reuse the production horizontal-bridge (validated falmer/vampire): per
@@ -10105,6 +10206,7 @@ static bool PathBSimV2Solve(
         PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
         HLog("path-b-shell: true-2d cleft bridge affected=%d", convexAffected);
     }
+    driftAt("after-cleft-bridge");
     {
         const BodyBVH& fullBody = morphedBody;   // already built by the caller
         if (fullBody.valid) {
@@ -10145,6 +10247,7 @@ static bool PathBSimV2Solve(
                  finalRounds, finalMoves, worstFinalFace);
         }
     }
+    driftAt("after-reconciliation");
     // FINAL STRAIN LIMIT (2026-07-19). THE bug behind "nothing ever changes":
     // the host validator rejects the whole shape when any edge exceeds
     // kMaxStretchCeiling (8x) and silently falls back to vanilla - so every
@@ -10191,6 +10294,89 @@ static bool PathBSimV2Solve(
         }
         HLog("path-b-shell: final strain limit %.2fx corrections=%d worst %.2fx -> %.2fx (host rejects above 8x)",
              kFinalStrain, clamped, worstBefore, worstAfter);
+    }
+    // FLIP REPAIR (2026-07-20). The solve inverts 24-33 faces at the attach
+    // boundary (one vert pinned, one free; z70-94, gap 0.2-0.5) and the hard
+    // reconciliation adds ~11 more. Production ships 1 flip; the raw vanilla
+    // pose has 14 - so repairs of this class are normal pipeline behaviour,
+    // not cosmetics. Any face inverted relative to its AUTHORED orientation
+    // gets its movable vertices blended toward the nominal (base+raw) pose,
+    // a little per round, until it rights itself. Nominal is a known-good
+    // orientation source; blending toward it can't tear (it is the anchor
+    // pose) and only touches vertices of broken faces.
+    if (EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
+        int repaired = 0, rounds = 0;
+        std::vector<uint8_t> touchedPinned(n, 0);
+        for (; rounds < 30; ++rounds) {
+            // weld FIRST each round: the seam weld snaps twins and can
+            // re-invert a face the previous round repaired (the stubborn
+            // z88 centre-line flips sit exactly on the lacing seam) - so
+            // the stop condition must see the post-weld state.
+            PathBSeamWeld(x, exactSeamGroups, fixed, x);
+            int flipped = 0;
+            std::vector<uint8_t> pull(n, 0);
+            for (const auto& tr : tris) {
+                const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
+                                      Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
+                const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
+                                      Sub(x[tr[2]], x[tr[0]]));
+                if (Len2(nb) <= 1e-18f || Dot(nb, nx) >= 0.0f) continue;
+                ++flipped;
+                // pinned verts too: 4 of the stubborn flips are ALL-pinned
+                // sleeve faces our own anchor projection broke. We own those
+                // targets; undoing the projection where it inverts a face is
+                // legitimate (re-floored below).
+                for (int k = 0; k < 3; ++k) pull[tr[(size_t)k]] = 1;
+            }
+            repaired = flipped;
+            if (flipped == 0) break;
+            int moved = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (!pull[i]) continue;
+                const Vec3 nom = Add(baseVerts[i], raw[i]);
+                x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
+                if (fixed[i]) touchedPinned[i] = 1;
+                ++moved;
+            }
+            if (moved == 0) break;
+        }
+        // re-floor only the pinned verts the repair moved (feasible tier)
+        for (size_t i = 0; i < n; ++i) {
+            if (!touchedPinned[i] || authoredGapArr[i] < -0.1f) continue;
+            Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+            float d2 = 0.0f;
+            if (!BVHClosestPoint(morphedBody, x[i], cp, nrm, d2)) continue;
+            const float dist = std::sqrt(d2);
+            const float gap = Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
+            const float floor = vertHardFloor[i];
+            if (floor > -1.0e8f && gap < floor)
+                x[i] = Add(cp, Scale(nrm, floor));
+        }
+        PathBSeamWeld(x, exactSeamGroups, fixed, x);
+        HLog("path-b-shell: flip repair rounds=%d lastFlipped=%d",
+             rounds, repaired);
+    }
+
+    driftAt("after-final-strain");
+    // PINNED-DRIFT AUDIT: a pinned vertex must end at its anchor target. If it
+    // does not, something downstream is moving vertices it must not touch -
+    // which is exactly the open contradiction (edges with BOTH ends pinned
+    // measured at 21.4x rest while the raw anchors are clean at 4.1x).
+    {
+        float worstDrift = 0.0f;
+        size_t worstIdx = 0;
+        int drifted = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!fixed[i]) continue;
+            const Vec3 tgt = Add(baseVerts[i], raw[i]);
+            const float d = Len(Sub(x[i], tgt));
+            if (d > 0.05f) ++drifted;
+            if (d > worstDrift) { worstDrift = d; worstIdx = i; }
+        }
+        HLog("path-b-shell: pinned-drift audit drifted=%d worst=%.3fu at v%zu "
+             "(z=%.1f |x|=%.1f) - pinned verts must end AT their anchor",
+             drifted, worstDrift, worstIdx, x[worstIdx].z,
+             std::fabs(x[worstIdx].x));
     }
     // Deliberately stop after the same fixed-anchor reset as the Python spike.
     // An extra publication weld changes the solved pose and can re-introduce
@@ -19517,6 +19703,48 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              sliderName.c_str());
     }
 #endif
+
+    // LAST-CHANCE FLIP REPAIR (2026-07-20): the in-solve repair reaches zero
+    // inverted faces, but production post-passes that run between the solve
+    // and this point (stretch caps, prox-seam, anti-clip floor...) re-invert
+    // a handful on the pinned sleeves. This is the true output - nothing
+    // runs after it - so repairs held here stay held. Same rule as in-solve:
+    // blend the broken face's verts toward the nominal (base+raw) pose,
+    // which has the authored orientation.
+    if (pathBShellAccepted && tris &&
+        EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
+        auto nominalOf = [&](size_t i) {
+            auto it = rawDiff.find(static_cast<uint16_t>(i));
+            Vec3 d{0.0f, 0.0f, 0.0f};
+            if (it != rawDiff.end())
+                d = Vec3{it->second.x, it->second.y, it->second.z};
+            return Add(baseVerts[i], d);
+        };
+        int lastFlipped = 0, rounds = 0;
+        for (; rounds < 20; ++rounds) {
+            int flipped = 0;
+            std::vector<uint8_t> pull(n, 0);
+            for (const auto& tr : *tris) {
+                if (tr[0] >= n || tr[1] >= n || tr[2] >= n) continue;
+                const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
+                                      Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
+                const Vec3 nx = Cross(Sub(finalVerts[tr[1]], finalVerts[tr[0]]),
+                                      Sub(finalVerts[tr[2]], finalVerts[tr[0]]));
+                if (Len2(nb) <= 1e-18f || Dot(nb, nx) >= 0.0f) continue;
+                ++flipped;
+                for (int k = 0; k < 3; ++k) pull[tr[(size_t)k]] = 1;
+            }
+            lastFlipped = flipped;
+            if (flipped == 0) break;
+            for (size_t i = 0; i < n; ++i)
+                if (pull[i])
+                    finalVerts[i] = Add(finalVerts[i],
+                        Scale(Sub(nominalOf(i), finalVerts[i]), 0.30f));
+        }
+        if (rounds > 0)
+            HLog("last-chance flip repair: rounds=%d remaining=%d",
+                 rounds, lastFlipped);
+    }
 
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {

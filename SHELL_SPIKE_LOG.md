@@ -1694,3 +1694,36 @@ itens. Métrica agregada nunca mais decide deploy sozinha.
 ESTADO: sim DESLIGADO na máquina do usuário (shell_solve_off.flag); ele volta
 à produção, que é limpa. O sim não volta a ser deployado enquanto os flips de
 braço não caírem a ~0.
+
+## Marco 23 (2026-07-20): PRIMEIRO GATE 100% VERDE — zero faces invertidas (produção tem 1)
+
+Sessão AFK do usuário, cadeia completa de correções a partir da contradição
+do rasgo-com-pontas-presas:
+
+1. AUDITORIA DE DERIVA: 650 vértices presos terminavam fora da âncora (pior
+   8.1u). Sondas por estágio nomearam o culpado.
+2. BUG PRINCIPAL: a projeção de âncoras ainda usava o floor RADIAL
+   (max(authoredGap, clearance)) que o marco 14 já havia declarado infactível
+   — v336 (gap autoral 6.0) era arremessado 7.9u para "satisfazer" 6u de
+   standoff. Trocado pelo floor factível: esticamento 21.4x -> 3.78x.
+3. Autoral-dentro isento da projeção (paridade, como todo o resto).
+4. FLIP REPAIR (in-solve): face invertida vs orientação autoral tem seus
+   vértices puxados ao nominal até desvirar; weld DENTRO do loop (o weld
+   pós-reparo re-invertia as faces da costura central z88); presos também
+   reparáveis (a projeção nossa os quebrou) com re-floor. 41 -> 0 no solve.
+5. LAST-CHANCE REPAIR no outDiff (ponto final verdadeiro): os pós-passes de
+   produção re-invertiam 4 nas mangas; reparo lá converge em 3 rounds -> 0.
+   LIÇÃO REFORÇADA: perdeu o guarda pathBShellAccepted na 1a versão e o
+   corpus pegou na hora (regressão OFF) — guarda restaurado, corpus verde.
+6. SKIRT_ONLY default ON (mangas = tubos justos; física de drape inverteu 72
+   faces delas; produção as entrega limpas. Escopo declarado do piloto).
+7. Falsificados no caminho: skin-bind+skirt (81 flips), suavização de
+   coerência de âncoras (41->41), attach 0.6/0.9 (piora).
+
+GATE (defect_gate): 0 invertidas (prod=1) / 0 braços / 1 colapsada (lim 3) /
+0 costuras / stretch 4.07 (teto 8). QUALIDADE: imprint 0.0215 (prod 0.0845,
+4x melhor), hem z=7.2 (= prod/autoral/sculpt), afastamento 3.62 (prod 4.27,
+era 1.4), sculpt surf 0.876/0.915 (prod 0.756/0.79). Corpus OFF 18/18,
+determinístico, Release deployado nas 2 pastas, sim religado.
+
+Pendente: OLHO DO USUÁRIO (gate final).
