@@ -10,6 +10,11 @@
 #   open exact seams     == 0
 #   worst edge stretch   < 8.0 (the host validator's ceiling; above it the
 #                         host silently discards the whole shape)
+#   body poke-through    <= production, total AND arms (added 2026-07-21:
+#                         the user's "giant holes in the arms" on the LIVE
+#                         scene were the BODY showing through the sleeve -
+#                         321 penetrating verts vs production's 29 - and no
+#                         flip/seam/stretch check can see that class)
 #
 # Usage: py -3 pathb_defect_gate.py CANDIDATE.obj [--baseline PROD.obj]
 import argparse
@@ -20,13 +25,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pathb_metrics import exact_seam_groups, face_normals, load_obj
-from shell_spike import read_capture_front
+from shell_spike import UniformBodyCollider, read_capture_front
 
 CAP = Path("../corpus/fur_blacksmith_rm_heavy/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy.drcap")
 HOST_STRETCH_CEILING = 8.0
 
 
-def defects(v, base, tris, edges, groups):
+def defects(v, base, tris, edges, groups, collider):
     bn, ba = face_normals(base, tris)
     tn, ta = face_normals(v, tris)
     ok = ba > 1e-9
@@ -39,9 +44,18 @@ def defects(v, base, tris, edges, groups):
     ratio = np.where(rest > 1e-6, L / np.maximum(rest, 1e-9), 0.0)
     seam = max((float(np.linalg.norm(v[g] - v[g][0], axis=1).max())
                 for g in groups), default=0.0)
+    # body poke-through: signed gap of every garment vert to the morphed body.
+    # Depth > 0.05 filters contact-resolution noise; what remains is skin
+    # visible through the cloth in the host's renderer.
+    gaps = collider.gaps(v)
+    varm = (base[:, 2] > 90) | (np.abs(base[:, 0]) > 18)
+    pen = gaps < -0.05
     return dict(flips=int(flip.sum()), flips_arm=int((flip & arm).sum()),
                 collapsed=int(coll.sum()), seam_open=seam,
-                stretch=float(ratio.max()))
+                stretch=float(ratio.max()),
+                pokethrough=int(pen.sum()),
+                pokethrough_arm=int((pen & varm).sum()),
+                poke_depth=float(-gaps.min()) if pen.any() else 0.0)
 
 
 def main():
@@ -55,9 +69,10 @@ def main():
     base, tris = cap.base_verts, np.asarray(cap.tris)
     edges = np.asarray(cap.edges)
     groups = exact_seam_groups(base)
+    collider = UniformBodyCollider(cap.body_verts, cap.body_tris)
 
-    cand = defects(load_obj(a.candidate)[0], base, tris, edges, groups)
-    ref = defects(load_obj(a.baseline)[0], base, tris, edges, groups)
+    cand = defects(load_obj(a.candidate)[0], base, tris, edges, groups, collider)
+    ref = defects(load_obj(a.baseline)[0], base, tris, edges, groups, collider)
 
     checks = [
         ("faces invertidas (total)", cand["flips"], ref["flips"], "<="),
@@ -65,6 +80,11 @@ def main():
         ("faces colapsadas", cand["collapsed"], ref["collapsed"], "<="),
         ("costura aberta (u)", cand["seam_open"], 0.5, "<"),
         ("esticamento max", cand["stretch"], HOST_STRETCH_CEILING, "<"),
+        ("corpo-atraves (total)", cand["pokethrough"], ref["pokethrough"], "<="),
+        ("corpo-atraves (BRACOS)", cand["pokethrough_arm"],
+         ref["pokethrough_arm"], "<="),
+        ("corpo-atraves prof. (u)", cand["poke_depth"],
+         max(ref["poke_depth"], 0.5), "<="),
     ]
     print(f"{'verificacao':28} {'candidato':>10} {'limite':>10}   veredito")
     failed = 0
