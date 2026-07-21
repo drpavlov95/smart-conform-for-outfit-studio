@@ -8273,7 +8273,8 @@ static int PathBFaceContactProject(
     float& worstCorrection,
     const std::vector<uint8_t>* triActive = nullptr,
     bool countOnly = false,
-    std::vector<uint32_t>* perVertexMoves = nullptr)
+    std::vector<uint32_t>* perVertexMoves = nullptr,
+    bool crawlInPinch = false)
 {
     if (!body.valid || contactFloors.size() !=
             tris.size() * std::size(kTriangleSamples)) return 0;
@@ -8295,7 +8296,43 @@ static int PathBFaceContactProject(
                 ti * std::size(kTriangleSamples) + si];
             if (gap >= floor) continue;
 
-            Vec3 correction = Sub(Add(cp, Scale(nrm, floor)), p);
+            Vec3 target = Add(cp, Scale(nrm, floor));
+            // corridor clamp (2026-07-21, arm-torso pinch): vertex contact
+            // has had a clamp since marco 14, face contact never did. Between
+            // two body features the nearest surface FLIPS between iterations,
+            // so pushing a sample to the full floor of one side drives it INTO
+            // the other - measured live as 175k face moves per step and the
+            // stall culprit v866 parked 3.7u inside the torso.
+            // In-loop (crawlInPinch=false): bisect or skip - gravity/tension
+            // keep evolving the state, fighting here re-injects ping-pong.
+            // Finish (crawlInPinch=true): crawl to the least-penetrating
+            // point on the segment (corridor midline) - skipping there parks
+            // pinch-trapped cloth deep inside forever (cuffs authored +4.2u
+            // OUT measured at -3.0u IN).
+            {
+                float tGap = 0.0f;
+                if (BVHSignedGap(body, target, tGap, nullptr) && tGap < 0.0f) {
+                    if (crawlInPinch) {
+                        float bestGap = gap;
+                        Vec3 best = p;
+                        for (int s = 1; s <= 4; ++s) {
+                            Vec3 cand = Add(p, Scale(Sub(target, p),
+                                                     (float)s / 4.0f));
+                            float cg = 0.0f;
+                            if (!BVHSignedGap(body, cand, cg, nullptr)) continue;
+                            if (cg > bestGap) { bestGap = cg; best = cand; }
+                        }
+                        if (Len(Sub(best, p)) <= 1.0e-7f) continue;
+                        target = best;
+                    } else {
+                        Vec3 mid = Scale(Add(target, p), 0.5f);
+                        if (BVHSignedGap(body, mid, tGap, nullptr) && tGap < 0.0f)
+                            continue;
+                        target = mid;
+                    }
+                }
+            }
+            Vec3 correction = Sub(target, p);
             float correctionLen = Len(correction);
             if (!std::isfinite(correctionLen) || correctionLen <= 1.0e-7f)
                 continue;
@@ -9864,7 +9901,10 @@ static bool PathBSimV2Solve(
                 // corridor clamp: never push THROUGH the opposite body side
                 // (the old infeasibility). If the full target is inside the
                 // body, bisect toward the current position; if even half-way
-                // is inside, leave the vertex to the next iteration.
+                // is inside, leave the vertex to the next iteration. (The
+                // crawl-to-midline variant lives in the unified FINISH only:
+                // tried in-loop 2026-07-21 it re-injects the ping-pong the
+                // clamp exists to kill - step-6 contact 3.85 -> 7.12.)
                 {
                     float tGap = 0.0f;
                     if (BVHSignedGap(body, target, tGap, nullptr) && tGap < 0.0f) {
@@ -10226,74 +10266,86 @@ static bool PathBSimV2Solve(
         HLog("path-b-shell: true-2d cleft bridge affected=%d", convexAffected);
     }
     driftAt("after-cleft-bridge");
+    // UNIFIED FINISH (2026-07-21). Replaces the old sequence {hard
+    // reconciliation (60 rounds, contact only)} -> {final strain (24 rounds,
+    // tension only)} -> {flip repair}. Measured live (15:39 capture): the
+    // contact-only reconciliation tore edges to 42x rest because nothing
+    // limited strain while it shoved 4.5k verts; the tension-only clamp then
+    // hauled them back THROUGH the body (300 poke-through verts vs
+    // production's 22 - the "giant holes in the arms" the user circled); the
+    // flip repair then fought both. Sequential passes each destroy the
+    // previous pass's invariant. Here every round applies ALL of them a
+    // little: vertex contact (corridor-clamped), face contact (corridor-
+    // clamped), tension strain limit, flip/collapse repair, seam weld - so
+    // no single constraint can run away before the others answer.
     {
         const BodyBVH& fullBody = morphedBody;   // already built by the caller
-        if (fullBody.valid) {
-            std::vector<Vec3> lastAnchor(n);
-            for (size_t i = 0; i < n; ++i)
-                lastAnchor[i] = Add(baseVerts[i], raw[i]);
-            const float kVertHard =
-                std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
-            float worstFinalFace = 0.0f;
-            int finalRounds = 0, finalMoves = 0;
-            for (; finalRounds < 60; ++finalRounds) {
-                int moved = 0;
+        const bool flipRepairOn = EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f;
+        const float kFinalStrain =
+            std::max(1.05f, EnvFloat("DRAPE_SHELL_FINAL_STRAIN", 2.0f));
+        const float kVertHard =
+            std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+        std::vector<Vec3> lastAnchor(n);
+        for (size_t i = 0; i < n; ++i)
+            lastAnchor[i] = Add(baseVerts[i], raw[i]);
+        std::vector<uint8_t> touchedPinned(n, 0);
+        float worstFinalFace = 0.0f;
+        int rounds = 0, contactMovesT = 0, strainMovesT = 0;
+        int lastFlipped = 0;
+        for (; rounds < 80; ++rounds) {
+            int contactMoved = 0;
+            // (a) vertex contact, corridor-clamped like the in-loop pass
+            if (fullBody.valid) {
                 for (size_t i = 0; i < n; ++i) {
                     if (fixed[i]) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;  // authored-inside: parity
                     Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                     float d2 = 0.0f;
                     if (!BVHClosestPoint(fullBody, x[i], cp, nrm, d2)) continue;
                     const float dist = std::sqrt(d2);
                     const float gap =
                         Dot(Sub(x[i], cp), nrm) < 0.0f ? -dist : dist;
-                    if (authoredGapArr[i] < -0.1f) continue;   // authored-inside: vanilla parity
                     const float floorV = std::min(contactFloor[i], kVertHard);
                     if (gap >= floorV) continue;
-                    Vec3 move = Sub(Add(cp, Scale(nrm, floorV)), x[i]);
+                    Vec3 target = Add(cp, Scale(nrm, floorV));
+                    float tGap = 0.0f;
+                    if (BVHSignedGap(fullBody, target, tGap, nullptr) && tGap < 0.0f) {
+                        // pinch corridor: crawl to the least-penetrating
+                        // point on the segment (corridor midline)
+                        float bestGap = gap;
+                        Vec3 best = x[i];
+                        for (int s = 1; s <= 4; ++s) {
+                            Vec3 cand = Add(x[i], Scale(Sub(target, x[i]),
+                                                        (float)s / 4.0f));
+                            float cg = 0.0f;
+                            if (!BVHSignedGap(fullBody, cand, cg, nullptr)) continue;
+                            if (cg > bestGap) { bestGap = cg; best = cand; }
+                        }
+                        if (Len(Sub(best, x[i])) <= 1.0e-7f) continue;
+                        target = best;
+                    }
+                    Vec3 move = Sub(target, x[i]);
                     const float moveLen = Len(move);
                     if (moveLen > 0.5f) move = Scale(move, 0.5f / moveLen);
                     x[i] = Add(x[i], move);
-                    ++moved;
+                    ++contactMoved;
                 }
-                moved += PathBFaceContactProject(
+                // (b) face contact (corridor clamp inside; crawl mode here)
+                contactMoved += PathBFaceContactProject(
                     x, tris, invMass, fullBody, faceHardFloor,
-                    0.5f, 1.0f, worstFinalFace, nullptr);
-                PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
-                finalMoves += moved;
-                if (moved == 0) break;
+                    0.5f, 1.0f, worstFinalFace, nullptr,
+                    /*countOnly=*/false, /*perVertexMoves=*/nullptr,
+                    /*crawlInPinch=*/true);
             }
-            HLog("path-b-shell: hard reconciliation rounds=%d moves=%d worstFace=%.4f",
-                 finalRounds, finalMoves, worstFinalFace);
-        }
-    }
-    driftAt("after-reconciliation");
-    // FINAL STRAIN LIMIT (2026-07-19). THE bug behind "nothing ever changes":
-    // the host validator rejects the whole shape when any edge exceeds
-    // kMaxStretchCeiling (8x) and silently falls back to vanilla - so every
-    // result we ever computed for BlackSmithTorso was thrown away and the user
-    // saw vanilla, every single time. Measured: production peaks at 4.1x, our
-    // output at 9.2x, and it was exactly TWO edges out of 6284 (short ones,
-    // rest 0.26-0.36u, torn at the pinned-band boundary). The in-loop limiter
-    // could not catch them because the cleft bridge, the hard reconciliation
-    // and the production post-passes all run AFTER it. This is a tension-only
-    // clamp, fixed verts immovable, applied as the very last thing we do.
-    {
-        const float kFinalStrain =
-            std::max(1.05f, EnvFloat("DRAPE_SHELL_FINAL_STRAIN", 2.0f));
-        int clamped = 0;
-        float worstBefore = 0.0f, worstAfter = 0.0f;
-        for (const auto& e : edges) {
-            if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
-            worstBefore = std::max(worstBefore, Len(Sub(x[e.a], x[e.b])) / e.rest);
-        }
-        for (int round = 0; round < 24; ++round) {
-            int moved = 0;
+            contactMovesT += contactMoved;
+            // (c) tension strain limit - one sweep, fixed verts immovable
+            int strainMoved = 0;
             for (const auto& e : edges) {
                 if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
                 const float wA = fixed[e.a] ? 0.0f : 1.0f;
                 const float wB = fixed[e.b] ? 0.0f : 1.0f;
                 const float wSum = wA + wB;
-                if (wSum <= 0.0f) continue;          // both pinned: not ours to fix
+                if (wSum <= 0.0f) continue;
                 Vec3 d = Sub(x[e.b], x[e.a]);
                 const float len = Len(d);
                 const float maxLen = e.rest * kFinalStrain;
@@ -10301,65 +10353,84 @@ static bool PathBSimV2Solve(
                 Vec3 corr = Scale(d, (len - maxLen) / (len * wSum));
                 x[e.a] = Add(x[e.a], Scale(corr, wA));
                 x[e.b] = Sub(x[e.b], Scale(corr, wB));
-                ++moved;
+                ++strainMoved;
             }
-            clamped += moved;
-            if (moved == 0) break;
-        }
-        PathBSeamWeld(x, exactSeamGroups, fixed, x);   // fixed verts never moved above
-        for (const auto& e : edges) {
-            if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
-            worstAfter = std::max(worstAfter, Len(Sub(x[e.a], x[e.b])) / e.rest);
-        }
-        HLog("path-b-shell: final strain limit %.2fx corrections=%d worst %.2fx -> %.2fx (host rejects above 8x)",
-             kFinalStrain, clamped, worstBefore, worstAfter);
-    }
-    // FLIP REPAIR (2026-07-20). The solve inverts 24-33 faces at the attach
-    // boundary (one vert pinned, one free; z70-94, gap 0.2-0.5) and the hard
-    // reconciliation adds ~11 more. Production ships 1 flip; the raw vanilla
-    // pose has 14 - so repairs of this class are normal pipeline behaviour,
-    // not cosmetics. Any face inverted relative to its AUTHORED orientation
-    // gets its movable vertices blended toward the nominal (base+raw) pose,
-    // a little per round, until it rights itself. Nominal is a known-good
-    // orientation source; blending toward it can't tear (it is the anchor
-    // pose) and only touches vertices of broken faces.
-    if (EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
-        int repaired = 0, rounds = 0;
-        std::vector<uint8_t> touchedPinned(n, 0);
-        for (; rounds < 30; ++rounds) {
-            // weld FIRST each round: the seam weld snaps twins and can
-            // re-invert a face the previous round repaired (the stubborn
-            // z88 centre-line flips sit exactly on the lacing seam) - so
-            // the stop condition must see the post-weld state.
-            PathBSeamWeld(x, exactSeamGroups, fixed, x);
+            strainMovesT += strainMoved;
+            // (d) flip/collapse repair pull toward the nominal pose
             int flipped = 0;
-            std::vector<uint8_t> pull(n, 0);
-            for (const auto& tr : tris) {
-                const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
-                                      Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
-                const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
-                                      Sub(x[tr[2]], x[tr[0]]));
-                const float ab = Len(nb), ax = Len(nx);
-                if (ab <= 1.0e-9f) continue;
-                if (Dot(nb, nx) >= 0.0f && ax >= 0.10f * ab) continue;
-                ++flipped;
-                // pinned verts too: 4 of the stubborn flips are ALL-pinned
-                // sleeve faces our own anchor projection broke. We own those
-                // targets; undoing the projection where it inverts a face is
-                // legitimate (re-floored below).
-                for (int k = 0; k < 3; ++k) pull[tr[(size_t)k]] = 1;
+            if (flipRepairOn) {
+                std::vector<uint8_t> pull(n, 0);
+                for (const auto& tr : tris) {
+                    const Vec3 nb = Cross(Sub(baseVerts[tr[1]], baseVerts[tr[0]]),
+                                          Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
+                    const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
+                                          Sub(x[tr[2]], x[tr[0]]));
+                    const float ab = Len(nb), ax = Len(nx);
+                    if (ab <= 1.0e-9f) continue;
+                    if (Dot(nb, nx) >= 0.0f && ax >= 0.10f * ab) continue;
+                    ++flipped;
+                    // pinned verts too: some stubborn flips are ALL-pinned
+                    // sleeve faces our own anchor projection broke; undoing
+                    // the projection there is legitimate (re-floored below).
+                    for (int k = 0; k < 3; ++k) pull[tr[(size_t)k]] = 1;
+                }
+                if (flipped > 0) {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!pull[i]) continue;
+                        const Vec3 nom = Add(baseVerts[i], raw[i]);
+                        x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
+                        if (fixed[i]) touchedPinned[i] = 1;
+                    }
+                }
             }
-            repaired = flipped;
-            if (flipped == 0) break;
-            int moved = 0;
-            for (size_t i = 0; i < n; ++i) {
-                if (!pull[i]) continue;
-                const Vec3 nom = Add(baseVerts[i], raw[i]);
-                x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
-                if (fixed[i]) touchedPinned[i] = 1;
-                ++moved;
+            lastFlipped = flipped;
+            // (e) weld LAST so the stop condition sees the post-weld state
+            // (the weld can re-break what a repair just fixed - lacing seam)
+            PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
+            if (contactMoved == 0 && strainMoved == 0 && flipped == 0) break;
+        }
+        // TRAPPED-VERT EVICTION (2026-07-21): the heavy morph CLOSES pockets
+        // (armpit crease) around cloth the sim let fall into them. Contact
+        // reaches a dynamic equilibrium against strain at 0.8-1.8u INSIDE the
+        // flesh there - the skin patches the user circled. Cloth inside flesh
+        // is never a valid sim outcome. Any authored-OUTSIDE vert still
+        // penetrating after the unified loop defers toward its NOMINAL pose
+        // (base+raw, the entry state proves it body-clean), with strain and
+        // weld interleaved so the rescue cannot tear what the loop settled.
+        if (fullBody.valid) {
+            int evRounds = 0, evTotal = 0;
+            for (; evRounds < 20; ++evRounds) {
+                int evicted = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (fixed[i]) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;  // authored-inside: parity
+                    float g = 0.0f;
+                    if (!BVHSignedGap(fullBody, x[i], g, nullptr)) continue;
+                    if (g >= -0.05f) continue;
+                    const Vec3 nom = Add(baseVerts[i], raw[i]);
+                    x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
+                    ++evicted;
+                }
+                evTotal += evicted;
+                if (evicted == 0) break;
+                for (const auto& e : edges) {
+                    if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
+                    const float wA = fixed[e.a] ? 0.0f : 1.0f;
+                    const float wB = fixed[e.b] ? 0.0f : 1.0f;
+                    const float wSum = wA + wB;
+                    if (wSum <= 0.0f) continue;
+                    Vec3 d = Sub(x[e.b], x[e.a]);
+                    const float len = Len(d);
+                    const float maxLen = e.rest * kFinalStrain;
+                    if (len <= maxLen || len < 1.0e-9f) continue;
+                    Vec3 corr = Scale(d, (len - maxLen) / (len * wSum));
+                    x[e.a] = Add(x[e.a], Scale(corr, wA));
+                    x[e.b] = Sub(x[e.b], Scale(corr, wB));
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
             }
-            if (moved == 0) break;
+            HLog("path-b-shell: trapped-vert eviction rounds=%d pulls=%d",
+                 evRounds, evTotal);
         }
         // re-floor only the pinned verts the repair moved (feasible tier)
         for (size_t i = 0; i < n; ++i) {
@@ -10374,11 +10445,16 @@ static bool PathBSimV2Solve(
                 x[i] = Add(cp, Scale(nrm, floor));
         }
         PathBSeamWeld(x, exactSeamGroups, fixed, x);
-        HLog("path-b-shell: flip repair rounds=%d lastFlipped=%d",
-             rounds, repaired);
+        float worstEdge = 0.0f;
+        for (const auto& e : edges) {
+            if (e.a >= n || e.b >= n || e.rest <= 1.0e-6f) continue;
+            worstEdge = std::max(worstEdge, Len(Sub(x[e.a], x[e.b])) / e.rest);
+        }
+        HLog("path-b-shell: unified finish rounds=%d contactMoves=%d strainMoves=%d flipsLeft=%d worstFace=%.4f worstEdge=%.2fx (host rejects above 8x)",
+             rounds, contactMovesT, strainMovesT, lastFlipped, worstFinalFace,
+             worstEdge);
     }
-
-    driftAt("after-final-strain");
+    driftAt("after-unified-finish");
     // PINNED-DRIFT AUDIT: a pinned vertex must end at its anchor target. If it
     // does not, something downstream is moving vertices it must not touch -
     // which is exactly the open contradiction (edges with BOTH ends pinned
