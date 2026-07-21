@@ -9187,7 +9187,22 @@ static bool PathBSimV2Solve(
         const float kVertHardF =
             std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
         for (size_t i = 0; i < n; ++i) {
-            if (authoredGapArr[i] < -0.1f) { vertHardFloor[i] = -1.0e9f; continue; }
+            if (authoredGapArr[i] < -0.1f) {
+                // AUTHORED-INSIDE FLOOR (2026-07-21). This used to be "no
+                // floor at all", on the theory that cloth the artist put
+                // inside the body (knee straps at -4..-6u) should be left
+                // alone. Measured against production on the live capture,
+                // that theory is wrong: 46 authored-inside verts end up
+                // penetrating in our result while production resolves every
+                // one of them. The correct parity is the project's own radial
+                // rule - the body may push cloth OUT, never suck it IN - so
+                // the floor is the vertex's OWN authored depth. Feasible by
+                // construction (it held at authoring time) and it cannot
+                // shove anchors out the way the old radial floor did, because
+                // a vert already at authored depth is already satisfied.
+                vertHardFloor[i] = authoredGapArr[i];
+                continue;
+            }
             vertHardFloor[i] = kRadialFloors
                 ? contactFloor[i]
                 : std::min(contactFloor[i], kVertHardF);
@@ -9709,10 +9724,19 @@ static bool PathBSimV2Solve(
                 // pinned-drift audit as 650 drifted verts right after the morph
                 // loop - which is what tore edges whose BOTH ends are pinned to
                 // 21.4x rest, above the host's 8x rejection ceiling.
+                // AUTHORED-INSIDE (2026-07-21): these verts used to be excluded
+                // here entirely. That was right against the old RADIAL floor
+                // (max(authoredGap, clearance) shoved a strap authored 4u deep
+                // fully outside - the 8.1u anchor drift that tore both-pinned
+                // edges), but wrong in general: authored-inside cloth is ALWAYS
+                // pinned (gap <= attach), so excluding it here left it with no
+                // pass at all, and the heavy morph then swallowed it - 46 verts
+                // penetrating that production resolves. vertHardFloor now holds
+                // each vert's OWN authored depth, so the projection only fires
+                // when the morph made it deeper than the artist placed it.
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                 float d2 = 0.0f;
-                if (authoredGapArr[i] >= -0.1f &&
-                    BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
+                if (BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
                     const float dist = std::sqrt(d2);
                     const float gap =
                         Dot(Sub(anchorTarget[i], cp), nrm) < 0.0f ? -dist : dist;
@@ -9786,7 +9810,7 @@ static bool PathBSimV2Solve(
             for (size_t i = 0; i < n; ++i) {
                 if (!fixed[i]) continue;
                 anchorTarget[i] = Add(Add(baseVerts[i], Scale(raw[i], t)), disp[i]);
-                if (authoredGapArr[i] >= -0.1f) {
+                {
                     Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                     float d2 = 0.0f;
                     if (BVHClosestPoint(body, anchorTarget[i], cp, nrm, d2)) {
@@ -10393,6 +10417,8 @@ static bool PathBSimV2Solve(
             std::max(1.05f, EnvFloat("DRAPE_SHELL_FINAL_STRAIN", 2.0f));
         const float kVertHard =
             std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+        const bool kPinContact = EnvFloat("DRAPE_SHELL_PIN_CONTACT", 1.0f) > 0.5f;
+        const float kPinCap = std::max(0.05f, EnvFloat("DRAPE_SHELL_PIN_CAP", 1.0f));
         std::vector<Vec3> lastAnchor(n);
         for (size_t i = 0; i < n; ++i)
             lastAnchor[i] = Add(baseVerts[i], raw[i]);
@@ -10405,8 +10431,19 @@ static bool PathBSimV2Solve(
             // (a) vertex contact, corridor-clamped like the in-loop pass
             if (fullBody.valid) {
                 for (size_t i = 0; i < n; ++i) {
-                    if (fixed[i]) continue;
-                    if (authoredGapArr[i] < -0.1f) continue;  // authored-inside: parity
+                    // PINNED VERTS RESOLVE TOO (2026-07-21). They used to be
+                    // skipped outright, which left two whole defect classes
+                    // with no pass that could reach them: authored-inside
+                    // cloth (always pinned, since its gap is below attach) and
+                    // the arm band. Measured against the reference: production
+                    // does NOT preserve authored depth - it evicts that cloth
+                    // to the surface, and its final has 0 of those penetrating
+                    // where ours had 40. Pinned verts move under a hard cap on
+                    // displacement from their anchor, so the band still follows
+                    // the conform; the old failure (8.1u anchor drift, tears)
+                    // came from an uncapped snap to an infeasible radial floor.
+                    const bool pinned = fixed[i] != 0;
+                    if (pinned && !kPinContact) continue;
                     Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                     float d2 = 0.0f;
                     if (!BVHClosestPoint(fullBody, x[i], cp, nrm, d2)) continue;
@@ -10436,6 +10473,14 @@ static bool PathBSimV2Solve(
                     const float moveLen = Len(move);
                     if (moveLen > 0.5f) move = Scale(move, 0.5f / moveLen);
                     x[i] = Add(x[i], move);
+                    if (pinned) {
+                        // hard cap on total drift from the anchor: the band
+                        // must still follow the conform
+                        Vec3 off = Sub(x[i], lastAnchor[i]);
+                        const float ol = Len(off);
+                        if (ol > kPinCap)
+                            x[i] = Add(lastAnchor[i], Scale(off, kPinCap / ol));
+                    }
                     ++contactMoved;
                 }
                 // (b) face contact (corridor clamp inside; crawl mode here)
@@ -10511,10 +10556,14 @@ static bool PathBSimV2Solve(
                 int evicted = 0;
                 for (size_t i = 0; i < n; ++i) {
                     if (fixed[i]) continue;
-                    if (authoredGapArr[i] < -0.1f) continue;  // authored-inside: parity
                     float g = 0.0f;
                     if (!BVHSignedGap(fullBody, x[i], g, nullptr)) continue;
-                    if (g >= -0.05f) continue;
+                    // authored-inside cloth is only "trapped" if we made it
+                    // DEEPER than the artist placed it
+                    const float bad = authoredGapArr[i] < -0.1f
+                        ? vertHardFloor[i] - 0.05f
+                        : -0.05f;
+                    if (g >= bad) continue;
                     const Vec3 nom = Add(baseVerts[i], raw[i]);
                     x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
                     ++evicted;
@@ -19892,8 +19941,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
 
-        if (!finalAccepted)
-            finalVerts = pathBShellPublishedReference;
+        if (!finalAccepted) {
+            // FALLBACK CHOICE (2026-07-21). Reverting unconditionally to the
+            // RAW shell candidate throws away everything the production
+            // cleaners (layer tuck, body clearance, anti-clip floor) just
+            // fixed. Measured on the user's live scene: the cleaned final had
+            // pen=98 while the raw candidate had pen=294 - and the raw one is
+            // what shipped, which is precisely the skin-through-the-sleeve he
+            // circled. A rejection must fall back to something SAFER than
+            // what it rejected, never to a state with more body penetration.
+            const bool rawIsCleaner =
+                referenceIntegrity.penetrations <= finalIntegrity.penetrations &&
+                referenceIntegrity.worstPenetration <=
+                    finalIntegrity.worstPenetration + 1.0e-4f;
+            if (rawIsCleaner) {
+                finalVerts = pathBShellPublishedReference;
+            } else {
+                finalReason += " (kept post-pass pose: raw candidate pen=" +
+                    std::to_string(referenceIntegrity.penetrations) + " > final pen=" +
+                    std::to_string(finalIntegrity.penetrations) + ")";
+            }
+        }
         // The downstream proxy must always match the pose this transaction
         // actually publishes, including its deterministic fallback.
         downstreamColliderProxy.clear();
@@ -19978,6 +20046,37 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kRepairStrain =
             std::max(1.05f, EnvFloat("DRAPE_SHELL_REPAIR_STRAIN", 2.0f));
 
+        // BODY-AWARE REPAIR (2026-07-21). THE sleeve defect. This pass fixes
+        // inverted faces by pulling their verts toward the NOMINAL pose - but
+        // nominal is production's ENTRY, which itself penetrates the body in
+        // 212 places, and the pull had no body term at all. Measured on the
+        // user's live capture: body penetration 97 with this pass off, 211
+        // with it on. It was repairing flips by burying cloth in flesh, which
+        // is exactly the skin-through-the-sleeve he circled.
+        // The pass is still essential (without it: 973 inverted faces on
+        // vampire), so instead of weakening it, give it a floor: a vert may
+        // never end up deeper than the pose being pulled toward, and cloth
+        // whose nominal sits OUTSIDE the body may not enter it at all.
+        std::vector<float> repairFloor;
+        const bool repairBodyAware =
+            bodyBVH && bodyBVH->valid &&
+            EnvFloat("DRAPE_SHELL_REPAIR_BODY", 1.0f) > 0.5f;
+        if (repairBodyAware) {
+            // The floor is the clearance the pipeline ALREADY achieved on this
+            // vertex, not the nominal pose's. Nominal is production's entry and
+            // penetrates in 212 places; the downstream cleaners had just cut
+            // that to 97, and anchoring the floor at nominal would license the
+            // repair to undo exactly that work (measured: it did - 97 -> 211).
+            // Invariant: repair flips, never regress body clearance.
+            repairFloor.assign(n, 0.0f);
+            for (size_t i = 0; i < n; ++i) {
+                float gBefore = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], gBefore, nullptr))
+                    gBefore = 0.0f;
+                repairFloor[i] = std::min(gBefore, 0.0f);
+            }
+        }
+
         int lastFlipped = 0, rounds = 0;
         for (; rounds < 20; ++rounds) {
             int flipped = 0;
@@ -20030,6 +20129,44 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         ++over;
                     }
                     if (over == 0) break;
+                }
+            }
+            // body floor: the repair may not bury cloth deeper than the pose
+            // it pulls toward (see BODY-AWARE REPAIR above)
+            if (repairBodyAware) {
+                // ALL verts, not just the flipped faces': the seam weld snaps
+                // whole twin groups and the strain cap moves both ends of every
+                // over-stretched edge, so the repair drags NEIGHBOURS into the
+                // body too (measured: guarding only pull[] left 208 of the 211
+                // penetrations in place).
+                for (size_t i = 0; i < n; ++i) {
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2))
+                        continue;
+                    const float dist = std::sqrt(d2);
+                    const float gap =
+                        Dot(Sub(finalVerts[i], cp), nrm) < 0.0f ? -dist : dist;
+                    if (gap >= repairFloor[i]) continue;
+                    Vec3 target = Add(cp, Scale(nrm, repairFloor[i]));
+                    // corridor clamp: never resolve one side by entering the
+                    // other (armpit pinch)
+                    float tGap = 0.0f;
+                    if (BVHSignedGap(*bodyBVH, target, tGap, nullptr) &&
+                        tGap < repairFloor[i]) {
+                        Vec3 mid = Scale(Add(target, finalVerts[i]), 0.5f);
+                        if (BVHSignedGap(*bodyBVH, mid, tGap, nullptr) &&
+                            tGap < repairFloor[i])
+                            continue;
+                        target = mid;
+                    }
+                    finalVerts[i] = target;
+                }
+                for (const auto& g : seams) {
+                    Vec3 mean{0.0f, 0.0f, 0.0f};
+                    for (uint32_t vi : g) mean = Add(mean, finalVerts[vi]);
+                    mean = Scale(mean, 1.0f / (float)g.size());
+                    for (uint32_t vi : g) finalVerts[vi] = mean;
                 }
             }
         }
