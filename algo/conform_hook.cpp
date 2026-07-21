@@ -50,6 +50,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <queue>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -9259,6 +9260,55 @@ static bool PathBSimV2Solve(
         PathBDumpTris(baseVerts, tris, "drape_live_authored.obj");
         PathBDumpTris(morphedBody.verts, morphedBody.tris, "drape_live_body.obj");
     }
+    // LRA - LONG RANGE ATTACHMENTS (2026-07-21). Real cloth hangs from its
+    // suspension by INEXTENSIBILITY: no point can be farther from its support
+    // than the unstretched material path. The live scene showed what its
+    // absence costs: the whole dress slides ~2-4u off the production pose,
+    // the bodice presses into the flesh, the corset back opening gapes and
+    // the laces crush. Per-edge strain limits cannot stop that (each edge is
+    // legal; the SUM drifts). Standard XPBD remedy: each free vertex keeps a
+    // tether to its geodesically nearest PINNED vertex, capped at rest-path
+    // length x slack. Dijkstra over authored edge lengths; slack via
+    // DRAPE_SHELL_LRA (1.0-1.15 typical; 0 = off).
+    const float kLraSlack = EnvFloat("DRAPE_SHELL_LRA", 0.0f);
+    std::vector<uint32_t> lraAnchor(n, UINT32_MAX);
+    std::vector<float> lraDist(n, 1.0e30f);
+    if (kLraSlack > 0.5f) {
+        std::vector<std::vector<std::pair<uint32_t, float>>> adj(n);
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            const auto& e = edges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            const float w = std::max(baseEdgeRest[ei], 1.0e-4f);
+            adj[e.a].push_back({e.b, w});
+            adj[e.b].push_back({e.a, w});
+        }
+        using QE = std::pair<float, uint32_t>;
+        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+        for (size_t i = 0; i < n; ++i) {
+            if (!fixed[i]) continue;
+            lraDist[i] = 0.0f;
+            lraAnchor[i] = (uint32_t)i;
+            pq.push({0.0f, (uint32_t)i});
+        }
+        while (!pq.empty()) {
+            const auto [d, u] = pq.top();
+            pq.pop();
+            if (d > lraDist[u] + 1.0e-6f) continue;
+            for (const auto& [v, w] : adj[u]) {
+                if (d + w < lraDist[v] - 1.0e-6f) {
+                    lraDist[v] = d + w;
+                    lraAnchor[v] = lraAnchor[u];
+                    pq.push({lraDist[v], v});
+                }
+            }
+        }
+        size_t tethered = 0;
+        for (size_t i = 0; i < n; ++i)
+            if (!fixed[i] && lraAnchor[i] != UINT32_MAX) ++tethered;
+        HLog("path-b-shell: LRA tethers built slack=%.2f tethered=%zu/%zu",
+             kLraSlack, tethered, n - (size_t)std::count(fixed.begin(),
+                                                         fixed.end(), 1));
+    }
     const float meanArea = freeCount ? (float)(areaSum / (double)freeCount) : 1.0f;
     // MOBILITY != MASS (hard-won): scaling invMass down across the worn band
     // gave transition verts near-infinite mass; uniform gravity still pulls
@@ -9673,8 +9723,32 @@ static bool PathBSimV2Solve(
                     // gap is 6.0u was shoved 7.9u to satisfy a 6u standoff
                     // (measured on v336), which is the pinned-vertex tear.
                     const float floor = vertHardFloor[i];
-                    if (floor > -1.0e8f && gap < floor)
-                        anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                    if (floor > -1.0e8f && gap < floor) {
+                        Vec3 target = Add(cp, Scale(nrm, floor));
+                        // corridor clamp (2026-07-21): in the armpit pinch the
+                        // nearest-normal projection lands INSIDE the other
+                        // feature - neighbouring anchors get thrown to opposite
+                        // sides and their both-pinned edges tear at 9.56x (the
+                        // strain pass rightly refuses to move pinned ends).
+                        // Crawl to the least-penetrating point instead.
+                        float tGap = 0.0f;
+                        if (BVHSignedGap(body, target, tGap, nullptr) &&
+                            tGap < 0.0f) {
+                            float bestGap = gap;
+                            Vec3 best = anchorTarget[i];
+                            for (int s = 1; s <= 4; ++s) {
+                                Vec3 cand = Add(anchorTarget[i],
+                                    Scale(Sub(target, anchorTarget[i]),
+                                          (float)s / 4.0f));
+                                float cg = 0.0f;
+                                if (!BVHSignedGap(body, cand, cg, nullptr))
+                                    continue;
+                                if (cg > bestGap) { bestGap = cg; best = cand; }
+                            }
+                            target = best;
+                        }
+                        anchorTarget[i] = target;
+                    }
                 }
                 x[i] = anchorTarget[i];
             }
@@ -9720,8 +9794,27 @@ static bool PathBSimV2Solve(
                         const float gap =
                             Dot(Sub(anchorTarget[i], cp), nrm) < 0.0f ? -dist : dist;
                         const float floor = vertHardFloor[i];
-                        if (floor > -1.0e8f && gap < floor)
-                            anchorTarget[i] = Add(cp, Scale(nrm, floor));
+                        if (floor > -1.0e8f && gap < floor) {
+                            Vec3 target = Add(cp, Scale(nrm, floor));
+                            // corridor clamp: same rule as the projection above
+                            float tGap = 0.0f;
+                            if (BVHSignedGap(body, target, tGap, nullptr) &&
+                                tGap < 0.0f) {
+                                float bestGap = gap;
+                                Vec3 best = anchorTarget[i];
+                                for (int s = 1; s <= 4; ++s) {
+                                    Vec3 cand = Add(anchorTarget[i],
+                                        Scale(Sub(target, anchorTarget[i]),
+                                              (float)s / 4.0f));
+                                    float cg = 0.0f;
+                                    if (!BVHSignedGap(body, cand, cg, nullptr))
+                                        continue;
+                                    if (cg > bestGap) { bestGap = cg; best = cand; }
+                                }
+                                target = best;
+                            }
+                            anchorTarget[i] = target;
+                        }
                     }
                 }
                 x[i] = anchorTarget[i];
@@ -9866,6 +9959,21 @@ static bool PathBSimV2Solve(
                         x[e.a] = Add(x[e.a], Scale(corr, wA));
                         x[e.b] = Sub(x[e.b], Scale(corr, wB));
                     }
+                }
+            }
+            // LRA projection: a free vertex may never be farther from its
+            // pinned anchor than the unstretched material path allows. The
+            // anchor's CURRENT position is anchorTarget (this morph step's
+            // pose), so the tether follows the conform naturally.
+            if (kLraSlack > 0.5f) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (fixed[i] || lraAnchor[i] == UINT32_MAX) continue;
+                    const Vec3& a = anchorTarget[lraAnchor[i]];
+                    Vec3 d = Sub(x[i], a);
+                    const float len = Len(d);
+                    const float maxLen = lraDist[i] * kLraSlack;
+                    if (len <= maxLen || len < 1.0e-9f) continue;
+                    x[i] = Add(a, Scale(d, maxLen / len));
                 }
             }
             if (bendGS)
