@@ -10431,6 +10431,31 @@ static void PathBDumpLivePublished(const std::vector<Vec3>& verts,
          verts.size(), path.c_str());
 }
 
+// TRUE-OUTPUT live dump (2026-07-21). The dump above is MID-pipeline: the
+// production passes (tuck, caps, prox-seam, anti-clip) and the last-chance
+// flip repair all run AFTER it and change the mesh - measured live: 23 flips
+// at the publish dump, 42 after the passes, 15 published. Rendering the mid
+// dump is how "my render" and "his OutfitStudio" diverged. This one is
+// written at the outDiff write, where NOTHING runs after - it is exactly
+// what the host receives. Dumped even when the shell was rejected, because
+// the rejected path's output is still what the user's eye judges.
+static void PathBDumpLiveFinal(const std::vector<Vec3>& verts,
+                               const char* shape, bool accepted) {
+    const char* tmp = getenv("TEMP");
+    if (!tmp) return;
+    std::string path = std::string(tmp) + "\\drape_live_final__" +
+                       SafeFilePart(shape) + ".obj";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    fprintf(f, "# live FINAL output shape=%s verts=%zu shellAccepted=%d\n",
+            shape, verts.size(), accepted ? 1 : 0);
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
+    fclose(f);
+    HLog("path-b-shell: live FINAL dumped (%zu verts, accepted=%d) -> %s",
+         verts.size(), accepted ? 1 : 0, path.c_str());
+}
+
 // The real solver body. NEVER call this directly outside the ApplyStaticClothPass
 // wrapper below (U1, crash containment) Ã¢â‚¬â€ this function and everything it calls
 // is where a bug in ~8000 lines of solver code could raise a hardware exception
@@ -19828,6 +19853,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("last-chance flip repair: rounds=%d remaining=%d",
                  rounds, lastFlipped);
     }
+
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (pathBShellRequested && pathBShellScoped)
+        PathBDumpLiveFinal(finalVerts, shapeName.c_str(), pathBShellAccepted);
+#endif
 
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {
