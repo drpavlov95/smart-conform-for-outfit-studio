@@ -144,6 +144,22 @@ static PfnSetResultDiff    g_setResultDiff     = nullptr;
 static HWND        g_osHwnd = nullptr;
 static std::string g_bsDir;
 static DrapeOptions g_opts;        // tight/loose distances
+
+// Flag files. These used to be checked as hardcoded absolute paths on the
+// developer's machine ("E:/SkyrimDev/Drape/x.flag" x37), which leaks that path
+// into every shipped DLL and works on exactly one computer. Resolution order:
+//   1. <BodySlide dir>/DrapeFlags/<name>   (shippable: next to the tool)
+//   2. <BodySlide dir>/<name>
+//   3. the legacy dev path                 (keeps the current workflow alive)
+// Cheap enough for pass-level checks; never call it per vertex.
+static bool DrapeFlagExists(const char* name) {
+    std::error_code ec;
+    if (!g_bsDir.empty()) {
+        if (fs::exists(fs::path(g_bsDir) / "DrapeFlags" / name, ec)) return true;
+        if (fs::exists(fs::path(g_bsDir) / name, ec)) return true;
+    }
+    return fs::exists(fs::path("E:/SkyrimDev/Drape") / name, ec);
+}
 // Disabled by default so the vanilla Conform All / Conform Selected pass through
 // UNCHANGED. version.dll flips this on only for the duration of a Smart Conform.
 static std::atomic_bool g_enabled{false};
@@ -924,7 +940,7 @@ static ResolvedPresetChoice ResolvePresetForShapeLocked(const std::string& shape
             bool rerouteFitted = EnvToggle("DRAPE_ROUTE_FITTED", false);
 #if !defined(DRAPE_HARNESS_BUILD)
             rerouteFitted = rerouteFitted ||
-                            fs::exists("E:/SkyrimDev/Drape/route_fitted.flag");
+                            DrapeFlagExists("route_fitted.flag");
 #endif
             if (rerouteFitted &&
                 out.effectivePreset == DRAPE_PRESET_LOOSE_DRAPED) {
@@ -9187,7 +9203,7 @@ static bool PathBSimV2Solve(
     // 5288 -> 637 corrections (the clamp is what visibly crumples the dress),
     // magnetism 1131 -> 838 and body penetration 147 -> 115, at the cost of
     // flips 98 -> 140 and torso-vs-belt face residual 79 -> 397.
-    if (fs::exists("E:/SkyrimDev/Drape/graded_rest_on.flag")) gradedRest = true;
+    if (DrapeFlagExists("graded_rest_on.flag")) gradedRest = true;
 #endif
     std::vector<float> baseEdgeRest(edges.size(), 0.0f);
     std::vector<float> targetEdgeRest(edges.size(), 0.0f);
@@ -9405,7 +9421,7 @@ static bool PathBSimV2Solve(
     // Gated by DRAPE_SHELL_SKIN_BIND / skin_bind_on.flag for A/B.
     bool skinBind = EnvToggle("DRAPE_SHELL_SKIN_BIND", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/skin_bind_on.flag")) skinBind = true;
+    if (DrapeFlagExists("skin_bind_on.flag")) skinBind = true;
 #endif
     struct SkinBind { int tri = -1; float w0 = 0, w1 = 0, w2 = 0, off = 0; };
     std::vector<SkinBind> skinBinds;
@@ -10474,7 +10490,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     {
         bool mergeLoose = EnvToggle("DRAPE_MERGE_LOOSE", true);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (fs::exists("E:/SkyrimDev/Drape/loose_split.flag"))
+        if (DrapeFlagExists("loose_split.flag"))
             mergeLoose = false;
 #endif
         if (mergeLoose && NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) {
@@ -10494,7 +10510,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #if defined(DRAPE_HARNESS_BUILD)
         false;
 #else
-        fs::exists("E:/SkyrimDev/Drape/loose_contact_floor_on.flag");
+        DrapeFlagExists("loose_contact_floor_on.flag");
 #endif
     if (isLoosePreset && params.physicsDrape) {
         float floor = EnvFloat("DRAPE_LOOSE_CONTACT_FLOOR",
@@ -11102,7 +11118,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     useNoContactRadial = useNoContactRadial || (
         noContactPresetEligible &&
         bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
-        fs::exists("E:/SkyrimDev/Drape/no_contact_radial_on.flag"));
+        DrapeFlagExists("no_contact_radial_on.flag"));
 #endif
     if (useNoContactRadial) {
         const float authGapMin = EnvFloat("DRAPE_NO_CONTACT_AUTH_GAP", 0.25f);
@@ -11418,7 +11434,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     useLooseContactRest = useLooseContactRest || (
         isLoosePreset && params.physicsDrape &&
         bodyBVH && bodyBVH->valid && g_refBodyBVH.valid &&
-        fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag"));
+        DrapeFlagExists("contact_radial_on.flag"));
 #endif
     if (useLooseContactRest) {
         const float drapeMin = EnvFloat("DRAPE_LOOSE_REST_DRAPE_MIN", 0.55f);
@@ -11787,9 +11803,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     std::vector<Vec3> pathBShellIntegrityBaseline;
     bool pathBShellRequested = EnvToggle("DRAPE_SHELL_SOLVE", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/shell_solve_off.flag"))
+    if (DrapeFlagExists("shell_solve_off.flag"))
         pathBShellRequested = false;
-    else if (fs::exists("E:/SkyrimDev/Drape/shell_solve_on.flag"))
+    else if (DrapeFlagExists("shell_solve_on.flag"))
         pathBShellRequested = true;
 #endif
     // The pilot is name-scoped to one garment. That is a per-garment allowlist
@@ -11856,7 +11872,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // NaN/seam/final-floor safety still applies.
                 bool shellTransactions = EnvToggle("DRAPE_SHELL_TRANSACTIONS", true);
 #if !defined(DRAPE_HARNESS_BUILD)
-                if (fs::exists("E:/SkyrimDev/Drape/shell_transactions_off.flag"))
+                if (DrapeFlagExists("shell_transactions_off.flag"))
                     shellTransactions = false;
 #endif
                 if (!shellTransactions) closureStable = true;
@@ -12022,7 +12038,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         bool useAuthoredLineLocksPbd = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
 #if !defined(DRAPE_HARNESS_BUILD)
         useAuthoredLineLocksPbd = useAuthoredLineLocksPbd ||
-            fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
+            DrapeFlagExists("contact_radial_on.flag");
 #endif
         if (useAuthoredLineLocksPbd && NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED) {
             const float hemBand = EnvFloat("DRAPE_HEM_PIN_BAND", 0.0f);
@@ -13166,7 +13182,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #if !defined(DRAPE_HARNESS_BUILD)
         useHBridge = useHBridge || (
             NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
-            fs::exists("E:/SkyrimDev/Drape/hbridge_on.flag"));
+            DrapeFlagExists("hbridge_on.flag"));
 #endif
         HorizontalBridgeProfile hBridgeProfile;
         bool hBridgeReady = false;
@@ -13200,7 +13216,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #if !defined(DRAPE_HARNESS_BUILD)
         const bool contactRadialLiveFlag =
             NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
-            fs::exists("E:/SkyrimDev/Drape/contact_radial_on.flag");
+            DrapeFlagExists("contact_radial_on.flag");
         useContactRadial = useContactRadial || (
             contactRadialLiveFlag);
         if (shadowMaxGap <= 0.0f && contactRadialLiveFlag)
@@ -15475,9 +15491,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     auto applyOuterAccessoryInnerClearance = [&](const char* stageLabel) -> int {
         bool layerOrderPreserve = EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_off.flag"))
+        if (DrapeFlagExists("layer_order_preserve_off.flag"))
             layerOrderPreserve = false;
-        else if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_on.flag"))
+        else if (DrapeFlagExists("layer_order_preserve_on.flag"))
             layerOrderPreserve = true;
 #endif
         const bool structuredOuter =
@@ -16811,7 +16827,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 #if !defined(DRAPE_HARNESS_BUILD)
     // Live-only file gate (MO2 can't set env vars): drop/delete panels_on.flag to A/B in
     // OutfitStudio. Harness/golden runs ignore the file so the corpus baseline stays clean.
-    panelsOn = panelsOn || fs::exists("E:/SkyrimDev/Drape/panels_on.flag");
+    panelsOn = panelsOn || DrapeFlagExists("panels_on.flag");
 #endif
     // P2 (2026-07-07): the authored-shape restore also serves the LOOSE path - measured
     // on the Blacksmith front skirt: authored fold 4.27, vanilla amplifies to 6.22, the
@@ -16849,7 +16865,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         float radialInK = EnvFloat("DRAPE_PANELS_RADIAL_IN",
                                    radialBothK >= 0.0f ? radialBothK : 0.0f);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (radialInK <= 0.0f && fs::exists("E:/SkyrimDev/Drape/panel_radial_in.flag"))
+        if (radialInK <= 0.0f && DrapeFlagExists("panel_radial_in.flag"))
             radialInK = 0.06f;
 #endif
         const float radialMaxStep = EnvFloat("DRAPE_PANELS_RADIAL_STEP", 0.35f);
@@ -17440,7 +17456,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // for A/B against the user's OS export in tmp/torso_live.obj).
     bool fittedHBridge = EnvToggle("DRAPE_FITTED_HBRIDGE", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    fittedHBridge = fittedHBridge || fs::exists("E:/SkyrimDev/Drape/fitted_hbridge_on.flag");
+    fittedHBridge = fittedHBridge || DrapeFlagExists("fitted_hbridge_on.flag");
 #endif
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ CLEFT-BRIDGE SMOOTH (2026-07-10) Ã¢â€â‚¬Ã¢â€â‚¬ the butt bridge, done right this time.
@@ -17463,11 +17479,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         bool cleftOn = EnvToggle("DRAPE_CLEFT_BRIDGE", true);
         bool cleftTrueRear = EnvToggle("DRAPE_CLEFT_TRUE_REAR", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (fs::exists("E:/SkyrimDev/Drape/cleft_bridge_off.flag"))
+        if (DrapeFlagExists("cleft_bridge_off.flag"))
             cleftOn = false;
-        if (fs::exists("E:/SkyrimDev/Drape/cleft_true_rear_on.flag"))
+        if (DrapeFlagExists("cleft_true_rear_on.flag"))
             cleftTrueRear = true;
-        if (fs::exists("E:/SkyrimDev/Drape/cleft_true_rear_off.flag"))
+        if (DrapeFlagExists("cleft_true_rear_off.flag"))
             cleftTrueRear = false;
 #endif
         if (cleftOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
@@ -17811,7 +17827,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     {
         bool hemOn = EnvToggle("DRAPE_HEM_SMOOTH", true);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (fs::exists("E:/SkyrimDev/Drape/hem_smooth_off.flag")) hemOn = false;
+        if (DrapeFlagExists("hem_smooth_off.flag")) hemOn = false;
 #endif
         if (hemOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
             params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
@@ -18089,7 +18105,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 NormalizePreset(preset) != DRAPE_PRESET_BELT;
 #if !defined(DRAPE_HARNESS_BUILD)
     // Live kill-switch for A/B in OutfitStudio (MO2 can't set env vars).
-    smOn = smOn && !fs::exists("E:/SkyrimDev/Drape/sm_off.flag");
+    smOn = smOn && !DrapeFlagExists("sm_off.flag");
 #endif
     if (smOn && params.enabled && !useEdges.empty() && tris && bodyBVH && bodyBVH->valid &&
         n > 0 && n <= 0xFFFF) {
@@ -18622,9 +18638,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // explicit experiments and retain instant rollback.
     bool tensionPlumbOn = EnvToggle("DRAPE_TENSION_PLUMB", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/tension_plumb_off.flag"))
+    if (DrapeFlagExists("tension_plumb_off.flag"))
         tensionPlumbOn = false;
-    else if (fs::exists("E:/SkyrimDev/Drape/tension_plumb_on.flag"))
+    else if (DrapeFlagExists("tension_plumb_on.flag"))
         tensionPlumbOn = true;
 #endif
     auto applyTensionPlumb = [&]() {
@@ -18748,9 +18764,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kCoveredDist = EnvFloat("DRAPE_FINAL_FLOOR_COVER", 2.0f);
         bool safeTopologyFloor = EnvToggle("DRAPE_ANTICLIP_SAFE_FLOOR", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-        if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_off.flag"))
+        if (DrapeFlagExists("anticlip_safe_floor_off.flag"))
             safeTopologyFloor = false;
-        else if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_on.flag"))
+        else if (DrapeFlagExists("anticlip_safe_floor_on.flag"))
             safeTopologyFloor = true;
 #endif
         // The Path-B pilot always uses the transactional floor: its accepted
@@ -19125,9 +19141,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     bool posteriorChordOn = EnvToggle("DRAPE_POSTERIOR_CHORD", false);
     bool posteriorChordMoved = false;
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/posterior_chord_off.flag"))
+    if (DrapeFlagExists("posterior_chord_off.flag"))
         posteriorChordOn = false;
-    else if (fs::exists("E:/SkyrimDev/Drape/posterior_chord_on.flag"))
+    else if (DrapeFlagExists("posterior_chord_on.flag"))
         posteriorChordOn = true;
 #endif
     if (!pathBShellAccepted && posteriorChordOn &&
@@ -19218,9 +19234,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     bool tangentialRepairOn = EnvToggle("DRAPE_TANGENTIAL_REPAIR", false);
     bool tangentialRepairMoved = false;
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/tangential_repair_off.flag"))
+    if (DrapeFlagExists("tangential_repair_off.flag"))
         tangentialRepairOn = false;
-    else if (fs::exists("E:/SkyrimDev/Drape/tangential_repair_on.flag"))
+    else if (DrapeFlagExists("tangential_repair_on.flag"))
         tangentialRepairOn = true;
 #endif
     if (!pathBShellAccepted && !posteriorChordMoved && tangentialRepairOn &&
@@ -19317,9 +19333,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // but only the broken Vampire baseline has both failure signals together.
     bool antiClipIntegrityGuard = EnvToggle("DRAPE_ANTICLIP_SAFE_FLOOR", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_off.flag"))
+    if (DrapeFlagExists("anticlip_safe_floor_off.flag"))
         antiClipIntegrityGuard = false;
-    else if (fs::exists("E:/SkyrimDev/Drape/anticlip_safe_floor_on.flag"))
+    else if (DrapeFlagExists("anticlip_safe_floor_on.flag"))
         antiClipIntegrityGuard = true;
 #endif
     if (antiClipIntegrityGuard && shapeName == "vampire_robes_alt" &&
@@ -19563,7 +19579,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             int finalFaceReverted = 0;
             bool shellTransactionsFinal = EnvToggle("DRAPE_SHELL_TRANSACTIONS", true);
 #if !defined(DRAPE_HARNESS_BUILD)
-            if (fs::exists("E:/SkyrimDev/Drape/shell_transactions_off.flag"))
+            if (DrapeFlagExists("shell_transactions_off.flag"))
                 shellTransactionsFinal = false;
 #endif
             if (!shellTransactionsFinal) stable = true;   // sim mode: see publish-closure note
@@ -19697,7 +19713,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // canary_on.flag still looks normal, the plumbing is broken and THAT is
     // the bug - no amount of solver work would ever have been visible.
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (fs::exists("E:/SkyrimDev/Drape/canary_on.flag")) {
+    if (DrapeFlagExists("canary_on.flag")) {
         int canaryMoved = 0;
         for (size_t i = 0; i < n; ++i) {
             const float dx = finalVerts[i].x - g_refCenterX;
@@ -21754,9 +21770,9 @@ static void Detour_GenResult(
                     // forcing the Filler through the body.
                     bool layerOrderPreserve = EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-                    if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_off.flag"))
+                    if (DrapeFlagExists("layer_order_preserve_off.flag"))
                         layerOrderPreserve = false;
-                    else if (fs::exists("E:/SkyrimDev/Drape/layer_order_preserve_on.flag"))
+                    else if (DrapeFlagExists("layer_order_preserve_on.flag"))
                         layerOrderPreserve = true;
 #endif
                     std::string otherLower = lower(other);
