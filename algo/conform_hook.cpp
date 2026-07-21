@@ -9089,10 +9089,13 @@ static bool PathBSimV2Solve(
     // 6-8x; measured here as maxEdge 8.77 + 167 flips at the seam of the
     // freed region). gap<=lo -> worn/fixed; lo..hi -> mass ramps from
     // infinite to the area mass; >hi -> fully free.
-    // DEFAULT ON (2026-07-20): sleeves are fitted tubes; drape physics
-    // inverted 72 of their faces while production ships them clean. The
-    // pilot's value is the skirt. Scoping is declared, not hidden.
-    const bool kSkirtOnly = EnvFloat("DRAPE_SHELL_SKIRT_ONLY", 1.0f) > 0.5f;
+    // DEFAULT OFF (2026-07-20, cross-garment test). This pins an arm region by
+    // HARDCODED coordinates (|x|>22, z>96) tuned on the blacksmith body - a
+    // per-garment rule, which cannot ship. Measured: with the flip repair in
+    // place the blacksmith passes the whole gate WITHOUT it (0 inverted faces
+    // either way, imprint 0.0215 vs 0.0238), while yarl gets WORSE with it
+    // (5 -> 8 inverted). The repair generalises; the coordinates do not.
+    const bool kSkirtOnly = EnvFloat("DRAPE_SHELL_SKIRT_ONLY", 0.0f) > 0.5f;
     const float kAttachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
     const float kAttachHi = std::max(kAttachLo + 0.05f,
         EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
@@ -10320,7 +10323,9 @@ static bool PathBSimV2Solve(
                                       Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
                 const Vec3 nx = Cross(Sub(x[tr[1]], x[tr[0]]),
                                       Sub(x[tr[2]], x[tr[0]]));
-                if (Len2(nb) <= 1e-18f || Dot(nb, nx) >= 0.0f) continue;
+                const float ab = Len(nb), ax = Len(nx);
+                if (ab <= 1.0e-9f) continue;
+                if (Dot(nb, nx) >= 0.0f && ax >= 0.10f * ab) continue;
                 ++flipped;
                 // pinned verts too: 4 of the stubborn flips are ALL-pinned
                 // sleeve faces our own anchor projection broke. We own those
@@ -11787,8 +11792,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (fs::exists("E:/SkyrimDev/Drape/shell_solve_on.flag"))
         pathBShellRequested = true;
 #endif
+    // The pilot is name-scoped to one garment. That is a per-garment allowlist
+    // and CANNOT ship - the whole point is a general rule - so this knob drops
+    // the name check to test generalisation (anti-overfit gate in the plan:
+    // the same physics must hold on yarl/vampire before any of it is claimed).
+    const bool pathBAllShapes = EnvFloat("DRAPE_SHELL_ALL_SHAPES", 0.0f) > 0.5f;
     const bool pathBShellScoped =
-        shapeName == "BlackSmithTorso" && sliderName == "RM_Heavy" &&
+        (pathBAllShapes || shapeName == "BlackSmithTorso") &&
+        sliderName == "RM_Heavy" &&
         (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
          originalPreset == DRAPE_PRESET_LOOSE_DRAPED);
     if (pathBShellRequested && pathBShellScoped) {
@@ -19720,6 +19731,28 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 d = Vec3{it->second.x, it->second.y, it->second.z};
             return Add(baseVerts[i], d);
         };
+        // Seam groups from the AUTHORED pose: pulling individual verts toward
+        // nominal splits exact-seam twins when only some of them belong to a
+        // flipped face. Measured on vampire: the repair cut flips 973 -> 14
+        // (it is essential) but opened a 3-vert seam to 4.59u where production
+        // holds 0.000, and let free-cloth edges reach 33x rest. Both are
+        // invariants this pass must preserve, so it now welds and strain-caps
+        // inside every round.
+        std::unordered_map<uint64_t, std::vector<uint32_t>> seamMap;
+        for (size_t i = 0; i < n; ++i) {
+            const int64_t qx = (int64_t)std::llround(baseVerts[i].x / 0.003f);
+            const int64_t qy = (int64_t)std::llround(baseVerts[i].y / 0.003f);
+            const int64_t qz = (int64_t)std::llround(baseVerts[i].z / 0.003f);
+            const uint64_t key = (uint64_t)(qx * 73856093LL ^ qy * 19349663LL ^
+                                            qz * 83492791LL);
+            seamMap[key].push_back((uint32_t)i);
+        }
+        std::vector<std::vector<uint32_t>> seams;
+        for (auto& kv : seamMap)
+            if (kv.second.size() > 1) seams.push_back(std::move(kv.second));
+        const float kRepairStrain =
+            std::max(1.05f, EnvFloat("DRAPE_SHELL_REPAIR_STRAIN", 2.0f));
+
         int lastFlipped = 0, rounds = 0;
         for (; rounds < 20; ++rounds) {
             int flipped = 0;
@@ -19730,7 +19763,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                       Sub(baseVerts[tr[2]], baseVerts[tr[0]]));
                 const Vec3 nx = Cross(Sub(finalVerts[tr[1]], finalVerts[tr[0]]),
                                       Sub(finalVerts[tr[2]], finalVerts[tr[0]]));
-                if (Len2(nb) <= 1e-18f || Dot(nb, nx) >= 0.0f) continue;
+                const float ab = Len(nb), ax = Len(nx);
+                if (ab <= 1.0e-9f) continue;
+                // COLLAPSED counts as broken too: a face being un-inverted
+                // passes through zero area, and stopping there just trades an
+                // inverted face for a degenerate one (measured: all three
+                // garments failed the gate on collapsed faces only, right
+                // after the flip repair started working). Push through.
+                const bool inverted = Dot(nb, nx) < 0.0f;
+                const bool collapsed = ax < 0.10f * ab;
+                if (!inverted && !collapsed) continue;
                 ++flipped;
                 for (int k = 0; k < 3; ++k) pull[tr[(size_t)k]] = 1;
             }
@@ -19740,6 +19782,31 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (pull[i])
                     finalVerts[i] = Add(finalVerts[i],
                         Scale(Sub(nominalOf(i), finalVerts[i]), 0.30f));
+            // weld exact seams: twins must never separate
+            for (const auto& g : seams) {
+                Vec3 mean{0.0f, 0.0f, 0.0f};
+                for (uint32_t vi : g) mean = Add(mean, finalVerts[vi]);
+                mean = Scale(mean, 1.0f / (float)g.size());
+                for (uint32_t vi : g) finalVerts[vi] = mean;
+            }
+            // tension-only strain cap so the repair cannot tear the mesh
+            if (edges) {
+                for (int sr = 0; sr < 4; ++sr) {
+                    int over = 0;
+                    for (const EdgeConstraint& e : *edges) {
+                        if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+                        Vec3 d = Sub(finalVerts[e.b], finalVerts[e.a]);
+                        const float len = Len(d);
+                        const float maxLen = e.restLength * kRepairStrain;
+                        if (len <= maxLen || len < 1.0e-9f) continue;
+                        Vec3 corr = Scale(d, 0.5f * (len - maxLen) / len);
+                        finalVerts[e.a] = Add(finalVerts[e.a], corr);
+                        finalVerts[e.b] = Sub(finalVerts[e.b], corr);
+                        ++over;
+                    }
+                    if (over == 0) break;
+                }
+            }
         }
         if (rounds > 0)
             HLog("last-chance flip repair: rounds=%d remaining=%d",

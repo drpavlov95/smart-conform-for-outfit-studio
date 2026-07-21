@@ -48,9 +48,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("candidate")
     ap.add_argument("--baseline", default="../tmp/pathb/prod_bs.obj")
+    ap.add_argument("--capture", default=str(CAP))
     a = ap.parse_args()
 
-    cap = read_capture_front(CAP)
+    cap = read_capture_front(Path(a.capture))
     base, tris = cap.base_verts, np.asarray(cap.tris)
     edges = np.asarray(cap.edges)
     groups = exact_seam_groups(base)

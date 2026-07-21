@@ -1727,3 +1727,36 @@ era 1.4), sculpt surf 0.876/0.915 (prod 0.756/0.79). Corpus OFF 18/18,
 determinístico, Release deployado nas 2 pastas, sim religado.
 
 Pendente: OLHO DO USUÁRIO (gate final).
+
+## Marco 24 (2026-07-21): a física GENERALIZA — gate verde nas 3 peças, sem regra por-peça
+
+Teste anti-overfit do plano (DRAPE_SHELL_ALL_SHAPES=1 derruba o allowlist por
+nome, que NÃO pode shippar). Resultados e correções:
+
+1. ESCOPO POR COORDENADA REMOVIDO: |x|>22/z>96 era calibrado no blacksmith.
+   Medido: com o flip repair no lugar o blacksmith passa o gate SEM ele
+   (0 invertidas dos dois jeitos; imprint 0.0215 vs 0.0238), e yarl PIORA com
+   ele (5 -> 8 invertidas). SKIRT_ONLY default 0. Zero regra por-peça agora.
+2. REPARO FINAL preservava invariantes de menos: puxava vértices soltos sem
+   soldar costura nem limitar tensão. No vampire abria costura de 3 vértices
+   a 4.59u (produção 0.000) e deixava aresta livre a 33.4x. Agora solda os
+   grupos exatos e aplica cap de tensão 2.0x DENTRO de cada rodada:
+   costura 4.59 -> 0.19u, esticamento 33.4 -> 2.01x.
+   (Ablação provou que o reparo é essencial: sem ele o vampire tem 973
+   faces invertidas contra 14-24 com ele.)
+3. COLAPSO É DEFEITO REPARÁVEL: desvirar uma face passa por área zero, então
+   parar no meio troca invertida por degenerada — as 3 peças falhavam SÓ em
+   colapsadas depois do (2). Tratando colapso junto: 0 colapsadas nas três.
+
+GATE FINAL (todas LIBERADAS):
+  blacksmith  0 invert / 0 braços / 0 colapsadas / 0.00 costura / 6.69 stretch
+  yarl        5 (lim 7) / 0 / 0 / 0.01 / 2.00
+  vampire    23 (lim 34) / 11 (lim 26) / 0 / 0.19 / 2.01
+
+QUALIDADE (produção -> sim): imprint blacksmith 0.0845->0.0238 GANHA,
+yarl 0.0631->0.0000 GANHA, vampire 0.1753->0.2487 PERDE. Sculpt fwd:
+0.756->0.896, 0.259->0.510, 0.510->0.594 — a PRODUÇÃO ainda ganha nas três.
+
+Honestidade: defeitos resolvidos e generalizando; imprint 2 de 3; sculpt
+ainda atrás. ALL_SHAPES fica default 0 (piloto blacksmith ao vivo) até o
+usuário aprovar visualmente. Corpus OFF 18/18, determinístico, deployado.
