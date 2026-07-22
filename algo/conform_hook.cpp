@@ -16090,6 +16090,24 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         };
 
         int totalTucked = 0;
+        // ENTRY DIAGNOSTIC (2026-07-22): is the rear under-belt band already
+        // inside the body when this pass STARTS? The shell hands off clean, so
+        // if it is already penetrating here the culprit is an earlier tail pass.
+        if (bodyBVH && bodyBVH->valid && EnvFloat("DRAPE_TUCK_DIAG", 0.0f) > 0.5f) {
+            float worst = 1.0e9f;
+            int pen = 0;
+            for (size_t i = 0; i < n && i < finalVerts.size(); ++i) {
+                const Vec3& b = baseVerts[i];
+                if (g_refCenterY - b.y <= 1.5f) continue;
+                if (b.z < 68.0f || b.z > 80.0f) continue;
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                worst = std::min(worst, g);
+                if (g < -0.3f) ++pen;
+            }
+            HLog("detour: TUCK-DIAG-ENTRY stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
+                 stageLabel ? stageLabel : "", worst, pen);
+        }
         int totalFaceTucked = 0;
         int noRoomSkipped = 0;
         for (int round = 0; round < kRounds; ++round) {
