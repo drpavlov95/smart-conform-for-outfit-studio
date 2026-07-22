@@ -15336,7 +15336,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (useEdges.empty()) return 0;
         const bool innerLooseSupportCap =
             isLoosePreset && outerColliders && !outerColliders->empty();
-        const float kFinalSupportCap = innerLooseSupportCap ? 1.08f : 1.12f;
+        // A/B knob (2026-07-22, default = the shipped values, byte-identical):
+        // this cap moves ~2016 verts on the blacksmith and is the biggest mover
+        // in the tail, so it is the prime suspect for driving the rear
+        // under-belt band into the body (8 verts at -1.19 by the time the layer
+        // tuck starts, where production keeps them at +0.06).
+        const float kFinalSupportCap =
+            EnvFloat("DRAPE_FINAL_SUPPORT_CAP",
+                     innerLooseSupportCap ? 1.08f : 1.12f);
         auto applySupportDelta = [&](uint32_t v, const Vec3& delta) {
             if (v >= n) return;
             if (!exactSeamGroupOf.empty() && v < exactSeamGroupOf.size()) {
@@ -16105,8 +16112,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 worst = std::min(worst, g);
                 if (g < -0.3f) ++pen;
             }
-            HLog("detour: TUCK-DIAG-ENTRY stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
-                 stageLabel ? stageLabel : "", worst, pen);
+            HLog("detour: TUCK-DIAG-ENTRY shape='%s' stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
+                 shapeName.c_str(), stageLabel ? stageLabel : "", worst, pen);
         }
         int totalFaceTucked = 0;
         int noRoomSkipped = 0;
@@ -16276,8 +16283,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 worst = std::min(worst, g);
                 if (g < -0.3f) ++pen;
             }
-            HLog("detour: TUCK-DIAG stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
-                 stageLabel ? stageLabel : "", worst, pen);
+            HLog("detour: TUCK-DIAG shape='%s' stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
+                 shapeName.c_str(), stageLabel ? stageLabel : "", worst, pen);
         }
         return totalTucked;
     };
