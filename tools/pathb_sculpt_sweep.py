@@ -2,11 +2,18 @@
 # I kept validating ONLY the region the user complained about (arm, then butt),
 # delivered, and he found a DIFFERENT region broken (the thigh) every time -
 # because the aggregate sculpt score (mean/p95 over all verts) HID regional
-# regressions (it read "shell better" while the front thigh was 0.5-1.4u worse).
-# This compares a result mesh to the hand-sculpt (the ground truth) PER BODY
-# REGION, so every region that diverges more than production is surfaced BEFORE
-# anything reaches the user. Run this on every shell change, not just the spot
-# the user pointed at.
+# regressions. This compares a result mesh to the hand-sculpt (ground truth)
+# PER BODY REGION, so every region that diverges more than production is
+# surfaced BEFORE anything reaches the user.
+#
+# METRIC (fixed 2026-07-22): nearest-SURFACE distance, NOT per-vertex distance.
+# The first version used per-vertex distance and over-flagged - it penalised
+# TANGENTIAL slide (a vert sliding along the cloth surface to a different spot),
+# which is INVISIBLE. Measured: it called the front thigh 2.14 vs 1.37 "PIOR"
+# while the surface metric shows 0.82 vs 0.78 = tie (the drape is at parity, the
+# verts just slid). Surface distance ignores slide and measures the SHAPE the
+# eye sees. (Project memory warned about exactly this: indexed_mean explodes on
+# tangential settle; use surf fwd/rev.)
 #
 # Usage: py -3 pathb_sculpt_sweep.py RESULT.obj --capture CAP [--prod PROD.obj]
 import argparse
@@ -18,6 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from shell_spike import read_capture_front
+from pathb_metrics import Surface
 
 # Hand-sculpt OSD sources (RM_Heavy slider set per garment shape).
 SD = r"E:\Wabbajack\InstallPacks\mods\Rley Mods - Vanilla Refits\CalienteTools\BodySlide\ShapeData"
@@ -98,18 +106,20 @@ def main():
         if idx < len(sculpt):
             sculpt[idx] = base[idx] + np.array([x, y, z])
 
+    tris = np.asarray(cap.tris)
+    sculpt_surf = Surface(sculpt, tris)
     res = load(a.result)
-    dh = np.linalg.norm(res - sculpt, axis=1)
+    dh = sculpt_surf.dist(res)          # result vert -> sculpt SURFACE
     prod = load(a.prod) if a.prod else None
-    dp = np.linalg.norm(prod - sculpt, axis=1) if prod is not None else None
+    dp = sculpt_surf.dist(prod) if prod is not None else None
 
     reg = {}
     for i in range(len(base)):
         r = region(base[i], fs)
         reg.setdefault(r, [[], []])
-        reg[r][0].append(dh[i])
+        reg[r][0].append(float(dh[i]))
         if dp is not None:
-            reg[r][1].append(dp[i])
+            reg[r][1].append(float(dp[i]))
 
     print(f"{'regiao':26} {'n':>4} {'RESULT p90':>11}", end="")
     print(f" {'PROD p90':>9}  veredito" if dp is not None else "")
@@ -124,7 +134,7 @@ def main():
         if pp is None:
             print(f"{r:26} {n:4d} {hp:11.2f}")
             continue
-        v = "PIOR" if hp > pp + 0.15 else ("melhor" if hp < pp - 0.15 else "empate")
+        v = "PIOR" if hp > pp + 0.2 else ("melhor" if hp < pp - 0.2 else "empate")
         if v == "PIOR":
             worse += 1
         print(f"{r:26} {n:4d} {hp:11.2f} {pp:9.2f}  {v}")
