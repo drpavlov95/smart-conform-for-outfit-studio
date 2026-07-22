@@ -9208,6 +9208,70 @@ static bool PathBSimV2Solve(
                 : std::min(contactFloor[i], kVertHardF);
         }
     }
+    // DE-CLEFT THE BENDING REST (2026-07-22, THE root-cause fix for the butt
+    // groove). Traced all the way down: the groove is the cloth dipping into
+    // the intergluteal cleft where it sits NEAR the body (authored gap ~1.2);
+    // nothing pushes it out (contact only fires on penetration; the free skirt
+    // lower down drapes plumb correctly). Stiffer bending did NOTHING - because
+    // the bending REST is the AUTHORED garment, and the authored garment
+    // FOLLOWS the body cleft (measured: rest centre 1.9-2.9u INSIDE the cheeks
+    // at z64-76). So the cloth's rest state IS the dip; stiff bending holds the
+    // dip. Real cloth bridges a narrow cleft because its flat rest resists
+    // folding into it. Fix: recompute the hinge rest angles from a mesh whose
+    // BODY-DRIVEN concavity dips are filled - only where the cloth is near the
+    // body (so the free drape and designed folds far from the body are
+    // untouched) and only FILLING dips (a vert behind its neighbours' mean
+    // radius moves out toward it; convex regions never move). Body-derived,
+    // general (cleft, under-arm, any body concavity), no per-garment constant.
+    // DEFAULT OFF (2026-07-22): measured INERT on the groove on its own (rest
+    // reangled 2270 hinges but centre gap stayed 0.49). Bending is an ANGLE
+    // constraint - a flat rest is equally satisfied by pulling the cheeks IN as
+    // by pushing the centre OUT, so it flattens the crease without bridging
+    // outward. The de-clefted rest is HALF the fix; it needs a concavity-aware
+    // OUTWARD push (contact/shadow) to break the symmetry. Kept gated as the
+    // building block for that combined fix - do not ship it on alone.
+    if (EnvFloat("DRAPE_SHELL_DECLEFT", 0.0f) > 0.5f && !hinges.empty()) {
+        std::vector<std::vector<uint32_t>> nbr(n);
+        for (const auto& e : edges) {
+            if (e.a < n && e.b < n) {
+                nbr[e.a].push_back(e.b);
+                nbr[e.b].push_back(e.a);
+            }
+        }
+        const float kNear = EnvFloat("DRAPE_SHELL_DECLEFT_NEAR", 2.5f);
+        const int kIters = (int)EnvFloat("DRAPE_SHELL_DECLEFT_ITERS", 12.0f);
+        auto radOf = [&](const Vec3& p) {
+            return std::hypot(p.x, p.y - g_refCenterY);
+        };
+        std::vector<Vec3> rest = baseVerts;
+        for (int it = 0; it < kIters; ++it) {
+            std::vector<Vec3> nx = rest;
+            for (size_t i = 0; i < n; ++i) {
+                // near body, not authored-inside, has neighbours
+                if (authoredGapArr[i] < -0.1f || authoredGapArr[i] > kNear) continue;
+                if (nbr[i].size() < 2) continue;
+                Vec3 mean{0.0f, 0.0f, 0.0f};
+                for (uint32_t j : nbr[i]) mean = Add(mean, rest[j]);
+                mean = Scale(mean, 1.0f / (float)nbr[i].size());
+                // FILL DIPS ONLY: move toward the neighbour mean only if the
+                // vertex sits radially INSIDE it (a concave dip). A convex
+                // vertex (radius >= mean) is left exactly where it is, so the
+                // butt apex / cheeks and designed bulges are preserved.
+                if (radOf(rest[i]) < radOf(mean) - 0.05f)
+                    nx[i] = Add(rest[i], Scale(Sub(mean, rest[i]), 0.5f));
+            }
+            rest.swap(nx);
+        }
+        // recompute each hinge's rest angle from the de-clefted rest mesh
+        int reangled = 0;
+        for (auto& h : hinges) {
+            const float before = h.restAngle;
+            h.restAngle = PathBSignedDihedral(PathBHingeLocal(rest, h));
+            if (std::fabs(PathBWrapAngle(h.restAngle - before)) > 0.02f) ++reangled;
+        }
+        HLog("path-b-shell: de-cleft bending rest near=%.1f iters=%d hinges-reangled=%d/%zu",
+             kNear, kIters, reangled, hinges.size());
+    }
     // SIM CORE 2: physical mass from authored surface area (a vertex owns 1/3
     // of each incident triangle). invMass weights CONSTRAINT corrections only;
     // gravity is a uniform acceleration below (mass-independent), which is the
