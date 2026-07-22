@@ -16239,6 +16239,28 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: final-feasible-layer-tuck shape='%s' stage='%s' tucked=%d faceSamples=%d noRoomSkipped=%d",
                  shapeName.c_str(), stageLabel ? stageLabel : "",
                  totalTucked, totalFaceTucked, noRoomSkipped);
+        // DIAGNOSTIC (2026-07-22): does this pass push the under-belt rear
+        // cloth INTO the body? 6 of the 10 visible poke-through verts live at
+        // rear z71-77 (under the belt) at -0.46..-0.97 while production keeps
+        // them at +0.06, and they are NOT penetrating when the shell hands off
+        // - so a post-shell pass creates them. This reports the worst rear
+        // under-belt gap after the tuck so the culprit can be confirmed.
+        if (bodyBVH && bodyBVH->valid &&
+            EnvFloat("DRAPE_TUCK_DIAG", 0.0f) > 0.5f) {
+            float worst = 1.0e9f;
+            int pen = 0;
+            for (size_t i = 0; i < n && i < finalVerts.size(); ++i) {
+                const Vec3& b = baseVerts[i];
+                if (g_refCenterY - b.y <= 1.5f) continue;      // rear only
+                if (b.z < 68.0f || b.z > 80.0f) continue;      // under-belt band
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                worst = std::min(worst, g);
+                if (g < -0.3f) ++pen;
+            }
+            HLog("detour: TUCK-DIAG stage='%s' rear-under-belt worstGap=%.2f penetrating=%d",
+                 stageLabel ? stageLabel : "", worst, pen);
+        }
         return totalTucked;
     };
 
