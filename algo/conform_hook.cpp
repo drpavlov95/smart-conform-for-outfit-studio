@@ -9230,6 +9230,7 @@ static bool PathBSimV2Solve(
     // outward. The de-clefted rest is HALF the fix; it needs a concavity-aware
     // OUTWARD push (contact/shadow) to break the symmetry. Kept gated as the
     // building block for that combined fix - do not ship it on alone.
+    std::vector<Vec3> declefted;   // de-clefted mesh, reused to init x (basin escape)
     if (EnvFloat("DRAPE_SHELL_DECLEFT", 0.0f) > 0.5f && !hinges.empty()) {
         std::vector<std::vector<uint32_t>> nbr(n);
         for (const auto& e : edges) {
@@ -9262,6 +9263,7 @@ static bool PathBSimV2Solve(
             }
             rest.swap(nx);
         }
+        declefted = rest;   // keep for the initial-state basin escape below
         // recompute each hinge's rest angle from the de-clefted rest mesh
         int reangled = 0;
         for (auto& h : hinges) {
@@ -9633,6 +9635,26 @@ static bool PathBSimV2Solve(
     }
 
     std::vector<Vec3> x = baseVerts;
+    // BASIN ESCAPE (2026-07-22): the groove is a LOCAL MINIMUM. x starts at the
+    // AUTHORED garment, which has the cleft dip, and the solve settles into the
+    // dipped basin - stretch undoes any per-vertex outward nudge (push one
+    // vert, its neighbours pull it back), so de-cleft rest / nudge / stiffness
+    // are all inert (groove stays 0.49). The bridged config exists with the
+    // SAME material but the solve cannot reach it from the dipped start. So
+    // start the FREE cleft verts already de-clefted (arced) - a whole-region
+    // move that stretch does not fight - and let the flat de-clefted rest hold
+    // it. Only the free near-body dip verts move; requires DECLEFT on.
+    if (!declefted.empty() && EnvFloat("DRAPE_SHELL_DECLEFT_INIT", 0.0f) > 0.5f) {
+        int lifted = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (fixed[i] || authoredGapArr[i] < -0.1f) continue;
+            if (Len2(Sub(declefted[i], baseVerts[i])) > 1.0e-6f) {
+                x[i] = declefted[i];
+                ++lifted;
+            }
+        }
+        HLog("path-b-shell: basin-escape init %d free verts from de-clefted mesh", lifted);
+    }
     int active = 0, hard = 0;
     for (size_t i = 0; i < n; ++i) fixed[i] ? ++hard : ++active;
     HLog("path-b-shell: solve begin verts=%zu edges=%zu hinges=%zu seams=%zu active=%d fixed=%d g=%.4f stretchC=%.6g bendC=%.6g tensionOnly=%d",
