@@ -18081,79 +18081,93 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // live blacksmith pilot.
                     if (pathBShellAccepted &&
                         EnvFloat("DRAPE_CLEFT_TOP_BRIDGE", 1.0f) > 0.5f) {
-                        // The defect (heatmap his-minus-production) is a
-                        // HORIZONTAL inward band at z70-74, right where the
-                        // skirt tucks under the belt - the cloth there sits
-                        // 0.3-0.65u DEEPER than production. Lateral Laplacian
-                        // smoothing cannot lift it (the whole band is recessed
-                        // together). Instead bridge it VERTICALLY: per x-bin,
-                        // lift each band vert's body gap toward the gap of the
-                        // butt cloth just BELOW the band (which sits proud),
-                        // so the tuck crease fills out. Capped and it only ever
-                        // pushes OUT, never in.
-                        const float tzLo   = rzHi - 2.0f;
-                        const float tzHi   = rzHi + 12.0f;
-                        const float kTopHalf = EnvFloat("DRAPE_CLEFT_TOP_HALF", 14.0f);
-                        const float kTopCap  = EnvFloat("DRAPE_CLEFT_TOP_CAP", 1.0f);
-                        // reference gap per x-bin: max body gap of the butt band
-                        // just below the tuck (z in [tzLo-8, tzLo]).
-                        // REAR SELECTOR (2026-07-21): use the anatomically
-                        // correct rear (BACK = -y; front=+y verified from
-                        // calf/knee anatomy AND the body butt-bulge at -15.3
-                        // vs front +9.8). The cleft-bridge above keeps a
-                        // byte-stable LEGACY default that treats +y as rear;
-                        // reusing it here moved FRONT verts (the defect is on
-                        // the BACK) - so this pass computes rear depth directly
-                        // and logs the moved verts' y to prove the side.
+                        // CLEFT CHORD BRIDGE (2026-07-22). GROUND TRUTH: the
+                        // user manually corrected the butt cleft and exported
+                        // edit220727_0826.obj. Diffing his edit against the
+                        // conform (after 10x frame align) isolated 452 moved
+                        // verts: he pushed the CENTRE cleft line OUT (more -y,
+                        // rear) by up to 3.2u at z68-72, filling the crack so
+                        // the skirt back reads as one smooth surface instead of
+                        // dipping into the intergluteal groove. Prototyped in
+                        // Python vs his edit: lateral Laplacian smoothing moved
+                        // AWAY from his target (0.934->0.95); a CHORD bridge -
+                        // lift each centre vert's rear-depth toward the chord
+                        // between the two cheek apexes - moved toward it
+                        // (0.934->0.87) and the render matches his edit (groove
+                        // gone). This is body-derived (cheek apexes), not a
+                        // per-scene constant, so it generalises.
+                        // REAR = -y (BACK; front=+y verified: calf/knee anatomy
+                        // + body butt-bulge -15.3 vs front +9.8). Rear depth is
+                        // g_refCenterY - y; the log prints moved meanY and it
+                        // MUST be negative or the pass is on the wrong side.
                         auto rearDepth = [&](const Vec3& b){ return g_refCenterY - b.y; };
-                        std::unordered_map<int, float> refGap;
-                        auto bin = [](float x){ return (int)std::floor(x / 2.0f); };
+                        const float czLo   = EnvFloat("DRAPE_CLEFT_TOP_ZLO", 54.0f);
+                        const float czHi   = EnvFloat("DRAPE_CLEFT_TOP_ZHI", 80.0f);
+                        const float kCenHalf = EnvFloat("DRAPE_CLEFT_TOP_HALF", 4.0f);
+                        const float kCheekLo = EnvFloat("DRAPE_CLEFT_CHEEK_LO", 5.0f);
+                        const float kCheekHi = EnvFloat("DRAPE_CLEFT_CHEEK_HI", 13.0f);
+                        const float kFactor  = EnvFloat("DRAPE_CLEFT_TOP_FACTOR", 1.3f);
+                        const float kTopCap  = EnvFloat("DRAPE_CLEFT_TOP_CAP", 4.0f);
+                        // group rear verts by 2u z-slice
+                        std::unordered_map<int, std::vector<uint32_t>> slice;
                         for (size_t i = 0; i < n; ++i) {
                             const Vec3& b = baseVerts[i];
                             if (rearDepth(b) <= 1.5f) continue;
-                            if (b.z < tzLo - 8.0f || b.z >= tzLo) continue;
-                            if (std::fabs(b.x) > kTopHalf) continue;
-                            Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
-                            if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2))
-                                continue;
-                            const float g = Dot(Sub(finalVerts[i], cp), nrm);
-                            auto it = refGap.find(bin(b.x));
-                            if (it == refGap.end() || g > it->second)
-                                refGap[bin(b.x)] = g;
+                            if (b.z < czLo || b.z >= czHi) continue;
+                            slice[(int)std::floor(b.z / 2.0f)].push_back((uint32_t)i);
                         }
                         int bridged = 0;
                         double movedYSum = 0.0;
-                        const std::vector<Vec3> topOrig = finalVerts;
-                        for (size_t i = 0; i < n; ++i) {
-                            const Vec3& b = baseVerts[i];
-                            if (rearDepth(b) <= 1.5f) continue;
-                            if (b.z < tzLo || b.z > tzHi) continue;
-                            if (std::fabs(b.x) > kTopHalf) continue;
-                            if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                            auto it = refGap.find(bin(b.x));
-                            if (it == refGap.end()) continue;
-                            Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
-                            if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2))
-                                continue;
-                            const float g = Dot(Sub(finalVerts[i], cp), nrm);
-                            // fade the target from the reference gap (at the
-                            // band bottom) to the vert's own gap (at the top,
-                            // under the belt, where the tuck is legitimate)
-                            const float fade = std::min(1.0f,
-                                std::max(0.0f, (tzHi - b.z) / (tzHi - tzLo)));
-                            const float target = g + fade * std::max(0.0f, it->second - g);
-                            float lift = target - g;
-                            if (lift <= 0.01f) continue;
-                            if (lift > kTopCap) lift = kTopCap;
-                            finalVerts[i] = Add(finalVerts[i], Scale(nrm, lift));
-                            movedYSum += baseVerts[i].y;
-                            ++bridged;
+                        for (auto& kv : slice) {
+                            // cheek apex = most-out (min y) on each side
+                            float yL = 1.0e30f, yR = 1.0e30f;
+                            bool hasL = false, hasR = false;
+                            for (uint32_t i : kv.second) {
+                                const float bx = baseVerts[i].x;
+                                if (bx <= -kCheekLo && bx >= -kCheekHi) {
+                                    yL = std::min(yL, finalVerts[i].y); hasL = true;
+                                } else if (bx >= kCheekLo && bx <= kCheekHi) {
+                                    yR = std::min(yR, finalVerts[i].y); hasR = true;
+                                }
+                            }
+                            if (!hasL || !hasR) continue;
+                            const float chordY = 0.5f * (yL + yR);
+                            for (uint32_t i : kv.second) {
+                                if (std::fabs(baseVerts[i].x) > kCenHalf) continue;
+                                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                                const float wantY = finalVerts[i].y +
+                                    kFactor * (chordY - finalVerts[i].y);
+                                float dy = wantY - finalVerts[i].y;
+                                if (dy >= -0.01f) continue;         // only push OUT (more -y)
+                                if (dy < -kTopCap) dy = -kTopCap;
+                                finalVerts[i].y += dy;
+                                movedYSum += baseVerts[i].y;
+                                ++bridged;
+                            }
                         }
+                        // body floor over the WHOLE cleft ROI, not just the
+                        // pushed centre: the cheek-side verts (|x| 4-13) were
+                        // held out of the body by the OLD wide vertical bridge;
+                        // the narrow chord bridge does not touch them, so any
+                        // that sat borderline (gap ~0 in the raw conform) would
+                        // now read as poke-through (measured: v2074/75/86 at
+                        // x8-10 z73-75 went 0.0 -> -0.5). Flooring the full ROI
+                        // to fabric thickness restores them without a wide lift.
+                        for (auto& kv : slice)
+                            for (uint32_t i : kv.second) {
+                                if (std::fabs(baseVerts[i].x) > kCheekHi) continue;
+                                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
+                                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
+                                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2))
+                                    continue;
+                                const float g = Dot(Sub(finalVerts[i], cp), nrm);
+                                if (g < 0.15f)
+                                    finalVerts[i] = Add(cp, Scale(nrm, 0.15f));
+                            }
                         weldExact();
-                        HLog("detour: top-cleft-bridge shape='%s' band z=[%.0f..%.0f] |x|<%.1f bins=%zu moved=%d meanY=%.1f (must be NEGATIVE=back)",
-                             shapeName.c_str(), tzLo, tzHi, kTopHalf,
-                             refGap.size(), bridged,
-                             bridged ? movedYSum / bridged : 0.0);
+                        HLog("detour: cleft-chord-bridge shape='%s' z=[%.0f..%.0f] slices=%zu moved=%d meanY=%.1f (must be NEGATIVE=back)",
+                             shapeName.c_str(), czLo, czHi, slice.size(),
+                             bridged, bridged ? movedYSum / bridged : 0.0);
                     }
                 }
             }
