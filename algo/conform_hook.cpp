@@ -18059,116 +18059,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     HLog("detour: cleft-bridge shape='%s' trueRear=%d roiSlices=%zu z=[%d..%d] moved=%d smooth=%d clear=%.2f maxDisp=%.2f maxGap=%.2f",
                          shapeName.c_str(), (int)cleftTrueRear, roi.size(), zMin, zMax,
                          lifted, ranIters, kClear, kMaxDisp, kMaxGap);
-
-                    // TOP-CLEFT BRIDGE (2026-07-21, user: "o pano entra na
-                    // bunda, na direção do c*"). The offset-follow ROI above
-                    // fades at rzHi (~z64); the user sees the skirt dimple
-                    // INWARD at the TOP-centre of the cleft, just under the
-                    // belt (z66-72), where nothing bridges it - measured the
-                    // verts at x=+-3 z71 sit concave (-0.4) where production
-                    // bulges convex (+0.2). Aggregate roughness matched
-                    // production and hid it; the eye did not. Laterally bridge
-                    // the centre-line only (|x|<kTopHalf): Laplacian-smooth
-                    // POSITIONS in a narrow top band so the concave centre
-                    // pulls out toward its neighbours (fills the groove),
-                    // capped and body-floored so it cannot flatten the cheeks
-                    // or enter the body.
-                    // SHELL-PILOT ONLY: this pass corrects a defect the shell
-                    // solve introduces at the skirt/belt overlap. It must NOT
-                    // touch the production (OFF) path for other garments -
-                    // gating on pathBShellAccepted keeps the whole corpus
-                    // byte-identical (verified) and confines the change to the
-                    // live blacksmith pilot.
-                    if (pathBShellAccepted &&
-                        EnvFloat("DRAPE_CLEFT_TOP_BRIDGE", 1.0f) > 0.5f) {
-                        // CLEFT CHORD BRIDGE (2026-07-22). GROUND TRUTH: the
-                        // user manually corrected the butt cleft and exported
-                        // edit220727_0826.obj. Diffing his edit against the
-                        // conform (after 10x frame align) isolated 452 moved
-                        // verts: he pushed the CENTRE cleft line OUT (more -y,
-                        // rear) by up to 3.2u at z68-72, filling the crack so
-                        // the skirt back reads as one smooth surface instead of
-                        // dipping into the intergluteal groove. Prototyped in
-                        // Python vs his edit: lateral Laplacian smoothing moved
-                        // AWAY from his target (0.934->0.95); a CHORD bridge -
-                        // lift each centre vert's rear-depth toward the chord
-                        // between the two cheek apexes - moved toward it
-                        // (0.934->0.87) and the render matches his edit (groove
-                        // gone). This is body-derived (cheek apexes), not a
-                        // per-scene constant, so it generalises.
-                        // REAR = -y (BACK; front=+y verified: calf/knee anatomy
-                        // + body butt-bulge -15.3 vs front +9.8). Rear depth is
-                        // g_refCenterY - y; the log prints moved meanY and it
-                        // MUST be negative or the pass is on the wrong side.
-                        auto rearDepth = [&](const Vec3& b){ return g_refCenterY - b.y; };
-                        const float czLo   = EnvFloat("DRAPE_CLEFT_TOP_ZLO", 54.0f);
-                        const float czHi   = EnvFloat("DRAPE_CLEFT_TOP_ZHI", 80.0f);
-                        const float kCenHalf = EnvFloat("DRAPE_CLEFT_TOP_HALF", 4.0f);
-                        const float kCheekLo = EnvFloat("DRAPE_CLEFT_CHEEK_LO", 5.0f);
-                        const float kCheekHi = EnvFloat("DRAPE_CLEFT_CHEEK_HI", 13.0f);
-                        const float kFactor  = EnvFloat("DRAPE_CLEFT_TOP_FACTOR", 1.3f);
-                        const float kTopCap  = EnvFloat("DRAPE_CLEFT_TOP_CAP", 4.0f);
-                        // group rear verts by 2u z-slice
-                        std::unordered_map<int, std::vector<uint32_t>> slice;
-                        for (size_t i = 0; i < n; ++i) {
-                            const Vec3& b = baseVerts[i];
-                            if (rearDepth(b) <= 1.5f) continue;
-                            if (b.z < czLo || b.z >= czHi) continue;
-                            slice[(int)std::floor(b.z / 2.0f)].push_back((uint32_t)i);
-                        }
-                        int bridged = 0;
-                        double movedYSum = 0.0;
-                        for (auto& kv : slice) {
-                            // cheek apex = most-out (min y) on each side
-                            float yL = 1.0e30f, yR = 1.0e30f;
-                            bool hasL = false, hasR = false;
-                            for (uint32_t i : kv.second) {
-                                const float bx = baseVerts[i].x;
-                                if (bx <= -kCheekLo && bx >= -kCheekHi) {
-                                    yL = std::min(yL, finalVerts[i].y); hasL = true;
-                                } else if (bx >= kCheekLo && bx <= kCheekHi) {
-                                    yR = std::min(yR, finalVerts[i].y); hasR = true;
-                                }
-                            }
-                            if (!hasL || !hasR) continue;
-                            const float chordY = 0.5f * (yL + yR);
-                            for (uint32_t i : kv.second) {
-                                if (std::fabs(baseVerts[i].x) > kCenHalf) continue;
-                                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                                const float wantY = finalVerts[i].y +
-                                    kFactor * (chordY - finalVerts[i].y);
-                                float dy = wantY - finalVerts[i].y;
-                                if (dy >= -0.01f) continue;         // only push OUT (more -y)
-                                if (dy < -kTopCap) dy = -kTopCap;
-                                finalVerts[i].y += dy;
-                                movedYSum += baseVerts[i].y;
-                                ++bridged;
-                            }
-                        }
-                        // body floor over the WHOLE cleft ROI, not just the
-                        // pushed centre: the cheek-side verts (|x| 4-13) were
-                        // held out of the body by the OLD wide vertical bridge;
-                        // the narrow chord bridge does not touch them, so any
-                        // that sat borderline (gap ~0 in the raw conform) would
-                        // now read as poke-through (measured: v2074/75/86 at
-                        // x8-10 z73-75 went 0.0 -> -0.5). Flooring the full ROI
-                        // to fabric thickness restores them without a wide lift.
-                        for (auto& kv : slice)
-                            for (uint32_t i : kv.second) {
-                                if (std::fabs(baseVerts[i].x) > kCheekHi) continue;
-                                if (i < invMass.size() && invMass[i] <= 0.0f) continue;
-                                Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
-                                if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2))
-                                    continue;
-                                const float g = Dot(Sub(finalVerts[i], cp), nrm);
-                                if (g < 0.15f)
-                                    finalVerts[i] = Add(cp, Scale(nrm, 0.15f));
-                            }
-                        weldExact();
-                        HLog("detour: cleft-chord-bridge shape='%s' z=[%.0f..%.0f] slices=%zu moved=%d meanY=%.1f (must be NEGATIVE=back)",
-                             shapeName.c_str(), czLo, czHi, slice.size(),
-                             bridged, bridged ? movedYSum / bridged : 0.0);
-                    }
+                    // NOTE (2026-07-22): a shell-pilot cleft CHORD BRIDGE lived
+                    // here (DRAPE_CLEFT_TOP_BRIDGE) - it reproduced the user's
+                    // manual butt-cleft correction. REMOVED on the user's
+                    // instruction ("nao quero coisas case-specifics"): the
+                    // cleft groove is a SOLVER bug (the contact floor molds the
+                    // cloth to the intergluteal concavity - it dives to gap
+                    // 0.1-0.56 where the sculpt bridges at 2.5+), the SAME bug
+                    // that hugs the receding thigh (shell y 6.66 vs sculpt's
+                    // plumb 7.12). The real fix is the drape envelope, not a
+                    // per-region post-hoc patch. See [[live-vs-corpus-divergence]].
                 }
             }
         }
