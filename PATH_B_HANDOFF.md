@@ -8,6 +8,114 @@ hash from this document.
 
 ---
 
+# Codex continuation 2026-07-23 - preserve authored cross-mesh cloth seams
+
+## User report and frozen reproduction
+
+The Thalmor Robe Heavy result showed a dark horizontal strip across the upper
+thigh/hip. The strip is not a malformed belt: it is the `Pants` mesh becoming
+visible through a junction opened between `ThalmorRobesF` and `LongSkirt`.
+
+The exact captures are:
+
+- `captures/yarl/drape_capture__Rley_3BA_Vanilla_-_Body_-_Thalmor_Robe__No_Physics___ThalmorRobesF__RM_Heavy__113347.drcap`
+- `captures/yarl/drape_capture__Rley_3BA_Vanilla_-_Body_-_Thalmor_Robe__No_Physics___LongSkirt__RM_Heavy__113348.drcap`
+
+The other four same-scene captures (`Collar`, `Pants`, `Buckle` and
+`FemaleUnderwearSH`) were also replayed as controls.
+
+## Root cause
+
+The robe and skirt are two ShapeData meshes, but the outfit author modeled
+their junction as one material seam: they have exactly `25` pairs of
+coincident open-boundary vertices. Their authored OBJ positions are exact; the
+capture-base residual is only `0.000009..0.000058u`. Vanilla conform also keeps
+the two targets coincident (mean `0.000027u`, max `0.000141u`).
+
+Production solved the two cloth shapes independently. The resulting seam split
+was mean `1.2539u`, max `2.6206u`, exposing the inner pants. Targeting the
+other mesh's already-solved collider is not stable because it depends on solve
+order: even before solving `LongSkirt`, its raw seam was already `1.0428u`
+away from the captured solved robe.
+
+## Global fix
+
+`FindCrossMeshSharedBoundaryPairs` detects only vertices which:
+
+- belong to open mesh boundaries on both sides;
+- coincide in the authored/base outfit within `0.001u`;
+- have at least three matches on the same cloth-pair junction;
+- connect two shapes classified as cloth.
+
+Each participating shape anchors its matching boundary vertices to its own
+vanilla conform target before cloth simulation. Both authored targets are
+coincident, so the condition is symmetric and independent of shape solve
+order. The vertices are fixed for the cloth solve, and the generic
+outer-layer clearance pass now excludes them from both direct and
+barycentric-face displacement. That pass previously treated the authored
+junction as an ordinary collision and could unzip it again.
+
+This rule has no outfit name, shape name, vertex ID, anatomical coordinate or
+Thalmor-specific branch. Nearby hems, belts and armor are not joined merely
+for being close: both open-boundary coincidence and cloth classification are
+required. Runtime controls are `DRAPE_CROSS_MESH_SEAM`,
+`DRAPE_CROSS_MESH_SEAM_EPS` and `DRAPE_CROSS_MESH_SEAM_MIN_PAIRS`.
+
+Two researched alternatives were removed before shipping:
+
+- late pursuit of the other mesh's solved collider, which is solve-order
+  dependent;
+- a propagated final positional correction, which slightly worsened mean seam
+  error and skirt stretch.
+
+## Measured Thalmor result
+
+The final RelWithDebInfo and optimized Release outputs are byte-identical:
+
+- `ThalmorRobesF`: OBJ SHA-256
+  `118CA3F7BF522ABCEF16188968E734866E83A386A2E6170026E69F666433962C`;
+- `LongSkirt`: OBJ SHA-256
+  `151C0D23F979F9813CFF20B31C58266E4527EE3479A3216B382D3E3B88FBBFF7`.
+
+The combined seam split fell from mean/max `1.2539/2.6206u` to
+`0.3302/1.6713u` (about 74% lower mean). The diagnostic layer render at
+`tmp/pathb/thalmor_1133/thalmor_seam_default_anchor_final.png` shows that the
+continuous exposed `Pants` band disappears.
+
+Hard metrics remain bounded:
+
+- `ThalmorRobesF` worst stretch remains exactly `6.80038`, body penetrations
+  remain `7`, and max displacement remains `15.4507u`;
+- `LongSkirt` keeps zero body penetrations; worst stretch changes
+  `4.28437 -> 4.44205` and max displacement `9.79556 -> 9.44031u`;
+- the four non-participating Thalmor shapes remain vertex-exact to their
+  baselines.
+
+The robe's captured garment-face residual changes `34 -> 39`, but that metric
+tests against an independently captured stale `LongSkirt` collider. It is not
+a synchronized seam metric; the direct two-output seam measurement and layer
+render above are the relevant gates.
+
+## Validation and installed state
+
+RelWithDebInfo and Release harness self-tests pass. Band-descriptor and support
+classifier self-tests pass. The unchanged golden corpus is green: Falmer
+`8/8`, Blacksmith `4/4`, Vampire `2/2`, Yarl `4/4` (`18/18` total).
+
+The Release artifact and both automatically deployed copies are byte-identical,
+SHA-256:
+
+`E85729C13D6FE5DE3A750D8F6F9DB47445F24CDE2ACDD20AB0FAF419F0A1AE13`
+
+Installed paths:
+
+- `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
+- `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
+
+The final visual gate in Outfit Studio remains with the user. The user still
+owns the unstaged Blacksmith golden edit, capture helper and runtime flag
+files; do not stage or discard them.
+
 # Codex continuation 2026-07-23 - elevated-contact release for seat and iliac bridge
 
 ## User decision and frozen reproduction

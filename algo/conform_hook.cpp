@@ -7136,6 +7136,120 @@ struct OuterCollider {
     const BodyBVH& Current() const { return currentRef ? *currentRef : current; }
 };
 
+static std::vector<uint8_t> BuildBoundaryVertexMask(
+    size_t vertexCount,
+    const std::vector<std::array<uint16_t, 3>>& tris)
+{
+    std::unordered_map<uint32_t, uint16_t> edgeUse;
+    edgeUse.reserve(tris.size() * 3);
+    auto addEdge = [&](uint16_t a, uint16_t b) {
+        if (a >= vertexCount || b >= vertexCount || a == b) return;
+        if (a > b) std::swap(a, b);
+        const uint32_t key = (uint32_t)a | ((uint32_t)b << 16);
+        auto it = edgeUse.find(key);
+        if (it == edgeUse.end()) edgeUse.emplace(key, 1);
+        else if (it->second < UINT16_MAX) ++it->second;
+    };
+    for (const auto& t : tris) {
+        addEdge(t[0], t[1]);
+        addEdge(t[1], t[2]);
+        addEdge(t[2], t[0]);
+    }
+
+    std::vector<uint8_t> boundary(vertexCount, 0);
+    for (const auto& kv : edgeUse) {
+        if (kv.second != 1) continue;
+        const uint16_t a = (uint16_t)(kv.first & 0xFFFFu);
+        const uint16_t b = (uint16_t)(kv.first >> 16);
+        if (a < vertexCount) boundary[a] = 1;
+        if (b < vertexCount) boundary[b] = 1;
+    }
+    return boundary;
+}
+
+static uint64_t CrossMeshSeamHash(int64_t x, int64_t y, int64_t z)
+{
+    // Splitmix-style combination keeps signed quantized coordinates stable
+    // without relying on packed coordinate ranges.
+    auto mix = [](uint64_t v) {
+        v += 0x9e3779b97f4a7c15ULL;
+        v = (v ^ (v >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        v = (v ^ (v >> 27)) * 0x94d049bb133111ebULL;
+        return v ^ (v >> 31);
+    };
+    return mix((uint64_t)x) ^
+           (mix((uint64_t)y) + 0x9e3779b97f4a7c15ULL) ^
+           (mix((uint64_t)z) + 0x517cc1b727220a95ULL);
+}
+
+struct CrossMeshBoundaryPair {
+    uint32_t mine = 0;
+    uint32_t other = 0;
+    float authoredD2 = FLT_MAX;
+};
+
+static int FindCrossMeshSharedBoundaryPairs(
+    const std::vector<Vec3>& myBaseVerts,
+    const std::vector<std::array<uint16_t, 3>>& myTris,
+    const BodyBVH& otherBase,
+    float authoredEpsilon,
+    std::vector<CrossMeshBoundaryPair>& outPairs)
+{
+    outPairs.clear();
+    if (myBaseVerts.empty() || myTris.empty() ||
+        !otherBase.valid || otherBase.verts.empty() || otherBase.tris.empty())
+        return 0;
+
+    authoredEpsilon = ClampRange(authoredEpsilon, 1.0e-5f, 0.01f);
+    const float eps2 = authoredEpsilon * authoredEpsilon;
+    const float invCell = 1.0f / authoredEpsilon;
+    const std::vector<uint8_t> myBoundary =
+        BuildBoundaryVertexMask(myBaseVerts.size(), myTris);
+    const std::vector<uint8_t> otherBoundary =
+        BuildBoundaryVertexMask(otherBase.verts.size(), otherBase.tris);
+
+    std::unordered_map<uint64_t, std::vector<uint32_t>> buckets;
+    buckets.reserve(otherBase.verts.size());
+    for (size_t j = 0; j < otherBase.verts.size(); ++j) {
+        if (!otherBoundary[j]) continue;
+        const Vec3& p = otherBase.verts[j];
+        const int64_t qx = (int64_t)std::llround(p.x * invCell);
+        const int64_t qy = (int64_t)std::llround(p.y * invCell);
+        const int64_t qz = (int64_t)std::llround(p.z * invCell);
+        buckets[CrossMeshSeamHash(qx, qy, qz)].push_back((uint32_t)j);
+    }
+
+    outPairs.reserve(64);
+    for (size_t i = 0; i < myBaseVerts.size(); ++i) {
+        if (!myBoundary[i]) continue;
+        const Vec3& p = myBaseVerts[i];
+        const int64_t qx = (int64_t)std::llround(p.x * invCell);
+        const int64_t qy = (int64_t)std::llround(p.y * invCell);
+        const int64_t qz = (int64_t)std::llround(p.z * invCell);
+        CrossMeshBoundaryPair best;
+        best.mine = (uint32_t)i;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    auto it = buckets.find(CrossMeshSeamHash(
+                        qx + dx, qy + dy, qz + dz));
+                    if (it == buckets.end()) continue;
+                    for (uint32_t j : it->second) {
+                        if (j >= otherBase.verts.size()) continue;
+                        const float d2 = Len2(Sub(p, otherBase.verts[j]));
+                        if (d2 <= eps2 && d2 < best.authoredD2) {
+                            best.other = j;
+                            best.authoredD2 = d2;
+                        }
+                    }
+                }
+            }
+        }
+        if (best.authoredD2 <= eps2) outPairs.push_back(best);
+    }
+    return (int)outPairs.size();
+}
+
 // Positive means the move worsens this mesh's already-classified side of a
 // nearby garment surface. An inner mesh must remain on the inward (negative
 // gap) side of an OUTER collider; an outer mesh must remain on the outward
@@ -11885,6 +11999,60 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    // Cross-shape material seam anchors. Some outfits split one continuous
+    // cloth surface into multiple ShapeData meshes whose open-boundary vertices
+    // are duplicated exactly. Both meshes' vanilla conform targets remain
+    // coincident, while independently simulated free vertices can drift apart.
+    // Treat that authored shared line as a boundary condition on BOTH shapes:
+    // each side keeps its own vanilla target, so the result is solve-order
+    // independent and no layer has to chase an already-deformed neighbour.
+    std::vector<uint8_t> crossMeshSeamAnchor(n, 0);
+    int crossMeshSeamAnchorCount = 0;
+    if ((normPreset == DRAPE_PRESET_FITTED_CLOTH ||
+         normPreset == DRAPE_PRESET_LOOSE_DRAPED) &&
+        tris && !tris->empty() &&
+        EnvToggle("DRAPE_CROSS_MESH_SEAM", true)) {
+        const float sharedEps = std::max(
+            1.0e-5f,
+            EnvFloat("DRAPE_CROSS_MESH_SEAM_EPS", 0.001f));
+        const int sharedMinPairs = (int)std::max(
+            2.0f,
+            EnvFloat("DRAPE_CROSS_MESH_SEAM_MIN_PAIRS", 3.0f));
+        auto collectShared = [&](const std::vector<OuterCollider>* colliders) {
+            if (!colliders) return;
+            for (const OuterCollider& collider : *colliders) {
+                const int otherPreset = NormalizePreset(collider.preset);
+                if (otherPreset != DRAPE_PRESET_FITTED_CLOTH &&
+                    otherPreset != DRAPE_PRESET_LOOSE_DRAPED)
+                    continue;
+                std::vector<CrossMeshBoundaryPair> sharedPairs;
+                FindCrossMeshSharedBoundaryPairs(
+                    baseVerts, *tris, collider.Base(),
+                    sharedEps, sharedPairs);
+                if ((int)sharedPairs.size() < sharedMinPairs) continue;
+                for (const CrossMeshBoundaryPair& pair : sharedPairs) {
+                    if (pair.mine >= n ||
+                        crossMeshSeamAnchor[pair.mine])
+                        continue;
+                    crossMeshSeamAnchor[pair.mine] = 1;
+                    ++crossMeshSeamAnchorCount;
+                }
+            }
+        };
+        collectShared(outerColliders);
+        collectShared(innerColliders);
+        for (size_t i = 0; i < n; ++i) {
+            if (!crossMeshSeamAnchor[i]) continue;
+            finalVerts[i] = supportVerts[i];
+            anchorWeight[i] = 1.0f;
+            invMass[i] = 0.0f;
+            drapeEl[i] = 0.0f;
+        }
+        if (crossMeshSeamAnchorCount > 0)
+            HLog("cross-mesh-seam: shape='%s' authored anchors=%d",
+                 shapeName.c_str(), crossMeshSeamAnchorCount);
+    }
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ Slider-source locality Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Compute per-vert influence: how much did the body actually change at this
     // outfit vert's 3D location for this specific slider?
@@ -16506,6 +16674,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             EnvFloat("DRAPE_LAYER_ORDER_MAX_MOVE", 0.10f), 0.05f, 1.50f);
         const std::vector<Vec3> clearanceEntry = authoredOutermostCloth
             ? finalVerts : std::vector<Vec3>{};
+        const std::vector<uint8_t>& sharedClothSeam =
+            crossMeshSeamAnchor;
+        const int sharedClothSeamVerts = crossMeshSeamAnchorCount;
 
         auto innerMarginFor = [&](int innerPreset) -> float {
             if (intermediateOuterLayer) {
@@ -16541,6 +16712,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         for (int round = 0; round < kRounds; ++round) {
             int roundAdjusted = 0;
             for (size_t i = 0; i < n; ++i) {
+                if (i < sharedClothSeam.size() && sharedClothSeam[i])
+                    continue;
                 float myBaseGap = 0.0f;
                 if (!signedGap3(baseBody, baseVerts[i], myBaseGap, nullptr)) continue;
                 float myGap = 0.0f;
@@ -16619,9 +16792,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         const float ws[3] = {s.a, s.b, s.c};
                         const uint16_t vi[3] = {t[0], t[1], t[2]};
                         float sumSq = ws[0] * ws[0] + ws[1] * ws[1] + ws[2] * ws[2];
+                        for (int k = 0; k < 3; ++k)
+                            if (vi[k] < sharedClothSeam.size() &&
+                                sharedClothSeam[vi[k]])
+                                sumSq -= ws[k] * ws[k];
                         if (sumSq <= 1.0e-6f) continue;
                         for (int k = 0; k < 3; ++k) {
-                            if (ws[k] <= 0.0f) continue;
+                            if (ws[k] <= 0.0f ||
+                                (vi[k] < sharedClothSeam.size() &&
+                                 sharedClothSeam[vi[k]]))
+                                continue;
                             finalVerts[vi[k]] = Add(finalVerts[vi[k]],
                                                     Scale(myNrm, step * ws[k] / sumSq));
                         }
@@ -16653,9 +16833,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
 
         if (totalAdjusted > 0)
-            HLog("detour: outer-layer-inner-clearance shape='%s' stage='%s' adjusted=%d faceSamples=%d inners=%zu mode='%s'",
+            HLog("detour: outer-layer-inner-clearance shape='%s' stage='%s' adjusted=%d faceSamples=%d inners=%zu sharedSeam=%d mode='%s'",
                  shapeName.c_str(), stageLabel ? stageLabel : "",
                  totalAdjusted, totalFaceSamples, innerColliders->size(),
+                 sharedClothSeamVerts,
                  authoredOutermostCloth ? "authored-outer" :
                      (intermediateOuterLayer ? "intermediate" : "structured"));
         return totalAdjusted;
