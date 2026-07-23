@@ -8,6 +8,141 @@ hash from this document.
 
 ---
 
+# Codex continuation 2026-07-23 - residual seam, floating seat and iliac bridge
+
+## User-visible report and exact reproduction
+
+After commit `be089c1` removed the thigh bump / butt-entry regression, the user
+reported a large visual improvement and three smaller residuals:
+
+1. the authored rear centre line bent left down the skirt;
+2. the top of the seat became too square and floated above the body;
+3. the first free rows below the lower belly followed the lateral iliac/groin
+   recess instead of bridging away from the last supported row.
+
+The authoritative capture for this continuation is:
+
+`captures/yarl/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy__085622.drcap`
+
+The exact 08:56 live state is frozen under
+`tmp/pathb/live_freeze_20260723_0856/`. The old visible output is
+`tmp/pathb/residual_ablation_0856/baseline.obj`, SHA-256
+`C1D4BFBAE23126EF39F3AA0387E97C69B044DF5ECA48B45B99D4ED1BF838967B`.
+
+## Fix 1: topology-gated centre line with clearance preservation
+
+The old centre-line helper existed only in the legacy Loose preset and ran
+before the last-chance face repair. Path B uses the unified Cloth preset, and
+the final repair could reintroduce lateral drift after any earlier correction.
+The helper is now also eligible for an accepted Path-B shell and is reasserted
+at the true publication boundary.
+
+The Path-B signal is deliberately stricter than a geometric `x ~= centre`
+test: a vertex must belong to an authored coincident seam group. This excludes
+free front folds which merely cross the sagittal plane and prevents the face
+inversions seen in the first broad prototype. The body must also pass the
+existing bilateral-symmetry test. No outfit name, anatomy ROI, coordinate or
+vertex ID is used.
+
+The actual rear seam wandered as far as approximately `+1.68u / -1.03u` in X
+in the 08:56 output. The accepted candidate reduces its maximum residual X to
+about `0.003u`.
+
+A naive planar centre snap was rejected: over the gluteal cleft it increased
+the top-centre body gap from median `1.618u` to `2.397u` and maximum `2.607u`,
+creating exactly the square/floating shelf in the user's side view. The
+accepted implementation stores each seam vertex's pre-lock signed body gap,
+keeps authored X, searches only along the front/rear Y direction, and restores
+that clearance without going below a `0.06u` floor. The final top-centre gaps
+are median `1.618u`, mean `1.431u`, maximum `1.771u`.
+
+Research controls were added for centre seed band, z bin, feather and strength.
+Path B defaults to a narrow `0.08u` authored-seam signal, one-unit height bins,
+three-unit feather and full seam strength. Historical Loose defaults remain
+unchanged.
+
+## Fix 2: local support handoff / cloth bridge
+
+`BuildNearContactSupportBridgeField` handles the one-ring transition immediately
+below a real body support. A near-contact free child can inherit radial support
+only from a directly connected, higher material neighbour that is still in
+contact and points in nearly the same radial direction. Seeds are frozen, so
+the rule cannot recursively walk down and inflate a hanging panel. Two local
+material diffusion rounds give the transaction a coherent field instead of a
+point bump.
+
+The field is accepted only through the existing face/edge/crossing transaction.
+A second signed-body-gap audit rolls the entire bridge back if any moved vertex
+regresses by more than `0.02u` or creates a new penetration. On the marked
+Blacksmith iliac point, the gap increased conservatively from `0.600u` to
+`0.711u`; the accepted transaction moved `104/105` field vertices at alpha
+`0.25`, maximum `0.143u`, with zero body-gap regressions.
+
+The existing Path-B horizontal bridge was instrumented with research knobs, but
+its historical defaults and exact float expression were retained. Reducing its
+rounds or maximum step did not solve the reported transition as cleanly as the
+new local support handoff.
+
+## Validation and universality boundary
+
+The accepted Blacksmith candidate is:
+
+`tmp/pathb/residual_candidate_0856/final_gap_preserve_support.obj`
+
+Repeated RelWithDebInfo replays and the optimized Release replay are
+byte-identical, SHA-256:
+
+`0838F90DEE7B643BB13AB085FAC9B7F8B7754BFB60E14274AA3DE0F02798F259`
+
+Focused gate versus the exact old 08:56 output:
+
+| gate | old | candidate |
+|---|---:|---:|
+| inverted faces | `23` | `23` |
+| arm inverted faces | `23` | `23` |
+| collapsed faces | `0` | `0` |
+| open seam | `0` | `0` |
+| visible body samples | `6` | `5` |
+| visible arm samples | `3` | `3` |
+| worst authored-out body depth | `1.72u` | `1.72u` |
+| total body-through samples (informative) | `71` | `69` |
+
+Same-source causal controls, with only the new centre/support rules disabled,
+also pass for Vampire robes, Falmer Cloth, Yarl Cloak and Yarl Clothes:
+
+- Vampire detects unsafe support motion and rolls the bridge back;
+- Falmer accepts a small bridge with no hard-gate regression;
+- Yarl Cloak has no qualifying support seeds and is a no-op;
+- Yarl Clothes applies a small authored centre correction;
+- all four hold flips, collapse, seam, visible-body and worst-depth hard gates.
+
+The default/shell-OFF corpus remains green without a golden update: Falmer `8`,
+Blacksmith `4`, Vampire `2`, Yarl `4` (`18/18`). Harness self-test,
+shadow-selftest, unilateral XPBD, analytic dihedral, colored-GS and cloth/body
+sample-contact tests pass.
+
+The algorithms are global topology/material rules, but activation still obeys
+the existing Path-B pilot scope. In the current live configuration that scope is
+BlackSmithTorso/RM_Heavy; other garments were exercised with
+`DRAPE_SHELL_ALL_SHAPES=1` as research controls, not promoted by this change.
+
+## Installed state
+
+The Release build was deployed automatically by the configured CMake
+post-build step to both mod folders. The build artifact and both installed
+copies are byte-identical, SHA-256:
+
+`0D8EA76CCED4FF8676BC16008EEF6DBF386165FDF60284754889378F024A8115`
+
+Installed paths:
+
+- `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
+- `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
+
+The user still owns the unstaged golden edit, capture helper and runtime flag
+files. Do not stage or discard them. Visual approval of the new seam/seat/iliac
+silhouette remains open.
+
 # Codex continuation 2026-07-23 - thigh bump / butt entry fixed at solver handoff
 
 ## Exact scene and root cause

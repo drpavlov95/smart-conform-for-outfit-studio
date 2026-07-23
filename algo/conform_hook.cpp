@@ -4083,6 +4083,133 @@ static int ApplyContactSeededRadialEnvelope(
     return moved;
 }
 
+// Build a one-ring support bridge where cloth has just left a body contact.
+// This is deliberately local: a near-contact child may inherit radial support
+// from a directly connected, higher contact vertex, but the result is never
+// propagated as a new support seed.  It therefore bridges the small iliac /
+// under-belly and seat recess immediately below an actual support without
+// inflating a freely hanging hem or following an anatomical allowlist.
+static int BuildNearContactSupportBridgeField(
+    const std::vector<Vec3>& verts,
+    const std::vector<float>& drapeEl,
+    const std::vector<EdgeConstraint>& edges,
+    const BodyBVH& body,
+    float minDrape,
+    float supportGap,
+    float releaseGapMin,
+    float releaseGapMax,
+    float minDz,
+    float maxDz,
+    float minDirectionDot,
+    float radialTaper,
+    float strength,
+    float maxStep,
+    int smoothRounds,
+    float smoothStrength,
+    std::vector<Vec3>& outField)
+{
+    const size_t n = verts.size();
+    outField.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+    if (!body.valid || n == 0 || drapeEl.size() < n || edges.empty())
+        return 0;
+
+    minDrape = ClampRange(minDrape, 0.0f, 1.0f);
+    supportGap = std::max(0.0f, supportGap);
+    releaseGapMin = std::max(supportGap, releaseGapMin);
+    releaseGapMax = std::max(releaseGapMin + 1.0e-3f, releaseGapMax);
+    minDz = std::max(0.01f, minDz);
+    maxDz = std::max(minDz, maxDz);
+    minDirectionDot = ClampRange(minDirectionDot, -1.0f, 1.0f);
+    radialTaper = std::max(0.0f, radialTaper);
+    strength = Clamp01(strength);
+    maxStep = std::max(0.0f, maxStep);
+    smoothRounds = (int)ClampRange((float)smoothRounds, 0.0f, 4.0f);
+    smoothStrength = ClampRange(smoothStrength, 0.0f, 0.80f);
+    if (strength <= 0.0f || maxStep <= 0.0f) return 0;
+
+    struct Sample {
+        float gap = 1.0e30f;
+        float r = 0.0f;
+        float dx = 0.0f;
+        float dy = 0.0f;
+        bool valid = false;
+    };
+    std::vector<Sample> samples(n);
+    for (size_t i = 0; i < n; ++i) {
+        Sample& s = samples[i];
+        if (!RadialDir(verts[i], s.dx, s.dy, s.r)) continue;
+        if (!BVHSignedGap(body, verts[i], s.gap, nullptr)) continue;
+        s.valid = true;
+    }
+
+    std::vector<std::vector<uint32_t>> adj(n);
+    for (const EdgeConstraint& e : edges) {
+        if (e.a >= n || e.b >= n || e.a == e.b) continue;
+        adj[e.a].push_back(e.b);
+        adj[e.b].push_back(e.a);
+    }
+
+    int seeded = 0;
+    constexpr float kMinLift = 0.10f;
+    for (size_t i = 0; i < n; ++i) {
+        const Sample& child = samples[i];
+        if (!child.valid || drapeEl[i] < minDrape ||
+            child.gap < releaseGapMin || child.gap > releaseGapMax)
+            continue;
+
+        float targetR = child.r;
+        for (uint32_t j : adj[i]) {
+            if (j >= n) continue;
+            const Sample& parent = samples[j];
+            if (!parent.valid || parent.gap < -0.05f ||
+                parent.gap > supportGap)
+                continue;
+            const float dz = verts[j].z - verts[i].z;
+            if (dz < minDz || dz > maxDz) continue;
+            if (child.dx * parent.dx + child.dy * parent.dy <
+                minDirectionDot)
+                continue;
+            targetR = std::max(targetR, parent.r - radialTaper * dz);
+        }
+
+        const float missingSupport = targetR - child.r;
+        if (missingSupport <= kMinLift) continue;
+        const float step = std::min(maxStep, missingSupport * strength);
+        outField[i] = Vec3{child.dx * step, child.dy * step, 0.0f};
+        ++seeded;
+    }
+
+    // A pointwise radial lift spends its topology budget by stretching the
+    // seed's incident edges, forcing the downstream transaction to a tiny
+    // alpha.  Diffuse only through one-ring material neighbours that remain in
+    // the same near-contact band.  This turns the lift into a short, smooth
+    // bridge while the frozen seed set still prevents recursive propagation
+    // down a hanging panel.
+    for (int round = 0; round < smoothRounds && seeded > 0; ++round) {
+        std::vector<Vec3> next = outField;
+        for (size_t i = 0; i < n; ++i) {
+            if (!samples[i].valid || drapeEl[i] < minDrape ||
+                samples[i].gap < -0.05f ||
+                samples[i].gap > releaseGapMax + 0.50f)
+                continue;
+            Vec3 avg = outField[i];
+            int count = Len2(outField[i]) > 1.0e-12f ? 1 : 0;
+            if (count == 0) avg = Vec3{0.0f, 0.0f, 0.0f};
+            for (uint32_t j : adj[i]) {
+                if (j >= n || Len2(outField[j]) <= 1.0e-12f) continue;
+                avg = Add(avg, outField[j]);
+                ++count;
+            }
+            if (count == 0) continue;
+            avg = Scale(avg, 1.0f / (float)count);
+            next[i] = Add(outField[i],
+                          Scale(Sub(avg, outField[i]), smoothStrength));
+        }
+        outField.swap(next);
+    }
+    return seeded;
+}
+
 // Hanging-chain pass (older radial helper; kept for fallback paths).
 static void ApplyHangingChainPass(
     std::vector<Vec3>& finalVerts,
@@ -10424,6 +10551,27 @@ static bool PathBSimV2Solve(
             std::vector<uint8_t> lifted(n, 0);
             const int kBridgeRounds = (int)ClampRange(
                 EnvFloat("DRAPE_SHELL_HBRIDGE_ROUNDS", 3.0f), 1.0f, 8.0f);
+            const int kBridgeAngle = (int)ClampRange(
+                EnvFloat("DRAPE_SHELL_HBRIDGE_ANGLE", (float)kHBridgeMaxAngle),
+                2.0f, (float)(kHBridgeAngleBins / 4));
+            const float kBridgeBodyDepth = std::max(
+                0.0f,
+                EnvFloat("DRAPE_SHELL_HBRIDGE_BODY_DEPTH", kHBridgeBodyDepth));
+            const float kBridgeClothDip = std::max(
+                0.0f,
+                EnvFloat("DRAPE_SHELL_HBRIDGE_CLOTH_DIP", kHBridgeClothDip));
+            const float kBridgeStep = std::max(
+                0.0f,
+                EnvFloat("DRAPE_SHELL_HBRIDGE_MAX_STEP", kHBridgeMaxStep));
+            const float kBridgeClearance = std::max(
+                0.0f,
+                EnvFloat("DRAPE_SHELL_HBRIDGE_CLEARANCE", clearance));
+            const int kBridgeSmoothRounds = (int)ClampRange(
+                EnvFloat("DRAPE_SHELL_HBRIDGE_SMOOTH_ROUNDS", 4.0f),
+                0.0f, 12.0f);
+            const float kBridgeSmooth = ClampRange(
+                EnvFloat("DRAPE_SHELL_HBRIDGE_SMOOTH", 0.60f),
+                0.0f, 1.0f);
             int totalLifts = 0;
             for (int rd = 0; rd < kBridgeRounds; ++rd) {
                 std::vector<float> clothR;
@@ -10433,12 +10581,12 @@ static bool PathBSimV2Solve(
                     if (drapeEl[i] < 0.20f) continue;
                     float targetR = 0.0f, dirX = 0.0f, dirY = 0.0f;
                     if (HorizontalBridgeTargetR(
-                            hbp, clothR, x[i], clearance, kHBridgeZWindow,
-                            kHBridgeMaxAngle, kHBridgeBodyDepth, kHBridgeClothDip,
+                            hbp, clothR, x[i], kBridgeClearance, kHBridgeZWindow,
+                            kBridgeAngle, kBridgeBodyDepth, kBridgeClothDip,
                             targetR, dirX, dirY) &&
                         MoveRadiallyOut(x[i], dirX, dirY,
                                         std::min(targetR,
-                                                 RadialRadius(x[i]) + kHBridgeMaxStep),
+                                                 RadialRadius(x[i]) + kBridgeStep),
                                         0.5f)) {
                         lifted[i] = 1;
                         ++lifts;
@@ -10448,20 +10596,30 @@ static bool PathBSimV2Solve(
                 totalLifts += lifts;
                 if (lifts == 0) break;
             }
-            for (int sm = 0; sm < 4; ++sm) {
+            for (int sm = 0; sm < kBridgeSmoothRounds; ++sm) {
                 std::vector<Vec3> upd = x;
                 for (size_t i = 0; i < n; ++i) {
                     if (!lifted[i] || vertNeighbors[i].empty()) continue;
                     Vec3 avg{0.0f, 0.0f, 0.0f};
                     for (uint32_t nb : vertNeighbors[i]) avg = Add(avg, x[nb]);
                     avg = Scale(avg, 1.0f / (float)vertNeighbors[i].size());
-                    upd[i] = Add(Scale(x[i], 0.4f), Scale(avg, 0.6f));
+                    // Preserve the historical default bit-for-bit. The algebraic
+                    // lerp form changes float rounding even at the same 0.60 weight,
+                    // which would make the control replay a false positive.
+                    if (std::fabs(kBridgeSmooth - 0.60f) <= 1.0e-7f)
+                        upd[i] = Add(Scale(x[i], 0.40f), Scale(avg, 0.60f));
+                    else
+                        upd[i] = Add(x[i], Scale(Sub(avg, x[i]), kBridgeSmooth));
                 }
                 x = upd;
             }
             PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
-            HLog("path-b-shell: cleft bridge lifts=%d (rounds<=%d)",
-                 totalLifts, kBridgeRounds);
+            HLog("path-b-shell: section bridge lifts=%d rounds<=%d angle=%d "
+                 "bodyDepth=%.3f clothDip=%.3f maxStep=%.3f clearance=%.3f "
+                 "smooth=%dx%.2f",
+                 totalLifts, kBridgeRounds, kBridgeAngle, kBridgeBodyDepth,
+                 kBridgeClothDip, kBridgeStep, kBridgeClearance,
+                 kBridgeSmoothRounds, kBridgeSmooth);
         }
     }
     // Strong cleft pass is independent of the legacy horizontal bridge and
@@ -16800,8 +16958,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
 
     auto applyLooseAuthoredLineLocks = [&]() -> int {
-        if (NormalizePreset(preset) != DRAPE_PRESET_LOOSE_DRAPED ||
-            !params.physicsDrape || n == 0) {
+        float pathBBodySymmetryRms = -1.0f;
+        const bool pathBCenterLine =
+            pathBShellAccepted && bodyBVH && bodyBVH->valid &&
+            g_refBodyBVH.valid &&
+            BodyMorphIsSymmetric(g_refBodyBVH, *bodyBVH, 0.15f,
+                                 pathBBodySymmetryRms);
+        const bool looseLineLocks =
+            NormalizePreset(preset) == DRAPE_PRESET_LOOSE_DRAPED &&
+            params.physicsDrape;
+        if ((!looseLineLocks && !pathBCenterLine) || n == 0) {
             return 0;
         }
 
@@ -16809,7 +16975,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // meander fix, roughness cost +1.5%); the HEM z-lock stays experimental
         // (measured +11% roughnessSolved on the Yarl dress - a full snap of the hem band
         // to VANILLA Z - exactly the up-close bumpiness the user asked to remove).
-        const bool useHemLock = EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
+        const bool useHemLock = looseLineLocks &&
+            EnvToggle("DRAPE_AUTHORED_LINE_LOCKS", false);
         const bool useCenterLock = EnvToggle("DRAPE_CENTER_LINE_LOCK", true);
         if (!useHemLock && !useCenterLock) return 0;
 
@@ -16817,12 +16984,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float hemStrength = useHemLock
             ? Clamp01(EnvFloat("DRAPE_HEM_LOCK_STRENGTH", 1.0f)) : 0.0f;
         const float centerBand = EnvFloat("DRAPE_CENTER_LINE_BAND", 0.75f);
+        // Path-B needs the actual authored centre column as the signal.  Reusing
+        // the historical 0.75u loose-cloth band mixes neighbouring panel verts
+        // into the average and dilutes (or even reverses) the seam correction.
+        // Keep that wider historical band for the legacy loose path.
+        const float centerSeedBand = EnvFloat(
+            "DRAPE_CENTER_LINE_SEED_BAND",
+            pathBCenterLine ? std::min(centerBand, 0.08f) : centerBand);
         const float centerHeight = EnvFloat("DRAPE_CENTER_LINE_HEIGHT", 80.0f);
         const float centerBackMargin = EnvFloat("DRAPE_CENTER_LINE_BACK_MARGIN", 2.0f);
         const float centerStrength = useCenterLock
-            ? Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH", 0.85f)) : 0.0f;
+            ? Clamp01(EnvFloat("DRAPE_CENTER_LINE_STRENGTH",
+                               pathBCenterLine ? 1.0f : 0.85f)) : 0.0f;
         if ((hemBand <= 0.0f || hemStrength <= 0.0f) &&
-            (centerBand <= 0.0f || centerStrength <= 0.0f)) {
+            (centerSeedBand <= 0.0f || centerStrength <= 0.0f)) {
             return 0;
         }
 
@@ -16833,6 +17008,22 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         int hemMoved = 0;
         int centerMoved = 0;
         int bodyPushed = 0;
+        int centerPlanarized = 0;
+        int centerPlanarFallback = 0;
+        int centerGapPreserved = 0;
+        std::vector<uint8_t> authoredExactSeam(n, 0);
+        if (pathBCenterLine) {
+            // A geometric x~=centre test alone also catches free front folds.
+            // A real sewn/material centre line is represented by coincident
+            // authored seam twins, while those folds are not.  Use that
+            // topology signature to avoid pinning legitimate asymmetric
+            // drape merely because it crosses the sagittal plane.
+            for (const auto& group : exactSeamGroups) {
+                if (group.size() < 2) continue;
+                for (uint32_t vi : group)
+                    if (vi < n) authoredExactSeam[vi] = 1;
+            }
+        }
 
         // Feathered centre-line restore (2026-07-07, user-caught shear): snapping ONLY
         // the seam column (|baseX|<band) back to authored X sheared the adjacent faces -
@@ -16840,17 +17031,29 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // coherently. Pre-pass: bin the seam verts' lateral drift (authoredX - solvedX)
         // by z and by side (front/back). Application below adds the LOCAL bin correction
         // to every vert within featherW of the seam, scaled by a smooth lateral falloff.
-        const float centerFeatherW = EnvFloat("DRAPE_CENTER_LINE_FEATHER", 4.0f);
-        const float kZBin = 4.0f;
+        const float centerFeatherW = EnvFloat(
+            "DRAPE_CENTER_LINE_FEATHER", pathBCenterLine ? 3.0f : 4.0f);
+        // Four-unit bins were adequate for a loose hem, but blend several
+        // distinct rows on the denser Path-B shell and visibly kink the centre
+        // seam.  One-unit bins retain the authored row-to-row direction.
+        const float kZBin = std::max(
+            0.10f, EnvFloat("DRAPE_CENTER_LINE_ZBIN",
+                            pathBCenterLine ? 1.0f : 4.0f));
         std::unordered_map<int64_t, std::pair<double, int>> seamCorr;  // key: side*2^32+zbin
         auto corrKey = [&](bool back, float z) -> int64_t {
             int zb = (int)std::floor(z / kZBin);
             return ((int64_t)(back ? 1 : 0) << 32) | (uint32_t)(zb + 100000);
         };
-        if (useCenterLock && centerBand > 0.0f && centerStrength > 0.0f) {
+        if (useCenterLock && centerSeedBand > 0.0f && centerStrength > 0.0f) {
             for (size_t i = 0; i < n; ++i) {
-                if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
-                if (std::fabs(baseVerts[i].x - g_refCenterX) > centerBand) continue;
+                // The Path-B centre constraint is geometric, not a freedom
+                // classification: contact can make a seam row look "attached"
+                // (drapeEl<.2) even though it must remain on the sagittal plane.
+                // The legacy loose path keeps its historical eligibility gate.
+                if (i >= drapeEl.size() ||
+                    (!pathBCenterLine && drapeEl[i] < 0.20f)) continue;
+                if (pathBCenterLine && !authoredExactSeam[i]) continue;
+                if (std::fabs(baseVerts[i].x - g_refCenterX) > centerSeedBand) continue;
                 if (centerHeight > 0.0f && baseVerts[i].z > minBaseZ + centerHeight) continue;
                 if (std::fabs(baseVerts[i].y - g_refCenterY) <= centerBackMargin) continue;
                 auto& acc = seamCorr[corrKey(baseVerts[i].y > g_refCenterY, baseVerts[i].z)];
@@ -16871,8 +17074,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         };
 
         for (size_t i = 0; i < n; ++i) {
-            if (i >= drapeEl.size() || drapeEl[i] < 0.20f) continue;
+            if (i >= drapeEl.size() ||
+                (!pathBCenterLine && drapeEl[i] < 0.20f)) continue;
 
+            float lineEntryGap = 0.0f;
+            const bool haveLineEntryGap =
+                pathBCenterLine && bodyBVH && bodyBVH->valid &&
+                BVHSignedGap(*bodyBVH, finalVerts[i],
+                             lineEntryGap, nullptr);
             bool touched = false;
             if (hemBand > 0.0f && hemStrength > 0.0f &&
                 baseVerts[i].z <= minBaseZ + hemBand) {
@@ -16913,14 +17122,126 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     finalVerts[i] = fixed;
                     ++bodyPushed;
                 }
+
+                // A nearest-triangle body push can arbitrarily choose the left
+                // or right buttock at the sagittal plane.  That immediately
+                // reintroduces the very seam meander fixed above.  On a body
+                // that passed the symmetry gate, keep the true authored centre
+                // column planar and, if necessary, find clearance by moving
+                // only outward in Y (front or rear according to the authored
+                // panel).  Fall back to the ordinary BVH push if no safe
+                // planar point exists within a conservative 3u search.
+                if (pathBCenterLine &&
+                    authoredExactSeam[i] &&
+                    std::fabs(baseVerts[i].x - g_refCenterX) <= centerSeedBand) {
+                    const Vec3 ordinaryFixed = finalVerts[i];
+                    Vec3 planar = ordinaryFixed;
+                    planar.x = baseVerts[i].x;
+                    float gap = 0.0f;
+                    if (BVHSignedGap(*bodyBVH, planar, gap, nullptr)) {
+                        const float kPlaneGap = 0.01f;
+                        if (gap < kPlaneGap) {
+                            const float ySign =
+                                (baseVerts[i].y >= g_refCenterY) ? 1.0f : -1.0f;
+                            Vec3 inside = planar;
+                            Vec3 outside = planar;
+                            bool found = false;
+                            for (int probe = 1; probe <= 30; ++probe) {
+                                outside.y = planar.y + ySign * (0.10f * probe);
+                                float outsideGap = 0.0f;
+                                if (BVHSignedGap(*bodyBVH, outside,
+                                                 outsideGap, nullptr) &&
+                                    outsideGap >= kPlaneGap) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                for (int bi = 0; bi < 12; ++bi) {
+                                    Vec3 mid = Scale(Add(inside, outside), 0.5f);
+                                    float midGap = 0.0f;
+                                    if (BVHSignedGap(*bodyBVH, mid,
+                                                     midGap, nullptr) &&
+                                        midGap >= kPlaneGap)
+                                        outside = mid;
+                                    else
+                                        inside = mid;
+                                }
+                                planar = outside;
+                            } else {
+                                planar = ordinaryFixed;
+                                ++centerPlanarFallback;
+                            }
+                        }
+
+                        // Moving X onto the sagittal plane can place a rear seam
+                        // over the body's central cleft.  Keeping Y unchanged
+                        // then turns a harmless ~1.6u standoff over one cheek
+                        // into a square ~2.6u floating shelf.  Preserve the
+                        // pre-lock body clearance by moving only toward the
+                        // body in Y; never reduce it below the small floor.
+                        if (haveLineEntryGap) {
+                            float planarGap = 0.0f;
+                            const float targetGap =
+                                std::max(lineEntryGap, 0.06f);
+                            if (BVHSignedGap(*bodyBVH, planar,
+                                             planarGap, nullptr) &&
+                                planarGap > targetGap + 0.01f) {
+                                const float towardY =
+                                    (baseVerts[i].y >= g_refCenterY)
+                                        ? -1.0f : 1.0f;
+                                Vec3 outside = planar;
+                                Vec3 inside = planar;
+                                bool foundTarget = false;
+                                for (int probe = 1; probe <= 30; ++probe) {
+                                    inside.y =
+                                        planar.y + towardY * (0.10f * probe);
+                                    float insideGap = 0.0f;
+                                    if (BVHSignedGap(*bodyBVH, inside,
+                                                     insideGap, nullptr) &&
+                                        insideGap <= targetGap) {
+                                        foundTarget = true;
+                                        break;
+                                    }
+                                }
+                                if (foundTarget) {
+                                    for (int bi = 0; bi < 12; ++bi) {
+                                        Vec3 mid =
+                                            Scale(Add(outside, inside), 0.5f);
+                                        float midGap = 0.0f;
+                                        if (BVHSignedGap(*bodyBVH, mid,
+                                                         midGap, nullptr) &&
+                                            midGap >= targetGap)
+                                            outside = mid;
+                                        else
+                                            inside = mid;
+                                    }
+                                    planar = outside;
+                                    ++centerGapPreserved;
+                                }
+                            }
+                        }
+                        if (std::fabs(planar.x - ordinaryFixed.x) > 1.0e-5f ||
+                            std::fabs(planar.y - ordinaryFixed.y) > 1.0e-5f) {
+                            finalVerts[i] = planar;
+                            ++centerPlanarized;
+                        }
+                    }
+                }
             }
         }
 
         int moved = hemMoved + centerMoved;
         if (moved > 0) {
-            HLog("detour: authored-line-locks shape='%s' slider='%s' hem=%d center=%d body=%d hemBand=%.2f centerBand=%.2f",
+            HLog("detour: authored-line-locks shape='%s' slider='%s' hem=%d "
+                 "center=%d body=%d hemBand=%.2f centerBand=%.2f "
+                 "seedBand=%.2f zBin=%.2f feather=%.2f strength=%.2f "
+                 "pathB=%d bodySymRms=%.4f planar=%d gap=%d fallback=%d",
                  shapeName.c_str(), sliderName.c_str(), hemMoved, centerMoved,
-                 bodyPushed, hemBand, centerBand);
+                 bodyPushed, hemBand, centerBand, centerSeedBand, kZBin,
+                 centerFeatherW, centerStrength, (int)pathBCenterLine,
+                 pathBBodySymmetryRms, centerPlanarized, centerGapPreserved,
+                 centerPlanarFallback);
         }
         return moved;
     };
@@ -18332,6 +18653,75 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     if (!cleftPassEntry.empty())
         guardFittedFinisher(cleftPassEntry, "cleft-bridge");
+
+    // Path-B local support handoff.  The shell/contact solve can correctly
+    // clear the body yet still copy the first shallow recess immediately below
+    // a belly/seat support.  Bridge only that one material edge: a near-contact
+    // child reads a higher direct neighbour that is still in contact.  The
+    // snapshot field is not iterated, so it cannot walk down and inflate a hem.
+    if (pathBShellAccepted && tris && !tris->empty() && bodyBVH &&
+        bodyBVH->valid &&
+        EnvToggle("DRAPE_PATHB_SUPPORT_BRIDGE", true)) {
+        const std::vector<Vec3> supportEntry = finalVerts;
+        std::vector<Vec3> supportField;
+        const float supportMaxStep = EnvFloat(
+            "DRAPE_PATHB_SUPPORT_BRIDGE_STEP", 0.65f);
+        const int supportSeeds = BuildNearContactSupportBridgeField(
+            finalVerts, drapeEl, useEdges, *bodyBVH,
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_DRAPE", 0.20f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_CONTACT", 0.35f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_RELEASE_MIN", 0.35f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_RELEASE_MAX", 1.25f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_MIN_DZ", 0.25f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_MAX_DZ", 3.50f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_DIR_DOT", 0.975f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_TAPER", 0.10f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_STRENGTH", 0.65f),
+            supportMaxStep,
+            (int)EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_SMOOTH_ROUNDS", 2.0f),
+            EnvFloat("DRAPE_PATHB_SUPPORT_BRIDGE_SMOOTH", 0.50f),
+            supportField);
+        GuardedFieldStats supportGuard;
+        bool supportAccepted = supportSeeds > 0 &&
+            ApplyGuardedDisplacementField(
+                finalVerts, baseVerts, useEdges, *tris, exactSeamGroups,
+                supportField, supportMaxStep, supportGuard);
+
+        int bodyRegressions = 0;
+        float worstBodyRegression = 0.0f;
+        if (supportAccepted) {
+            for (size_t i = 0; i < n; ++i) {
+                if (Len2(Sub(finalVerts[i], supportEntry[i])) <= 1.0e-12f)
+                    continue;
+                float beforeGap = 0.0f, afterGap = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, supportEntry[i],
+                                  beforeGap, nullptr) ||
+                    !BVHSignedGap(*bodyBVH, finalVerts[i],
+                                  afterGap, nullptr))
+                    continue;
+                const float regression = beforeGap - afterGap;
+                worstBodyRegression =
+                    std::max(worstBodyRegression, regression);
+                if (regression > 0.02f ||
+                    (beforeGap >= -0.05f && afterGap < -0.05f))
+                    ++bodyRegressions;
+            }
+            if (bodyRegressions > 0) {
+                finalVerts = supportEntry;
+                supportAccepted = false;
+            }
+        }
+        HLog("path-b-shell: support-bridge seeds=%d accepted=%d moved=%d "
+             "alpha=%.3f max=%.3f bodyRegression=%d/%.4f "
+             "reject=%d/%d/%d",
+             supportSeeds, supportAccepted ? 1 : 0,
+             supportAccepted ? supportGuard.movedVerts : 0,
+             supportAccepted ? supportGuard.acceptedAlpha : 0.0f,
+             supportAccepted ? supportGuard.maxMove : 0.0f,
+             bodyRegressions, worstBodyRegression,
+             supportGuard.rejectedFace, supportGuard.rejectedEdge,
+             supportGuard.rejectedCross);
+    }
     tracePathBTail("16-cleft");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ HEM / HANGING-CLOTH DISPLACEMENT SMOOTHING (2026-07-11, user item #3) Ã¢â€â‚¬Ã¢â€â‚¬
@@ -20446,6 +20836,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (rounds > 0)
             HLog("last-chance flip repair: rounds=%d remaining=%d",
                  rounds, lastFlipped);
+    }
+
+    // The last-chance flip repair deliberately pulls broken faces toward the
+    // nominal conform and can therefore reintroduce lateral drift after the
+    // earlier centre-line lock.  Reassert the symmetry invariant at the true
+    // publication boundary.  This remains body-symmetry- and material-gated
+    // inside applyLooseAuthoredLineLocks.  Do not run the whole-mesh exact-seam
+    // body projection again here: every true centre twin receives the same
+    // correction already, while projecting unrelated seams a second time can
+    // invert a sleeve face.
+    if (pathBShellAccepted) {
+        applyLooseAuthoredLineLocks();
     }
     tracePathBTail("22-flip-repair");
 
