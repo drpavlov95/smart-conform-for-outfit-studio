@@ -4210,6 +4210,131 @@ static int BuildNearContactSupportBridgeField(
     return seeded;
 }
 
+// Release free cloth from a false elevated contact basin. A nearest-normal
+// body projection can push a free panel UP a belly/seat slope; when the
+// quasi-static solve stalls there, the panel remains both higher than its
+// authored/conformed material row and visually magnetized to the body.
+//
+// A frictionless body contact must not do net upward work against gravity.
+// For lower-body drape vertices only, propose a bounded vertical descent when
+// the solved point is above BOTH the authored and nominal-conform poses. If
+// descending would reduce its current body clearance, slide the point radially
+// outward at the new height until that clearance is restored. The caller
+// applies this field through the topology/crossing transaction, so this rule
+// cannot buy a better hang with a new fold, tear, or crossing.
+static int BuildElevatedContactReleaseField(
+    const std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<Vec3>& supportVerts,
+    const std::vector<float>& drapeEl,
+    const BodyBVH& body,
+    float minDrape,
+    float upliftStart,
+    float minGap,
+    float maxGap,
+    float strength,
+    float maxDown,
+    float maxRadial,
+    float maxGapLoss,
+    float minClearance,
+    float gapTolerance,
+    std::vector<Vec3>& outField)
+{
+    const size_t n = verts.size();
+    outField.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+    if (!body.valid || n == 0 || baseVerts.size() < n ||
+        supportVerts.size() < n || drapeEl.size() < n)
+        return 0;
+
+    minDrape = Clamp01(minDrape);
+    upliftStart = std::max(0.0f, upliftStart);
+    maxGap = std::max(minGap + 1.0e-3f, maxGap);
+    strength = Clamp01(strength);
+    maxDown = std::max(0.0f, maxDown);
+    maxRadial = std::max(0.0f, maxRadial);
+    maxGapLoss = std::max(0.0f, maxGapLoss);
+    minClearance = std::max(-0.05f, minClearance);
+    gapTolerance = std::max(0.0f, gapTolerance);
+    if (strength <= 0.0f || maxDown <= 0.0f) return 0;
+
+    constexpr float kRadialProbe = 0.10f;
+    const int radialProbes = (int)std::ceil(maxRadial / kRadialProbe);
+    int seeded = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (drapeEl[i] < minDrape) continue;
+
+        float entryGap = 0.0f;
+        if (!BVHSignedGap(body, verts[i], entryGap, nullptr) ||
+            entryGap < minGap || entryGap > maxGap)
+            continue;
+
+        const float supportZ =
+            std::max(baseVerts[i].z, supportVerts[i].z);
+        const float uplift = verts[i].z - supportZ;
+        if (uplift <= upliftStart) continue;
+
+        const float down =
+            std::min(maxDown, (uplift - upliftStart) * strength);
+        if (down <= 1.0e-6f) continue;
+
+        Vec3 candidate = verts[i];
+        candidate.z -= down;
+        float candidateGap = 0.0f;
+        if (!BVHSignedGap(body, candidate, candidateGap, nullptr))
+            continue;
+
+        // A floating panel is allowed to settle slightly closer while it
+        // descends, but never through the safe clearance floor. Near-contact
+        // vertices may only improve. Keep a small positive cushion before seam
+        // averaging so exact twins cannot consume the whole allowance.
+        const float requiredGap =
+            std::max(std::min(entryGap, minClearance),
+                     entryGap - maxGapLoss) +
+            gapTolerance;
+        if (candidateGap < requiredGap) {
+            float dx = 0.0f, dy = 0.0f, radius = 0.0f;
+            if (!RadialDir(verts[i], dx, dy, radius) ||
+                radialProbes <= 0)
+                continue;
+
+            Vec3 inside = candidate;
+            Vec3 outside = candidate;
+            bool found = false;
+            for (int probe = 1; probe <= radialProbes; ++probe) {
+                const float radial = std::min(
+                    maxRadial, (float)probe * kRadialProbe);
+                outside.x = candidate.x + dx * radial;
+                outside.y = candidate.y + dy * radial;
+                float probeGap = 0.0f;
+                if (BVHSignedGap(body, outside, probeGap, nullptr) &&
+                    probeGap >= requiredGap) {
+                    found = true;
+                    break;
+                }
+                inside = outside;
+            }
+            if (!found) continue;
+
+            // Minimal outward compensation at fixed Z. This avoids the
+            // 0.1-unit terraces a coarse first-hit probe would introduce.
+            for (int bi = 0; bi < 8; ++bi) {
+                Vec3 mid = Scale(Add(inside, outside), 0.5f);
+                float midGap = 0.0f;
+                if (BVHSignedGap(body, mid, midGap, nullptr) &&
+                    midGap >= requiredGap)
+                    outside = mid;
+                else
+                    inside = mid;
+            }
+            candidate = outside;
+        }
+
+        outField[i] = Sub(candidate, verts[i]);
+        ++seeded;
+    }
+    return seeded;
+}
+
 // Hanging-chain pass (older radial helper; kept for fallback paths).
 static void ApplyHangingChainPass(
     std::vector<Vec3>& finalVerts,
@@ -4586,7 +4711,8 @@ static bool ApplyGuardedDisplacementField(
     const std::vector<std::vector<uint32_t>>& exactSeamGroups,
     std::vector<Vec3> field,
     float maxMove,
-    GuardedFieldStats& stats)
+    GuardedFieldStats& stats,
+    bool allowClothRelaxation = false)
 {
     const size_t n = verts.size();
     if (n == 0 || field.size() != n || tris.empty()) return false;
@@ -4691,8 +4817,11 @@ static bool ApplyGuardedDisplacementField(
             float dot = (beforeArea > 1.0e-8f && afterArea > 1.0e-8f)
                 ? Dot(beforeNormals[ai], after) / (beforeArea * afterArea) : -1.0f;
             float ratio = beforeArea > 1.0e-8f ? afterArea / beforeArea : 0.0f;
-            if (!std::isfinite(afterArea) || dot < 0.50f ||
-                ratio < 0.50f || ratio > 2.0f) {
+            const float minDot = allowClothRelaxation ? 0.65f : 0.50f;
+            const float minArea = allowClothRelaxation ? 0.40f : 0.50f;
+            const float maxArea = allowClothRelaxation ? 4.10f : 2.0f;
+            if (!std::isfinite(afterArea) || dot < minDot ||
+                ratio < minArea || ratio > maxArea) {
                 facesOk = false;
                 break;
             }
@@ -4721,9 +4850,13 @@ static bool ApplyGuardedDisplacementField(
                 // entered already compressed/stretched may recover but may not
                 // get materially worse.  This avoids rejecting a coherent field
                 // merely because a very short baseline edge changes by >20%.
-                float minAllowed = beforeRatio < 0.75f
-                    ? beforeRatio * 0.90f : 0.75f;
-                float maxAllowed = std::max(1.25f, beforeRatio + 0.02f);
+                float minAllowed = allowClothRelaxation
+                    ? std::min(beforeRatio * 0.50f, 0.25f)
+                    : (beforeRatio < 0.75f
+                        ? beforeRatio * 0.90f : 0.75f);
+                float maxAllowed = allowClothRelaxation
+                    ? std::max(2.25f, beforeRatio + 0.70f)
+                    : std::max(1.25f, beforeRatio + 0.02f);
                 if (afterRatio < minAllowed || afterRatio > maxAllowed) {
                     edgesOk = false;
                     break;
@@ -7002,6 +7135,222 @@ struct OuterCollider {
     const BodyBVH& Base() const { return baseRef ? *baseRef : base; }
     const BodyBVH& Current() const { return currentRef ? *currentRef : current; }
 };
+
+// Positive means the move worsens this mesh's already-classified side of a
+// nearby garment surface. An inner mesh must remain on the inward (negative
+// gap) side of an OUTER collider; an outer mesh must remain on the outward
+// (positive gap) side of an INNER collider.
+static float LayerViolationRegression(
+    const std::vector<OuterCollider>* colliders,
+    bool surfaceIsOuter,
+    const Vec3& before,
+    const Vec3& after,
+    float nearDistance,
+    float margin)
+{
+    if (!colliders) return 0.0f;
+    float worst = 0.0f;
+    for (const OuterCollider& collider : *colliders) {
+        const BodyBVH& surface = collider.Current();
+        if (!surface.valid) continue;
+        Vec3 beforeCP{0.0f, 0.0f, 0.0f}, beforeN{0.0f, 0.0f, 1.0f};
+        Vec3 afterCP{0.0f, 0.0f, 0.0f}, afterN{0.0f, 0.0f, 1.0f};
+        float beforeD2 = 0.0f, afterD2 = 0.0f;
+        float beforeU = 0.0f, beforeV = 0.0f, beforeW = 0.0f;
+        float afterU = 0.0f, afterV = 0.0f, afterW = 0.0f;
+        if (!BVHClosestPointEx(
+                surface, before, beforeCP, beforeN, beforeD2,
+                nullptr, &beforeU, &beforeV, &beforeW) ||
+            !BVHClosestPointEx(
+                surface, after, afterCP, afterN, afterD2,
+                nullptr, &afterU, &afterV, &afterW))
+            continue;
+        // Belts, straps and plates are commonly open surfaces. A point below
+        // their hem finds an edge/vertex as its closest point, where the face
+        // normal's signed side is not a meaningful inside/outside test. Only
+        // guard an actual face-interior relationship.
+        constexpr float kInteriorBary = 0.01f;
+        if (std::min({beforeU, beforeV, beforeW}) <= kInteriorBary ||
+            std::min({afterU, afterV, afterW}) <= kInteriorBary)
+            continue;
+        const float beforeGap =
+            Dot(Sub(before, beforeCP), beforeN) < 0.0f
+                ? -std::sqrt(beforeD2) : std::sqrt(beforeD2);
+        const float afterGap =
+            Dot(Sub(after, afterCP), afterN) < 0.0f
+                ? -std::sqrt(afterD2) : std::sqrt(afterD2);
+        if (std::min(std::fabs(beforeGap), std::fabs(afterGap)) >
+            nearDistance)
+            continue;
+        const float beforeViolation = surfaceIsOuter
+            ? std::max(0.0f, beforeGap + margin)
+            : std::max(0.0f, margin - beforeGap);
+        const float afterViolation = surfaceIsOuter
+            ? std::max(0.0f, afterGap + margin)
+            : std::max(0.0f, margin - afterGap);
+        worst = std::max(worst, afterViolation - beforeViolation);
+    }
+    return worst;
+}
+
+static float LayerViolationRegression(
+    const std::vector<OuterCollider>* outerColliders,
+    const std::vector<OuterCollider>* innerColliders,
+    const Vec3& before,
+    const Vec3& after,
+    float nearDistance,
+    float margin)
+{
+    return std::max(
+        LayerViolationRegression(
+            outerColliders, true, before, after, nearDistance, margin),
+        LayerViolationRegression(
+            innerColliders, false, before, after, nearDistance, margin));
+}
+
+// Remove only release deltas which would worsen a nearby layer relationship.
+// Vertex checks catch direct crossings; barycentric face samples catch a belt
+// or plate passing through the middle of a coarse cloth triangle. Exact seam
+// twins are culled together so the filter cannot unzip an authored seam.
+static int CullContactReleaseAgainstLayers(
+    const std::vector<Vec3>& entry,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<OuterCollider>* outerColliders,
+    const std::vector<OuterCollider>* innerColliders,
+    float nearDistance,
+    float margin,
+    float regressionEps,
+    std::vector<Vec3>& field)
+{
+    const size_t n = entry.size();
+    if (field.size() != n ||
+        ((!outerColliders || outerColliders->empty()) &&
+         (!innerColliders || innerColliders->empty())))
+        return 0;
+
+    nearDistance = std::max(0.0f, nearDistance);
+    margin = std::max(0.0f, margin);
+    regressionEps = std::max(0.0f, regressionEps);
+    std::vector<uint8_t> culled(n, 0);
+    for (int round = 0; round < 8; ++round) {
+        std::vector<uint8_t> reject(n, 0);
+        std::vector<Vec3> candidate = entry;
+        std::vector<uint8_t> active(n, 0);
+        for (size_t i = 0; i < n; ++i) {
+            if (Len2(field[i]) <= 1.0e-12f) continue;
+            active[i] = 1;
+            candidate[i] = Add(entry[i], field[i]);
+            if (LayerViolationRegression(
+                    outerColliders, innerColliders,
+                    entry[i], candidate[i], nearDistance, margin) >
+                regressionEps)
+                reject[i] = 1;
+        }
+
+        for (const auto& tri : tris) {
+            if (tri[0] >= n || tri[1] >= n || tri[2] >= n ||
+                (!active[tri[0]] && !active[tri[1]] && !active[tri[2]]))
+                continue;
+            for (const TriangleSample& sample : kTriangleSamples) {
+                const Vec3 beforePoint =
+                    SampleTrianglePoint(entry, tri, sample);
+                const Vec3 afterPoint =
+                    SampleTrianglePoint(candidate, tri, sample);
+                if (LayerViolationRegression(
+                        outerColliders, innerColliders,
+                        beforePoint, afterPoint, nearDistance, margin) <=
+                    regressionEps)
+                    continue;
+
+                bool localized = false;
+                const float weights[3] = {sample.a, sample.b, sample.c};
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t vi = tri[k];
+                    if (!active[vi] || weights[k] <= 1.0e-6f) continue;
+                    const Vec3 oneVertexPoint = Add(
+                        beforePoint, Scale(field[vi], weights[k]));
+                    if (LayerViolationRegression(
+                            outerColliders, innerColliders,
+                            beforePoint, oneVertexPoint,
+                            nearDistance, margin) > regressionEps) {
+                        reject[vi] = 1;
+                        localized = true;
+                    }
+                }
+                // A nearest-surface switch can make only the combined field
+                // fail. Conservatively remove all contributors in that face.
+                if (!localized)
+                    for (uint32_t vi : tri)
+                        if (active[vi]) reject[vi] = 1;
+            }
+        }
+
+        for (const auto& group : exactSeamGroups) {
+            bool rejectGroup = false;
+            for (uint32_t vi : group)
+                if (vi < n && reject[vi]) {
+                    rejectGroup = true;
+                    break;
+                }
+            if (!rejectGroup) continue;
+            for (uint32_t vi : group)
+                if (vi < n && active[vi]) reject[vi] = 1;
+        }
+
+        int removedThisRound = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!reject[i] || !active[i]) continue;
+            field[i] = Vec3{0.0f, 0.0f, 0.0f};
+            culled[i] = 1;
+            ++removedThisRound;
+        }
+        if (removedThisRound == 0) break;
+    }
+    return (int)std::count(culled.begin(), culled.end(), (uint8_t)1);
+}
+
+static int CountContactReleaseLayerRegressions(
+    const std::vector<Vec3>& entry,
+    const std::vector<Vec3>& candidate,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<OuterCollider>* outerColliders,
+    const std::vector<OuterCollider>* innerColliders,
+    float nearDistance,
+    float margin,
+    float regressionEps,
+    float& worstRegression)
+{
+    const size_t n = entry.size();
+    worstRegression = 0.0f;
+    if (candidate.size() != n) return 1;
+    std::vector<uint8_t> active(n, 0);
+    int regressions = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (Len2(Sub(candidate[i], entry[i])) <= 1.0e-12f) continue;
+        active[i] = 1;
+        const float regression = LayerViolationRegression(
+            outerColliders, innerColliders, entry[i], candidate[i],
+            nearDistance, margin);
+        worstRegression = std::max(worstRegression, regression);
+        if (regression > regressionEps) ++regressions;
+    }
+    for (const auto& tri : tris) {
+        if (tri[0] >= n || tri[1] >= n || tri[2] >= n ||
+            (!active[tri[0]] && !active[tri[1]] && !active[tri[2]]))
+            continue;
+        for (const TriangleSample& sample : kTriangleSamples) {
+            const float regression = LayerViolationRegression(
+                outerColliders, innerColliders,
+                SampleTrianglePoint(entry, tri, sample),
+                SampleTrianglePoint(candidate, tri, sample),
+                nearDistance, margin);
+            worstRegression = std::max(worstRegression, regression);
+            if (regression > regressionEps) ++regressions;
+        }
+    }
+    return regressions;
+}
 
 struct PassBlendGuardStats {
     int attempts = 0;
@@ -20848,6 +21197,139 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // invert a sleeve face.
     if (pathBShellAccepted) {
         applyLooseAuthoredLineLocks();
+    }
+
+    // Final contact release. The shell can converge to a valid but elevated
+    // nearest-normal contact basin: free cloth is lifted up a body slope and
+    // then appears square over the seat or magnetized to the iliac recess.
+    // Let such vertices descend once at the true publication boundary, with
+    // outward compensation preserving the clearance already achieved. The
+    // guarded transaction keeps the approved centre seam, topology, edge
+    // strain and crossing set invariant.
+    if (pathBShellAccepted && tris && !tris->empty() &&
+        bodyBVH && bodyBVH->valid &&
+        EnvToggle("DRAPE_PATHB_CONTACT_RELEASE", true)) {
+        const std::vector<Vec3> releaseEntry = finalVerts;
+        std::vector<Vec3> releaseField;
+        const float releaseMaxDown = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_DOWN", 1.0f));
+        const float releaseMaxRadial = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_RADIAL", 2.5f));
+        const float releaseMaxGapLoss = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_GAP_LOSS", 0.20f));
+        const float releaseMinClearance = std::max(
+            -0.05f,
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_CLEARANCE", 0.08f));
+        const float releaseGapTolerance = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_GAP_TOL", 0.02f));
+        const float releaseLayerNear = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_LAYER_NEAR", 4.25f));
+        const float releaseLayerMargin = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_LAYER_MARGIN", 0.02f));
+        const float releaseLayerEps = std::max(
+            0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_LAYER_EPS", 0.0001f));
+        const int releaseSeeds = BuildElevatedContactReleaseField(
+            finalVerts, baseVerts, supportVerts, drapeEl, *bodyBVH,
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_DRAPE", 0.50f),
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_UPLIFT", 0.25f),
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_GAP_MIN", -0.05f),
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_GAP_MAX", 3.20f),
+            EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_STRENGTH", 0.65f),
+            releaseMaxDown, releaseMaxRadial,
+            releaseMaxGapLoss, releaseMinClearance, releaseGapTolerance,
+            releaseField);
+
+        GuardedFieldStats releaseGuard;
+        bool releaseAccepted = false;
+        int releaseLayerCulled = 0;
+        if (releaseSeeds > 0) {
+            // Treat every exact seam as one material variable, including twins
+            // that did not independently qualify as release seeds. Averaging
+            // zeros too feathers the load at an eligibility boundary instead
+            // of copying one twin's full drop onto the whole seam group.
+            for (const auto& group : exactSeamGroups) {
+                Vec3 mean{0.0f, 0.0f, 0.0f};
+                int count = 0;
+                for (uint32_t vi : group) {
+                    if (vi >= n) continue;
+                    mean = Add(mean, releaseField[vi]);
+                    ++count;
+                }
+                if (count == 0) continue;
+                mean = Scale(mean, 1.0f / (float)count);
+                for (uint32_t vi : group)
+                    if (vi < n) releaseField[vi] = mean;
+            }
+            if (EnvToggle(
+                    "DRAPE_PATHB_CONTACT_RELEASE_LAYER_GUARD", true)) {
+                releaseLayerCulled = CullContactReleaseAgainstLayers(
+                    finalVerts, *tris, exactSeamGroups,
+                    outerColliders, innerColliders,
+                    releaseLayerNear, releaseLayerMargin, releaseLayerEps,
+                    releaseField);
+            }
+            const float releaseMaxMove = std::sqrt(
+                releaseMaxDown * releaseMaxDown +
+                releaseMaxRadial * releaseMaxRadial);
+            releaseAccepted = ApplyGuardedDisplacementField(
+                finalVerts, baseVerts, useEdges, *tris, exactSeamGroups,
+                std::move(releaseField), releaseMaxMove, releaseGuard,
+                /*allowClothRelaxation=*/true);
+        }
+
+        int bodyRegressions = 0;
+        float worstBodyRegression = 0.0f;
+        int layerRegressions = 0;
+        float worstLayerRegression = 0.0f;
+        if (releaseAccepted) {
+            for (size_t i = 0; i < n; ++i) {
+                if (Len2(Sub(finalVerts[i], releaseEntry[i])) <= 1.0e-12f)
+                    continue;
+                float beforeGap = 0.0f, afterGap = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, releaseEntry[i],
+                                  beforeGap, nullptr) ||
+                    !BVHSignedGap(*bodyBVH, finalVerts[i],
+                                  afterGap, nullptr))
+                    continue;
+                const float regression = beforeGap - afterGap;
+                worstBodyRegression =
+                    std::max(worstBodyRegression, regression);
+                if (regression >
+                        releaseMaxGapLoss - releaseGapTolerance + 1.0e-4f ||
+                    (beforeGap >= releaseMinClearance &&
+                     afterGap < releaseMinClearance - 1.0e-4f) ||
+                    (beforeGap >= -0.05f && afterGap < -0.05f))
+                    ++bodyRegressions;
+            }
+            if (bodyRegressions > 0) {
+                finalVerts = releaseEntry;
+                releaseAccepted = false;
+            }
+            if (releaseAccepted &&
+                EnvToggle(
+                    "DRAPE_PATHB_CONTACT_RELEASE_LAYER_GUARD", true)) {
+                layerRegressions = CountContactReleaseLayerRegressions(
+                    releaseEntry, finalVerts, *tris,
+                    outerColliders, innerColliders,
+                    releaseLayerNear, releaseLayerMargin, releaseLayerEps,
+                    worstLayerRegression);
+                if (layerRegressions > 0) {
+                    finalVerts = releaseEntry;
+                    releaseAccepted = false;
+                }
+            }
+        }
+        HLog("path-b-shell: contact-release seeds=%d accepted=%d moved=%d "
+             "alpha=%.3f max=%.3f bodyRegression=%d/%.4f "
+             "layerCull=%d layerRegression=%d/%.4f reject=%d/%d/%d",
+             releaseSeeds, releaseAccepted ? 1 : 0,
+             releaseAccepted ? releaseGuard.movedVerts : 0,
+             releaseAccepted ? releaseGuard.acceptedAlpha : 0.0f,
+             releaseAccepted ? releaseGuard.maxMove : 0.0f,
+             bodyRegressions, worstBodyRegression,
+             releaseLayerCulled, layerRegressions, worstLayerRegression,
+             releaseGuard.rejectedFace, releaseGuard.rejectedEdge,
+             releaseGuard.rejectedCross);
     }
     tracePathBTail("22-flip-repair");
 

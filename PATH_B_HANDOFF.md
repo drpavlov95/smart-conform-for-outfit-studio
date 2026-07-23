@@ -8,6 +8,148 @@ hash from this document.
 
 ---
 
+# Codex continuation 2026-07-23 - elevated-contact release for seat and iliac bridge
+
+## User decision and frozen reproduction
+
+The user visually approved the rear centre-line correction from `90ad488`.
+That invariant is frozen. The two remaining complaints were:
+
+1. the upper seat looked square and floated above the body;
+2. the free rows below the lower belly still followed the lateral
+   iliac/groin recess instead of hanging through it.
+
+The exact approved-seam input is:
+
+`tmp/pathb/live_freeze_20260723_1124/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy__112421.drcap`
+
+Its replay without this continuation is
+`tmp/pathb/live_freeze_20260723_1124/replay.obj`, SHA-256
+`0838F90DEE7B643BB13AB085FAC9B7F8B7754BFB60E14274AA3DE0F02798F259`.
+
+## Diagnosis
+
+The accepted shell can stall in an elevated nearest-normal contact basin. A
+free row is projected up a belly/seat slope, remains several units above both
+its authored row and its nominal conform row, and then has no force which lets
+it slide down again. This is the measured source of both residual symptoms.
+
+Uniform or per-step extra gravity is not a viable fix in this solver. Even tiny
+increments changed the nonlinear basin, creating face flips, collapse or new
+clipping. Those research controls were removed before shipping.
+
+## Global contact-release rule
+
+`BuildElevatedContactReleaseField` runs once at the true publication boundary,
+after the approved centre-line lock. It has no outfit name, anatomical
+coordinate, vertex ID or Blacksmith-specific branch. A vertex qualifies only
+when:
+
+- it is materially free cloth (`drapeEl >= 0.50`);
+- its current body gap is near contact (`-0.05..3.20u`);
+- it is at least `0.25u` above both authored and nominal-conform material rows.
+
+The proposed descent is bounded to `1.0u` per application and scales by `0.65`
+of the excess height. A floating point may settle up to `0.18u` closer to the
+body, but never below the `0.08u` safe-clearance floor. If descent would exceed
+that allowance, a fixed-height radial search supplies only the minimum outward
+compensation needed.
+
+The result is not written directly:
+
+- exact seam twins receive a shared field;
+- face orientation/area, edge strain and non-adjacent crossings are gated by
+  the existing transactional field applier;
+- a final signed-body-gap audit rolls the transaction back on any excessive
+  clearance loss or new penetration;
+- nearby inner/outer garment surfaces also filter and audit the field.
+
+The layer rule handles open belts/straps correctly: signed side is enforced
+only when the closest point lies in a face interior. A point below an open hem
+must not be treated as being on the wrong side of a closed solid. Vertex and
+barycentric face samples are both checked; exact seam twins are culled
+together. Any residual layer regression rolls the whole pass back.
+
+Runtime rollback/research controls are prefixed
+`DRAPE_PATHB_CONTACT_RELEASE_`; setting
+`DRAPE_PATHB_CONTACT_RELEASE=0` disables the whole continuation.
+
+## Blacksmith Heavy result
+
+The final RelWithDebInfo candidate is:
+
+`tmp/pathb/contact_release_candidate_1124/candidate_settle.obj`
+
+SHA-256:
+
+`ED001829F9DDC095A23AB138B9E8541A2D7C68A95F76F0AA992C284D96041EA5`
+
+On the exact capture it found `277` release seeds, culled `49` against the
+separate belt, and transactionally moved `228` vertices at alpha `1.0`.
+Maximum displacement is `1.286u`; there are zero excessive body-clearance
+regressions and zero layer regressions.
+
+The affected regions are not single-vertex patches:
+
+- upper rear band: `30/68` vertices moved, mean moved distance `0.798u`;
+- lower-belly/iliac band: `35/43` vertices moved, mean moved distance `0.941u`.
+
+The exact user-marked iliac vertex 2065 descends from `z=68.608` to `67.608`.
+The approved centre seam remains fixed where layer clearance requires it;
+surrounding rear rows descend and round the transition instead.
+
+Focused comparison against the approved-seam baseline:
+
+| gate | baseline | contact release |
+|---|---:|---:|
+| inverted faces | `23` | `23` |
+| collapsed faces | `0` | `0` |
+| open seam | `0` | `0` |
+| visible body samples | `5` | `5` |
+| visible arm samples | `3` | `3` |
+| total body-through samples | `69` | `69` |
+| belt vertex residuals | `177` | `175` |
+| belt face-sample residuals | `1100` | `1098` |
+
+The user's eye remains the final gate for the seat and iliac silhouette.
+
+## Cross-garment controls
+
+The final rule was replayed with `DRAPE_SHELL_ALL_SHAPES=1` against causal
+release-OFF baselines:
+
+- Falmer Cloth: topology/body guard rejects the pass; output is byte-identical;
+- Yarl Clothes: layer audit rejects the pass; output is byte-identical;
+- Yarl Cloak: accepts only `3` small moves;
+- Vampire robes: topology guard reduces the pass to alpha `0.5`;
+- all four preserve their baseline flip, collapse, seam, stretch,
+  visible-body and worst-depth hard gates.
+
+The algorithm is global, but activation remains inside the existing Path-B
+pilot scope. In the user's live setup that is BlackSmithTorso/RM_Heavy; these
+other garments are research controls, not a scope promotion.
+
+## Final validation and installed state
+
+The optimized Release replay is byte-identical to the RelWithDebInfo candidate
+(`ED001829...`). The default/shell-OFF corpus remains green without updating a
+golden: Falmer `8`, Blacksmith `4`, Vampire `2`, Yarl `4` (`18/18`).
+Harness self-test, shadow-selftest, unilateral XPBD, analytic dihedral,
+colored-GS and cloth/body sample-contact tests all pass.
+
+The Release build artifact and both installed copies are byte-identical,
+SHA-256:
+
+`EF070FCC9875D7B97F0055B9119C125D19F957B7ED05D4C56543302D9F284487`
+
+Installed paths:
+
+- `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
+- `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
+
+The user still owns the unstaged golden edit, capture helper and runtime flag
+files. Do not stage or discard them.
+
 # Codex continuation 2026-07-23 - residual seam, floating seat and iliac bridge
 
 ## User-visible report and exact reproduction
