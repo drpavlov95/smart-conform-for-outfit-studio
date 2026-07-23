@@ -16670,9 +16670,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kVertexStep = intermediateOuterLayer ? 0.075f : ((normPreset == DRAPE_PRESET_BELT) ? 0.105f : 0.075f);
         const float kFaceStep = intermediateOuterLayer ? 0.050f : ((normPreset == DRAPE_PRESET_BELT) ? 0.075f : 0.055f);
         const int kRounds = intermediateOuterLayer ? 5 : ((normPreset == DRAPE_PRESET_BELT) ? 8 : 5);
-        const float kAuthoredMaxMove = ClampRange(
+        const float kClothMaxMove = ClampRange(
             EnvFloat("DRAPE_LAYER_ORDER_MAX_MOVE", 0.10f), 0.05f, 1.50f);
-        const std::vector<Vec3> clearanceEntry = authoredOutermostCloth
+        const bool boundedIntermediateCloth = intermediateOuterLayer;
+        const std::vector<Vec3> clearanceEntry = boundedIntermediateCloth
             ? finalVerts : std::vector<Vec3>{};
         const std::vector<uint8_t>& sharedClothSeam =
             crossMeshSeamAnchor;
@@ -16813,16 +16814,22 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
             if (roundAdjusted == 0) break;
             totalAdjusted += roundAdjusted;
-            if (authoredOutermostCloth) {
+            auto clampClothClearance = [&]() {
+                if (!boundedIntermediateCloth) return;
                 for (size_t i = 0; i < n; ++i) {
                     Vec3 delta = Sub(finalVerts[i], clearanceEntry[i]);
                     float len = Len(delta);
-                    if (len > kAuthoredMaxMove && len > 1.0e-6f)
+                    if (len > kClothMaxMove && len > 1.0e-6f)
                         finalVerts[i] = Add(clearanceEntry[i],
-                            Scale(delta, kAuthoredMaxMove / len));
+                            Scale(delta, kClothMaxMove / len));
                 }
-            }
+            };
+            clampClothClearance();
             applyFinalSupportCap(14, nullptr);
+            // The support cap is coupled and can propagate a local collision
+            // correction back into the whole waist after the first clamp.
+            // Re-apply the same per-call trust region to the published state.
+            clampClothClearance();
             if (authoredOutermostCloth) {
                 // The Vampire mesh is a stack of plate islands. Local-normal
                 // expansion must restore authored twin/proximity invariants in
@@ -17352,8 +17359,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
 
     tracePathBTail("10-pre-tuck");
-    applyOuterAccessoryInnerClearance("pre-cap");
-    applyFinalLayerTuck(0, false, "pre-cap");
+    const bool finalInnerLayerClearance =
+        EnvToggle("DRAPE_FINAL_INNER_LAYER_CLEARANCE", true);
+    const bool finalLayerTuck =
+        EnvToggle("DRAPE_FINAL_LAYER_TUCK", true);
+    if (finalInnerLayerClearance)
+        applyOuterAccessoryInnerClearance("pre-cap");
+    if (finalLayerTuck)
+        applyFinalLayerTuck(0, false, "pre-cap");
     tracePathBTail("11-layer-tuck");
     // Do not close visual gaps by pulling arbitrary boundary vertices together here.
     // Replays showed that post-solve seam tugging increases support-edge stretch on
@@ -17385,7 +17398,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), finalBodyAdjusted);
     }
     tracePathBTail("12-cap-clear");
-    applyOuterAccessoryInnerClearance("post-cap");
+    if (finalInnerLayerClearance)
+        applyOuterAccessoryInnerClearance("post-cap");
     applyFinalExactSeamWeld("pre-prox-exact-seam-weld");
     applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
     logProxSeamState("before-final-prox-cap");
@@ -20217,10 +20231,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         else if (DrapeFlagExists("anticlip_safe_floor_on.flag"))
             safeTopologyFloor = true;
 #endif
-        // The Path-B pilot always uses the transactional floor: its accepted
-        // shell is a trusted crossing/body reference and must not be remodeled
-        // by the legacy push/cap/weld loop. Outside Path-B, retain the existing
-        // Vampire-only opt-in scope until the full corpus proves general use.
+        // Path-B always uses the transactional floor: its accepted shell is a
+        // trusted crossing/body reference. Keep the legacy opt-in constrained
+        // to the already-proven Vampire pilot; on Thalmor the generic safe
+        // floor preserved topology but retained substantially deeper body
+        // penetrations than the legacy push/cap loop.
         const bool legacySafeFloorScope = safeTopologyFloor &&
             shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy";
         safeTopologyFloor = (pathBShellAccepted || legacySafeFloorScope) &&
@@ -21511,6 +21526,123 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              releaseLayerCulled, layerRegressions, worstLayerRegression,
              releaseGuard.rejectedFace, releaseGuard.rejectedEdge,
              releaseGuard.rejectedCross);
+    }
+
+    // Publication-boundary closure for authored seams split across ShapeData
+    // meshes. Several legacy finishing passes intentionally ignore invMass and
+    // can move the early seam anchors again. Restore the two sides to their own
+    // coincident vanilla targets only if doing so introduces no new face
+    // regression, self-crossing, body penetration or global integrity loss.
+    if (crossMeshSeamAnchorCount > 0 && tris && !tris->empty() &&
+        EnvToggle("DRAPE_CROSS_MESH_SEAM_FINAL", true)) {
+        const std::vector<Vec3> seamEntry = finalVerts;
+        std::vector<Vec3> seamCandidate = finalVerts;
+        double splitBeforeSum = 0.0;
+        double splitAfterSum = 0.0;
+        int splitCount = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= crossMeshSeamAnchor.size() ||
+                !crossMeshSeamAnchor[i])
+                continue;
+            splitBeforeSum += Len(Sub(supportVerts[i], seamEntry[i]));
+            seamCandidate[i] = supportVerts[i];
+            splitAfterSum += Len(Sub(supportVerts[i], seamCandidate[i]));
+            ++splitCount;
+        }
+
+        PathBFaceClosureStats seamFaceClosure;
+        const bool seamFacesOk = PathBCloseFaceRegressions(
+            seamEntry, baseVerts, seamCandidate, *tris,
+            exactSeamGroups, seamFaceClosure);
+        PathBCrossingClosureStats seamCrossingClosure;
+        const bool seamCrossingsOk = PathBCloseNewCrossings(
+            seamEntry, seamCandidate, *tris,
+            exactSeamGroups, seamCrossingClosure);
+
+        std::vector<PathBShellEdge> seamGateEdges;
+        std::vector<PathBShellHinge> seamGateHinges;
+        std::vector<uint8_t> seamGateBoundary;
+        const bool seamTopologyBuilt = PathBBuildTopology(
+            baseVerts, *tris, seamGateEdges,
+            seamGateHinges, seamGateBoundary);
+        BodyBVH emptyBody;
+        const BodyBVH& seamBody =
+            bodyBVH && bodyBVH->valid ? *bodyBVH : emptyBody;
+        PathBShellIntegrity seamEntryIntegrity;
+        PathBShellIntegrity seamCandidateIntegrity;
+        const bool seamIntegrityMeasured =
+            seamTopologyBuilt &&
+            PathBComputeIntegrity(
+                seamEntry, baseVerts, seamGateEdges, *tris,
+                seamBody, seamEntryIntegrity) &&
+            PathBComputeIntegrity(
+                seamCandidate, baseVerts, seamGateEdges, *tris,
+                seamBody, seamCandidateIntegrity);
+
+        PathBBodySampleStats seamBodySamples;
+        const bool seamBodySamplesOk =
+            !(bodyBVH && bodyBVH->valid) ||
+            PathBBodySamplesNoWorse(
+                seamEntry, seamCandidate, *tris,
+                *bodyBVH, seamBodySamples);
+
+        splitAfterSum = 0.0;
+        for (size_t i = 0; i < n; ++i)
+            if (i < crossMeshSeamAnchor.size() &&
+                crossMeshSeamAnchor[i])
+                splitAfterSum +=
+                    Len(Sub(supportVerts[i], seamCandidate[i]));
+        const float splitBefore = splitCount > 0
+            ? (float)(splitBeforeSum / (double)splitCount) : 0.0f;
+        const float splitAfter = splitCount > 0
+            ? (float)(splitAfterSum / (double)splitCount) : 0.0f;
+        const bool seamMeaningfullyClosed =
+            splitBefore <= 0.02f ||
+            splitAfter <= std::max(0.01f, splitBefore * 0.30f);
+        // This is a local repair of an already publishable production result,
+        // not a new Path-B shell publication. Some legacy outfits enter this
+        // point above Path B's absolute 8x area cap. Requiring the candidate to
+        // become globally pristine would reject a seam closure even when every
+        // relative integrity measure is byte-for-byte unchanged.
+        const bool seamIntegrityNoWorse =
+            seamIntegrityMeasured &&
+            seamCandidateIntegrity.flips <= seamEntryIntegrity.flips &&
+            seamCandidateIntegrity.collapsed <= seamEntryIntegrity.collapsed &&
+            seamCandidateIntegrity.worstAreaRatio <=
+                seamEntryIntegrity.worstAreaRatio + 1.0e-4f &&
+            seamCandidateIntegrity.worstStretch <=
+                seamEntryIntegrity.worstStretch + 1.0e-4f &&
+            seamCandidateIntegrity.penetrations <=
+                seamEntryIntegrity.penetrations &&
+            seamCandidateIntegrity.worstPenetration <=
+                seamEntryIntegrity.worstPenetration + 1.0e-4f &&
+            seamCandidateIntegrity.bodyFacePenetrations <=
+                seamEntryIntegrity.bodyFacePenetrations &&
+            seamCandidateIntegrity.worstBodyFacePenetration <=
+                seamEntryIntegrity.worstBodyFacePenetration + 1.0e-4f;
+        const bool seamAccepted =
+            splitCount > 0 &&
+            seamFacesOk && seamCrossingsOk &&
+            seamIntegrityNoWorse &&
+            seamBodySamplesOk && seamMeaningfullyClosed;
+        finalVerts = seamAccepted ? std::move(seamCandidate) : seamEntry;
+        HLog("cross-mesh-seam-final: shape='%s' anchors=%d accepted=%d "
+             "split=%.4f->%.4f face=%d/%d cross=%d/%d "
+             "integrity=%d flips=%d->%d collapsed=%d->%d "
+             "stretch=%.4f->%.4f bodySamples=%d/%d",
+             shapeName.c_str(), splitCount, seamAccepted ? 1 : 0,
+             splitBefore, splitAfter,
+             seamFaceClosure.initialWorsened,
+             seamFaceClosure.finalWorsened,
+             seamCrossingClosure.initialNewPairs,
+             seamCrossingClosure.finalNewPairs,
+             seamIntegrityMeasured ? 1 : 0,
+             seamEntryIntegrity.flips, seamCandidateIntegrity.flips,
+             seamEntryIntegrity.collapsed, seamCandidateIntegrity.collapsed,
+             seamEntryIntegrity.worstStretch,
+             seamCandidateIntegrity.worstStretch,
+             seamBodySamples.worsened,
+             seamBodySamples.afterPenetrations);
     }
     tracePathBTail("22-flip-repair");
 

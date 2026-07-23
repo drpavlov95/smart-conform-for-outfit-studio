@@ -8,6 +8,119 @@ hash from this document.
 
 ---
 
+# Codex continuation 2026-07-23 - final Thalmor junction closure and bounded waist clearance
+
+## Why the preceding seam checkpoint was incomplete
+
+The user retested the first cross-mesh seam build and reported that the lower
+robe still tore open and the waist was over-deformed. The earlier `113347/8`
+captures did not freeze the exact visible state. The authoritative post-deploy
+captures are the six `151052` files under `captures/yarl`; the two participating
+meshes are:
+
+- `...___ThalmorRobesF__RM_Heavy__151052.drcap`
+- `...___LongSkirt__RM_Heavy__151052.drcap`
+
+The first rule correctly found and pinned the `25` authored shared-boundary
+pairs during the solve, but late panel, hem, contact and support passes were
+allowed to move them again. In the exact visible result the junction still
+opened to mean/max `0.380978/1.695074u`, despite the two vanilla-conform targets
+remaining coincident at `0.000039/0.000064u`.
+
+## Global final seam transaction
+
+The shared-boundary rule now has a second fixed point at the true publication
+boundary. Each side is proposed at its own vanilla-conform target; it never
+pursues the other mesh's solved collider, so the result remains independent of
+shape solve order. The complete proposal is accepted only if all of these
+remain no worse than the already-publishable entry:
+
+- authored face orientation, area collapse and area expansion;
+- support-edge stretch;
+- non-adjacent self-crossing pairs;
+- body vertex penetrations and canonical barycentric face samples.
+
+This local transaction uses relative integrity. It does not require an old
+outfit which entered above Path B's absolute `8x` area ceiling to become
+globally pristine merely to close an otherwise safe seam. The rule still has
+no outfit name, shape name, anatomy coordinate or vertex ID. It runs only for
+the open-boundary cloth pairs found by the authored seam detector. Runtime
+control: `DRAPE_CROSS_MESH_SEAM_FINAL`.
+
+On the exact paired Release outputs the shared line is now mean/max
+`0.00002681/0.00014142u` across all `25` pairs. The transaction logs
+`accepted=1`, no new face regression or crossing, unchanged flip/collapse/
+stretch counts, and zero worsened body samples for both participating shapes.
+
+## Waist root cause and bounded correction
+
+The deforming waist was separate from the seam. A controlled ablation showed
+that `outer-layer-inner-clearance` moved `2132` vertex/face samples in the
+first call and another `685` in the second. Disabling only that pass reduced
+the robe's `z=68..82` deviation from vanilla conform and changed captured
+garment residuals from `10/39` vertex/face to `5/6`. Disabling the adjacent
+layer-tuck pass made no meaningful difference.
+
+The clearance pass remains enabled because it prevents real inner-layer clips,
+but intermediate cloth now has a cumulative per-call trust region
+(`DRAPE_LAYER_ORDER_MAX_MOVE`, default `0.10u`). The bound is applied both
+before and after the coupled support cap, preventing that cap from propagating
+a local collision correction around the entire waist. Structured belts and
+armor retain their previous behavior.
+
+Two tempting defaults were explicitly rejected after rendering the exact
+Thalmor state:
+
+- enabling the component finisher guard improved flip/stretch counters but
+  produced a visibly angular lower-skirt silhouette, so it remains opt-in;
+- enabling the transactional final body floor for every legacy cloth preserved
+  topology but regressed the robe from `7/-1.876u` body penetrations/depth to
+  `9/-4.041u`, so its proven Path-B/Vampire scope is retained.
+
+Diagnostic controls added for future ablation are
+`DRAPE_FINAL_INNER_LAYER_CLEARANCE` and `DRAPE_FINAL_LAYER_TUCK`; both default
+on.
+
+## Exact result, validation and deployment
+
+Relative to the user's exact pre-fix `151052` state:
+
+- `ThalmorRobesF`: seam closed; worst edge stretch remains `6.80038`;
+  body penetrations `7 -> 5`, worst depth `-1.87629 -> -1.90482u`;
+  garment residuals `10/39 -> 5/6`; max displacement
+  `15.4507 -> 15.4447u`;
+- `LongSkirt`: seam closed; zero body penetrations retained; worst edge
+  stretch `5.40719 -> 5.22728`; max displacement
+  `9.17302 -> 9.02448u`;
+- `Collar`, `Pants`, `Buckle` and `FemaleUnderwearSH` replay byte-identically.
+
+RelWithDebInfo and optimized Release geometry are byte-identical:
+
+- `ThalmorRobesF` OBJ:
+  `61BEBC1D221ABD3F10AC94350C7A076AB4F56B436694B35695AAE23104911826`;
+- `LongSkirt` OBJ:
+  `5FB24A33E631074A8ED0A271F20EA86A61BA578EC35A89059DFA8B694461C970`.
+
+Harness self-test, shadow self-test, unilateral XPBD/dihedral/contact
+self-tests, band descriptor and support classifier pass. The unchanged golden
+corpus is green: Falmer `8/8`, Blacksmith `4/4`, Vampire `2/2`, Yarl `4/4`
+(`18/18` total).
+
+The optimized Release DLL and both installed copies are byte-identical,
+SHA-256:
+
+`1C94DB6C25CDB79F3A51E6611179248B21A676C54E6DAF8FB38163AB2738EEB4`
+
+Installed paths:
+
+- `E:\Wabbajack\InstallPacks\mods\BodySlide and Outfit Studio\CalienteTools\BodySlide\drape-algo.dll`
+- `E:\Wabbajack\InstallPacks\mods\Drape - Cloth Aware Conform\CalienteTools\BodySlide\drape-algo.dll`
+
+Outfit Studio was closed during deployment. The visual gate is still the
+user's: restart it, reopen the Thalmor project and regenerate `RM_Heavy`. The
+user-owned unstaged Blacksmith golden, capture helper and runtime flag files
+remain untouched.
+
 # Codex continuation 2026-07-23 - preserve authored cross-mesh cloth seams
 
 ## User report and frozen reproduction
