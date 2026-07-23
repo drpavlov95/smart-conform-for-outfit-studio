@@ -12363,6 +12363,71 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), sliderName.c_str(), originalPreset);
     }
 
+    // Measurement-only bisection of the legacy post-solve tail. The Path-B
+    // shell can be physically clean at publication and then be modified by
+    // finishers authored for the older Verlet/correction paths. Keep this
+    // opt-in and pose-neutral: each checkpoint only measures and writes an OBJ.
+    const bool pathBTailTrace =
+        pathBShellAccepted && tris && !tris->empty() &&
+        EnvToggle("DRAPE_PATHB_TAIL_TRACE", false);
+    int pathBTailTraceIndex = 0;
+    auto tracePathBTail = [&](const char* stage) {
+        if (!pathBTailTrace || !stage) return;
+        char file[192]{};
+        sprintf_s(file, "drape_tail_trace_%02d_%s.obj",
+                  pathBTailTraceIndex++, stage);
+        PathBDumpTris(finalVerts, *tris, file);
+
+        int rearCount = 0;
+        int rearPen = 0;
+        float rearWorst = 1.0e9f;
+        double deltaSq = 0.0;
+        float deltaMax = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            if (i < pathBShellPublishedReference.size()) {
+                const float d = Len(Sub(finalVerts[i],
+                                        pathBShellPublishedReference[i]));
+                deltaSq += (double)d * (double)d;
+                deltaMax = std::max(deltaMax, d);
+            }
+            const Vec3& b = baseVerts[i];
+            if (g_refCenterY - b.y <= 1.5f ||
+                b.z < 68.0f || b.z > 80.0f ||
+                !bodyBVH || !bodyBVH->valid) {
+                continue;
+            }
+            float gap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, finalVerts[i], gap, nullptr))
+                continue;
+            ++rearCount;
+            rearWorst = std::min(rearWorst, gap);
+            if (gap < -0.3f) ++rearPen;
+        }
+        const float deltaRms =
+            n > 0 ? (float)std::sqrt(deltaSq / (double)n) : 0.0f;
+        HLog("path-b-tail-trace: index=%d stage='%s' shellDeltaRms=%.4f "
+             "shellDeltaMax=%.4f rearCompared=%d rearPen=%d rearWorst=%.4f",
+             pathBTailTraceIndex - 1, stage, deltaRms, deltaMax,
+             rearCount, rearPen, rearWorst);
+    };
+    tracePathBTail("00-shell");
+
+    // A published Path-B shell is already the result of its own continuation,
+    // stretch/bending/contact solve. Running the legacy correction core below
+    // on that pose solves the garment a second time toward vanilla/raw targets.
+    // The live Blacksmith capture measured this fallthrough at RMS 2.54u /
+    // max 9.41u and all eight rear under-belt penetrations were created here.
+    // Preserve the old core for the anchored material only: sleeves/bodice need
+    // its fitted correction, while the free panel must retain the shell solve.
+    // DRAPE_PATHB_ATTACHED_CORE=0 is the clean-shell diagnostic. Setting the
+    // legacy knob reproduces the former broken full-mesh fallthrough.
+    const bool pathBAttachedCore =
+        EnvToggle("DRAPE_PATHB_ATTACHED_CORE", true);
+    const bool pathBFullLegacyCore =
+        EnvToggle("DRAPE_PATHB_LEGACY_CORE", false);
+    const bool runLegacyCorrectionCore =
+        !pathBShellAccepted || pathBAttachedCore || pathBFullLegacyCore;
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ Cloth drape solve (momentum-free relaxation) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Keeps the key idea from johnBuffer/ClothSimulation Ã¢â‚¬â€ distance constraints
     // that resist ONLY stretching, so the cloth folds and hangs instead of
@@ -12856,7 +12921,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    if (!params.verletCloth)
+    if (!params.verletCloth && runLegacyCorrectionCore)
     for (int iter = 0; iter < iterations; ++iter) {
         if (params.gravity > 0.0f) {
             for (size_t i = 0; i < n; ++i) {
@@ -12969,7 +13034,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
-    if (params.surfaceSmoothIterations > 0 &&
+    tracePathBTail("01-pre-smooth");
+    if (runLegacyCorrectionCore &&
+        params.surfaceSmoothIterations > 0 &&
         params.surfaceSmoothStrength > 0.0f &&
         !useEdges.empty()) {
         for (int iter = 0; iter < params.surfaceSmoothIterations; ++iter) {
@@ -13000,6 +13067,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    tracePathBTail("02-post-smooth");
+
     // Post-PBD shape-level passes.
     // drapeFollow: override follow=1.0 for non-drape (upper body / sleeve) verts
     // so envelope and body-column passes leave them untouched (loose=0 Ã¢â€ â€™ strengthÃ¢â€°Ë†0).
@@ -13018,11 +13087,51 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                     params.drapeEnvelopeStrength, stats);
     }
 
-    ApplyLayerOrderPass(finalVerts, baseVerts, useEdges, invMass, params, stats);
+    if (runLegacyCorrectionCore)
+        ApplyLayerOrderPass(finalVerts, baseVerts, useEdges, invMass, params, stats);
     // Skip the symmetric edge-relax in Verlet mode: it would pull edges back to
     // rest in both directions and flatten the folds/hang the Verlet solve created.
-    if (!params.verletCloth)
+    if (!params.verletCloth && runLegacyCorrectionCore)
         ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
+
+    // Material-domain handoff. The legacy correction core remains authoritative
+    // on attached cloth (drapeEl~=0: sleeve, cuff, collar, fitted bodice), while
+    // Path-B remains authoritative on freely hanging panels. Blend only across
+    // the classifier's narrow transition band so the two domains stay C0
+    // continuous. This is garment-agnostic and uses the same material signal
+    // that already controls anchors, gravity and mobility throughout the pass.
+    if (pathBShellAccepted && runLegacyCorrectionCore &&
+        !pathBFullLegacyCore &&
+        pathBShellPublishedReference.size() == n) {
+        const float blendStart = ClampRange(
+            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_START", 0.15f),
+            0.0f, 1.0f);
+        const float blendEnd = ClampRange(
+            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_END", 0.30f),
+            blendStart + 1.0e-3f, 1.0f);
+        int attachedLegacy = 0;
+        int transition = 0;
+        int freeShell = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const float t = ClampRange(
+                (drapeEl[i] - blendStart) / (blendEnd - blendStart),
+                0.0f, 1.0f);
+            const float shellWeight = t * t * (3.0f - 2.0f * t);
+            if (shellWeight <= 1.0e-6f) {
+                ++attachedLegacy;
+                continue;
+            }
+            if (shellWeight >= 1.0f - 1.0e-6f) ++freeShell;
+            else ++transition;
+            finalVerts[i] = Add(
+                Scale(finalVerts[i], 1.0f - shellWeight),
+                Scale(pathBShellPublishedReference[i], shellWeight));
+        }
+        HLog("path-b-shell: material-handoff attached=%d transition=%d "
+             "free=%d band=[%.2f,%.2f]",
+             attachedLegacy, transition, freeShell, blendStart, blendEnd);
+    }
+    tracePathBTail("01-layer-order");
 
     // Belt finishing (seat + de-wrinkle). DEFINED here but INVOKED after the
     // influence-blend / idempotency / safety-clamp below: those run toward the
@@ -13457,6 +13566,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // can't pull the seated belt back toward the vanilla float. No-op for non-belt
     // presets (beltSeatIterations / beltDeWrinkleIterations default to 0).
     applyBeltFinishing();
+    tracePathBTail("02-belt-finish");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ WRITE-PATH DIAGNOSTIC Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Overrides the physics result with a brutal, obvious deformation so we can
@@ -13765,6 +13875,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                        params.drapeReturnRate, /*twoSided=*/true, stats);
         }
     }
+    tracePathBTail("03-body-finish");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Post-finishing stretch cap (THE TEAR FIX) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // The finishing passes above (BVH push-out, loose anti-tuck) move verts to
@@ -13802,6 +13913,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
     }
+    tracePathBTail("04-post-solve-cap");
 
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
     // drape envelope, layer order) move coincident verts independently and can
@@ -13839,6 +13951,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
     }
+    tracePathBTail("05-seam-weld");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Final anti-clip pass (all verts, verletCloth + BVH) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Anchored verts (drapeEl < 0.20) return to supportVerts (vanilla conform),
@@ -13856,6 +13969,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 finalVerts[i] = target;
         }
     }
+    tracePathBTail("06-anchor-body");
 
     // TEAR DIAGNOSTIC: measure worst edge over-stretch (current / rest) so we can see
     // WHICH stage rips the mesh. Logged here (after the solve, BEFORE post-passes) and
@@ -14120,6 +14234,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 HLog("detour: rigid-border shape='%s' fixed=%d", shapeName.c_str(), borderFixed);
         }
     }
+    tracePathBTail("07-rigid");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Cross-island seam closure (ROOT-CAUSE FIX for the back hole) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Root cause (proven by gap-diag instrumentation): the garment has separate
@@ -14219,6 +14334,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: seam-close shape='%s' crossPairs=%d fixed=%d worstBefore=%.3f worstAfter=%.3f",
                  shapeName.c_str(), crossPairs, fixedPairs, worstBefore, worstAfter);
     }
+    tracePathBTail("08-seam-close");
 
     // Final body recollision AFTER seam-close. Seam-close can move verts after the
     // earlier body collision; enforce only a tiny body floor here. Outer-layer room
@@ -14244,6 +14360,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), kBodyFloorClear, repushed);
         }
     }
+    tracePathBTail("09-reclear");
 
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Anti-clip post-pass: keep THIS mesh tucked under its OUTER meshes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -16546,8 +16663,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         return totalMoved;
     };
 
+    tracePathBTail("10-pre-tuck");
     applyOuterAccessoryInnerClearance("pre-cap");
     applyFinalLayerTuck(0, false, "pre-cap");
+    tracePathBTail("11-layer-tuck");
     // Do not close visual gaps by pulling arbitrary boundary vertices together here.
     // Replays showed that post-solve seam tugging increases support-edge stretch on
     // layered outfits. Geometry continuity must be preserved by the solve itself.
@@ -16577,6 +16696,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: final-body-clearance shape='%s' adjusted=%d",
                  shapeName.c_str(), finalBodyAdjusted);
     }
+    tracePathBTail("12-cap-clear");
     applyOuterAccessoryInnerClearance("post-cap");
     applyFinalExactSeamWeld("pre-prox-exact-seam-weld");
     applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
@@ -16590,6 +16710,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         applyFinalSupportCap(8, "post-exact-stretch-cap");
     applyFinalSeamVectorPairs(4, "final-boundary-seam-polish");
     logProxSeamState("after-final-prox-cap");
+    tracePathBTail("13-seam-caps");
 
     // Loose-path AZIMUTHAL authored-Laplacian restore (2026-07-07). Measured: the
     // verlet solve leaves the whole loose panel laterally INCOHERENT (near-seam lateral
@@ -16819,6 +16940,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (lateralMoved > 0)
             applyFinalExactSeamWeld("post-line-lock-exact-seam");
     }
+    tracePathBTail("14-self-line");
 
     worstStretch("final");   // TEAR DIAGNOSTIC: compare to 'after-solve' to find the ripping stage
 
@@ -17832,6 +17954,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     if (!panelPassEntry.empty())
         guardFittedFinisher(panelPassEntry, "panel-flatten");
+    tracePathBTail("15-panel");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ FITTED-HBRIDGE (cofrinho spec: FITTED bridges the glute cleft) Ã¢â€â‚¬Ã¢â€â‚¬
     // The user's material semantics: FITTED = tensioned cloth, so where a hanging
@@ -18209,6 +18332,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     if (!cleftPassEntry.empty())
         guardFittedFinisher(cleftPassEntry, "cleft-bridge");
+    tracePathBTail("16-cleft");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ HEM / HANGING-CLOTH DISPLACEMENT SMOOTHING (2026-07-11, user item #3) Ã¢â€â‚¬Ã¢â€â‚¬
     // Far-from-body cloth (dress hems, robe skirts) inherits the body's morph detail
@@ -18301,6 +18425,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     if (!hemPassEntry.empty())
         guardFittedFinisher(hemPassEntry, "hem-smooth");
+    tracePathBTail("17-hem");
 
     if (NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
         fittedHBridge &&
@@ -18443,6 +18568,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         }
     }
+    tracePathBTail("18-fitted-hbridge");
 
     // â”€â”€ Region shape-matching un-crumple (armpit v3, 2026-07-08; DRAPE_SHAPEMATCH) â”€â”€
     // The sculpt-driven fix for the armpit crater (vanilla-inherited defect #6), designed
@@ -19032,6 +19158,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
         }   // aGapP75 >= smTight (not skin-tight-like)
     }
+    tracePathBTail("19-shape-match");
 
     // Topology/tension plumb. The lambda is invoked after the true-final body
     // floor, so tpEntry is the exact golden baseline. Exact seam twins are
@@ -19945,6 +20072,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
     }
 
+    tracePathBTail("20-pre-final-transaction");
+
     // Path-B's transaction spans the entire legacy tail, not merely the shell
     // solve. Run its topology-safe body floor last, close any crossings created
     // downstream against the accepted shell, then validate corresponding face
@@ -20123,6 +20252,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              finalIntegrity.bodyFacePenetrations, finalIntegrity.worstAreaRatio,
              finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
     }
+    tracePathBTail("21-post-final-transaction");
 
     // ── CANARY (diagnostic, flag-gated) ───────────────────────────────
     // The user reports that every change either of us makes looks IDENTICAL in
@@ -20317,6 +20447,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("last-chance flip repair: rounds=%d remaining=%d",
                  rounds, lastFlipped);
     }
+    tracePathBTail("22-flip-repair");
 
 #if !defined(DRAPE_HARNESS_BUILD)
     if (pathBShellRequested && pathBShellScoped)

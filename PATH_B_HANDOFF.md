@@ -1,12 +1,129 @@
 # Path B — operational handoff
 
-Updated: 2026-07-19 (America/Sao_Paulo)
+Updated: 2026-07-23 (America/Sao_Paulo)
 
 Branch: `wip/path-b-shell-solve`. The commit that contains this file is the
 authoritative checkpoint; run `git log -1 --oneline` instead of copying an old
 hash from this document.
 
 ---
+
+# Codex continuation 2026-07-23 - thigh bump / butt entry fixed at solver handoff
+
+## Exact scene and root cause
+
+The authoritative reproduction is the live Blacksmith Torso Heavy capture:
+
+`captures/yarl/drape_capture__Rley_3BA_Vanilla_-_Body_-_Blacksmith__Physics___BlackSmithTorso__RM_Heavy__081443.drcap`
+
+The exact live authored/body/production/shell/final OBJs from the user's
+08:14 scene are frozen under the ignored directory
+`tmp/pathb/live_freeze_20260723_0814/`. The replay is vertex-identical to the
+user's visible result.
+
+`DRAPE_PATHB_TAIL_TRACE=1` now writes full-topology
+`%TEMP%/drape_tail_trace_<index>_<stage>.obj` checkpoints and logs the same
+rear-under-belt body-gap criterion at each one. It is measurement-only and OFF
+by default.
+
+The trace proved that the Path-B shell itself was not creating the reported
+butt entry:
+
+| stage | RMS / max displacement from shell | rear pens `< -0.3u` | worst rear gap |
+|---|---:|---:|---:|
+| accepted shell | `0 / 0` | `0` | `+0.0200u` |
+| after legacy correction core | `2.5436 / 9.4114u` | `8` | `-1.1894u` |
+| old final output | `2.5499 / 9.3111u` | `6` | `-0.9746u` |
+
+The old diagnostic label `01-layer-order` bracketed more than layer order. The
+actual fault was control-flow fallthrough: after `PathBSimV2Solve` published a
+complete shell, the non-Verlet correction loop, surface smoother, layer pass
+and authored-rest edge pass solved that shell a second time toward the
+vanilla/raw correction pose. This single block also created the localized
+right-thigh deformation. Later layer-tuck/cleft/hem passes were not the
+origin.
+
+## Fix: material-domain handoff, not an anatomical ROI
+
+Simply skipping the correction core fixed the skirt but regressed attached
+sleeves (`3 -> 15` visible arm penetrations). The shipped candidate therefore
+keeps each solver in the material domain it actually handles:
+
+- attached cloth (`drapeEl` near zero: sleeve, cuff, collar, fitted bodice)
+  retains the legacy fitted correction;
+- free cloth (`drapeEl >= 0.30`) returns exactly to the accepted Path-B shell;
+- `drapeEl 0.15..0.30` uses smoothstep blending for a C0-continuous handoff.
+
+This uses the existing universal material classifier that already controls
+anchors, gravity and mobility. There are no Blacksmith names, coxa/butt
+coordinates, vertex lists or garment-specific ROIs in the fix. On the exact
+scene it classified `1541 attached / 94 transition / 681 free` vertices.
+
+Runtime research/rollback controls:
+
+- `DRAPE_PATHB_ATTACHED_CORE=0`: clean-shell diagnostic (known to regress
+  attached sleeves; do not ship);
+- `DRAPE_PATHB_ATTACHED_BLEND_START=0.15`;
+- `DRAPE_PATHB_ATTACHED_BLEND_END=0.30`;
+- `DRAPE_PATHB_LEGACY_CORE=1`: exact full legacy fallthrough. It reproduces all
+  `2316` old output vertices byte-for-byte and is the instant rollback.
+
+## Validation
+
+The new Blacksmith output is deterministic over repeated replays:
+
+`C1D4BFBAE23126EF39F3AA0387E97C69B044DF5ECA48B45B99D4ED1BF838967B`
+
+Focused `pathb_defect_gate.py` result versus the previous deployed candidate:
+
+| gate | old | material handoff | result |
+|---|---:|---:|---|
+| visible skin, all | `10` | `6` | better |
+| visible skin, arms | `3` | `3` | held |
+| body-through total | `75` | `71` | better |
+| inverted faces | `23` | `23` | held |
+| collapsed faces | `0` | `0` | held |
+| open seam | `0` | `0` | held |
+| rear-under-belt pens | `6` | `0` | fixed |
+| garment face residuals | `1133` | `1106` | better |
+
+`tools/pathb_render_sheet.py` was also inspected; the new side silhouette has
+a continuous fall instead of the localized right-thigh bump, and the rear
+close-up no longer enters the butt crease. The evidence sheet is ignored at
+`tmp/pathb/tail_bisect/material_handoff_vs_old.png`.
+
+Additional validation:
+
+- harness self-test PASS;
+- RelWithDebInfo and Release harnesses produce the exact same Heavy candidate
+  SHA-256 (`C1D4BFBA...8967B`), closing the cross-build equilibrium check for
+  this fix;
+- default/shell-OFF corpus PASS: Falmer `8`, Blacksmith `4`, Vampire `2`, Yarl
+  `4` shapes (18/18 total), no golden update;
+- the user's modified
+  `corpus/golden/fur_blacksmith_rm_heavy.json` was never staged or overwritten;
+- `scripts/capture_outfitstudio_vfs.ps1` and runtime flags remain user state.
+
+The live Path-B allowlist is still BlackSmithTorso + RM_Heavy. Shell-all
+research replays were run on Yarl Clothes/Cloak, Vampire and Falmer without
+crash or NaNs, but they are not promoted by this fix.
+
+## Installed state
+
+The 2026-07-23 Release build was deployed while Outfit Studio was closed. The
+build artifact and both configured mod-folder copies are byte-identical:
+
+`241CFE81CC977F61672497B98B6589D535A4E3CA180BAFACEF29E164B519A77B`
+
+Deployed paths:
+
+- `BodySlide and Outfit Studio/CalienteTools/BodySlide/drape-algo.dll`;
+- `Drape - Cloth Aware Conform/CalienteTools/BodySlide/drape-algo.dll`.
+
+Active live flags remain `shell_solve_on`,
+`shell_transactions_off`, `anticlip_safe_floor_on` and
+`posterior_chord_on`; the posterior chord is skipped whenever Path-B is
+accepted.
 
 # Codex continuation 2026-07-19 - true hull closed, release transition isolated
 
