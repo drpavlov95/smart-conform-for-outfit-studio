@@ -13069,7 +13069,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              bodySampleStats.afterPenetrations, bodySampleStats.worsened,
              bodySampleStats.worstBefore, bodySampleStats.worstAfter,
              bodySampleStats.worstRegression);
-    } else if (pathBShellRequested && sliderName == "RM_Heavy") {
+    } else if (pathBShellRequested) {
+        // Log every skip, not only RM_Heavy's: the slider filter hid which
+        // garments and sliders the shell declines, on a tool that has to work
+        // for any slider on any mesh.
         HLog("path-b-shell: scope skip shape='%s' slider='%s' originalPreset=%d",
              shapeName.c_str(), sliderName.c_str(), originalPreset);
     }
@@ -16684,8 +16687,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             (normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
              normPreset == DRAPE_PRESET_FITTED_CLOTH) &&
             outerColliders && !outerColliders->empty();
+        // UNIVERSAL (2026-07-24): was gated on shapeName == "vampire_robes_alt".
+        // The name stood for "this cloth is authored as the OUTERMOST layer",
+        // and the structural test for that is already written right here: it is
+        // cloth (loose/fitted) that HAS inner colliders. Any garment satisfying
+        // that is authored-outermost by construction, so the identity check only
+        // narrowed a general rule to the mesh it was first seen on.
         const bool authoredOutermostCloth =
-            layerOrderPreserve && shapeName == "vampire_robes_alt" &&
+            layerOrderPreserve &&
             (normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
              normPreset == DRAPE_PRESET_FITTED_CLOTH) &&
             innerColliders && !innerColliders->empty();
@@ -20287,13 +20296,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             safeTopologyFloor = true;
 #endif
         // Path-B always uses the transactional floor: its accepted shell is a
-        // trusted crossing/body reference. Keep the legacy opt-in constrained
-        // to the already-proven Vampire pilot; on Thalmor the generic safe
-        // floor preserved topology but retained substantially deeper body
-        // penetrations than the legacy push/cap loop.
-        const bool legacySafeFloorScope = safeTopologyFloor &&
-            shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy";
-        safeTopologyFloor = (pathBShellAccepted || legacySafeFloorScope) &&
+        // trusted crossing/body reference.
+        // UNIVERSAL (2026-07-24): the legacy opt-in used to be narrowed to
+        // shapeName == "vampire_robes_alt" && sliderName == "RM_Heavy" - the
+        // garment it was proven on - because on Thalmor this topology-safe floor
+        // preserved topology but left substantially deeper body penetrations
+        // than the legacy push/cap loop. That is a real trade-off, but a garment
+        // NAME is the wrong way to express it: the honest form is to MEASURE the
+        // residual penetration after this floor and fall back to the push/cap
+        // loop when it is too deep, which works on any mesh. Until that measured
+        // fallback exists the opt-in simply means what it says - the user asked
+        // for this floor, so it applies wherever they enable it (off by default:
+        // DRAPE_ANTICLIP_SAFE_FLOOR / anticlip_safe_floor_on.flag).
+        safeTopologyFloor = (pathBShellAccepted || safeTopologyFloor) &&
             tris && !tris->empty();
         auto floorable = [&](size_t i) -> bool {
             int id = islandIdOut.empty() ? -1 : (i < islandIdOut.size() ? islandIdOut[i] : -1);
@@ -20665,8 +20680,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (DrapeFlagExists("posterior_chord_on.flag"))
         posteriorChordOn = true;
 #endif
+    // UNIVERSAL (2026-07-24): was gated on shapeName == "BlackSmithTorso", the
+    // mesh it was developed on. Everything the pass needs is already expressed
+    // generally: it is opt-in (DRAPE_POSTERIOR_CHORD), material-gated to fitted
+    // cloth, and its own body of work protects pinned verts, rigid islands and
+    // collider-covered verts by measurement before touching anything. The
+    // identity check only stopped the rule from applying to other garments.
     if (!pathBShellAccepted && posteriorChordOn &&
-        shapeName == "BlackSmithTorso" &&
         originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
         params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
         !useEdges.empty()) {
@@ -20857,9 +20877,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (DrapeFlagExists("anticlip_safe_floor_on.flag"))
         antiClipIntegrityGuard = true;
 #endif
-    if (antiClipIntegrityGuard && shapeName == "vampire_robes_alt" &&
-        sliderName == "RM_Heavy" &&
-        tris && !tris->empty()) {
+    // UNIVERSAL (2026-07-24): was gated on shapeName == "vampire_robes_alt" &&
+    // sliderName == "RM_Heavy" - the garment the failure was captured on. This
+    // is a DEGRADATION GUARD: it only acts when the compound failure signature
+    // below is present (flipped normals AND near-zero-area faces together),
+    // which the comment above notes the healthy corpus never shows. That
+    // threshold IS the general criterion, so the name was redundant - and a
+    // safety net that only protects one named garment protects nothing.
+    if (antiClipIntegrityGuard && tris && !tris->empty()) {
         std::vector<Vec3> vanillaVerts(n);
         for (size_t i = 0; i < n; ++i)
             vanillaVerts[i] = Add(baseVerts[i],
@@ -22898,9 +22923,12 @@ static int ReplayCaptureDir(const fs::path& dir) {
         // if Filler's capture says robes is OUTER, robes receives raw-conformed
         // Filler as INNER before it solves. This mirrors the live collider graph
         // and makes the feature testable without a new host capture.
+        // UNIVERSAL (2026-07-24): dropped `cap.shapeName == "vampire_robes_alt"`.
+        // The lookup below (inferredInnersByOuter.find) already bails for any
+        // shape without an inferred relation, so the map IS the general test and
+        // the name only stopped other captures from exercising the feature.
         int inferredInnerCount = 0;
-        if (EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false) &&
-            cap.shapeName == "vampire_robes_alt") {
+        if (EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false)) {
             std::unordered_set<std::string> existingInnerNames;
             for (const OuterCollider& ic : cap.innerColliders)
                 existingInnerNames.insert(ic.name);
