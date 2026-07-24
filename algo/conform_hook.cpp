@@ -12857,14 +12857,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (DrapeFlagExists("shell_solve_on.flag"))
         pathBShellRequested = true;
 #endif
-    // The pilot is name-scoped to one garment. That is a per-garment allowlist
-    // and CANNOT ship - the whole point is a general rule - so this knob drops
-    // the name check to test generalisation (anti-overfit gate in the plan:
-    // the same physics must hold on yarl/vampire before any of it is claimed).
-    const bool pathBAllShapes = EnvFloat("DRAPE_SHELL_ALL_SHAPES", 0.0f) > 0.5f;
+    // UNIVERSAL SCOPE (2026-07-24). This used to read
+    //     (pathBAllShapes || shapeName == "BlackSmithTorso") &&
+    //     sliderName == "RM_Heavy" && <preset test>
+    // - a per-garment allowlist plus a per-slider one, kept from the pilot. The
+    // user's standing rule is that Drape must be a UNIVERSAL tool: any slider,
+    // any mesh, with BlackSmithTorso/RM_Heavy only ever the test case. Worse,
+    // the allowlist silently meant every other outfit he tested was running the
+    // PRODUCTION path with no sim at all, so those results said nothing about
+    // this solver. Both name checks are gone.
+    // What remains is a MATERIAL rule, not an identity rule: the shell solves
+    // cloth (fitted/draped), while skin-tight, rigid and tubular presets are
+    // different physics and keep their own paths. DRAPE_SHELL_SOLVE (or
+    // shell_solve_on.flag) is still the global feature switch.
     const bool pathBShellScoped =
-        (pathBAllShapes || shapeName == "BlackSmithTorso") &&
-        sliderName == "RM_Heavy" &&
         (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
          originalPreset == DRAPE_PRESET_LOOSE_DRAPED);
     if (pathBShellRequested && pathBShellScoped) {
