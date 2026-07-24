@@ -11899,6 +11899,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // already excluded by the `continue` above (belt stays protected), and a
         // belt/bodice sits TIGHT to the body (small gap) so it is never caught
         // here even within a Loose-Draped mesh.
+        // NOTE (2026-07-24): this gate is preset-based while the test below is
+        // purely GEOMETRIC (it raises the drape signal for verts whose gap to
+        // the body exceeds kGapFar). Since the Loose->Fitted merge a free
+        // hanging cape is labelled Fitted, so it never fires there. Measured on
+        // the yarl Cloak: the classifier marks 505 of 553 verts ANCHORED, which
+        // makes every "the shell owns free cloth" hand-off inert on a cape.
+        // Opening this gate geometrically was tried and is INERT on its own
+        // (drape stats unchanged) - the anchored verdict comes from the
+        // bone/island signal upstream, not from this clause, so that is where a
+        // real fix has to go. Documented so the next attempt starts upstream.
         const bool kLooseHangEnabled =
             isLoosePreset && bodyBVH && bodyBVH->valid;
         // Gap thresholds: below kGapNear the vert hugs the body (keep bone signal);
@@ -21685,6 +21695,55 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              seamBodySamples.afterPenetrations);
     }
     tracePathBTail("22-flip-repair");
+
+    // FREE-CLOTH RESTORE (2026-07-24, DRAPE_PATHB_FREE_RESTORE, default off).
+    // The legacy-core hand-off already restores the shell pose on free cloth,
+    // but that happens EARLY and the tail then re-corrupts it: stage dumps on
+    // the yarl Cloak show the shell handing off flap plumb 6.63 (the user's
+    // hand-sculpt is 6.73) and the published result at 7.62. Trying to stop the
+    // individual culprit failed - panel-flatten is where the number jumps
+    // (+1.00) yet skipping it makes the result WORSE, because the tail
+    // re-converges regardless. So restore once HERE, at the true publication
+    // boundary where nothing downstream can undo it, then re-assert the body
+    // floor so the restored cloth cannot sit inside the body (the tail's safety
+    // passes are the part we must not throw away).
+    if (pathBShellAccepted && bodyBVH && bodyBVH->valid &&
+        pathBShellPublishedReference.size() == n &&
+        EnvFloat("DRAPE_PATHB_FREE_RESTORE", 0.0f) > 0.5f) {
+        const float blendStart = ClampRange(
+            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_START", 0.15f), 0.0f, 1.0f);
+        const float blendEnd = ClampRange(
+            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_END", 0.30f),
+            blendStart + 1.0e-3f, 1.0f);
+        const float floorClr =
+            std::max(0.0f, EnvFloat("DRAPE_PATHB_FREE_RESTORE_CLEAR", 0.15f));
+        int restored = 0, floored = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= drapeEl.size()) break;
+            const float t = ClampRange(
+                (drapeEl[i] - blendStart) / (blendEnd - blendStart), 0.0f, 1.0f);
+            const float w = t * t * (3.0f - 2.0f * t);
+            if (w <= 1.0e-6f) continue;
+            finalVerts[i] = Add(Scale(finalVerts[i], 1.0f - w),
+                                Scale(pathBShellPublishedReference[i], w));
+            ++restored;
+        }
+        // body floor on exactly the verts we moved (authored-inside keeps its
+        // authored depth, matching every other floor in this pass)
+        for (size_t i = 0; i < n; ++i) {
+            if (i >= drapeEl.size()) break;
+            if (drapeEl[i] < blendStart) continue;
+            Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+            float d2 = 0.0f;
+            if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+            const float gap = Dot(Sub(finalVerts[i], cp), nrm);
+            if (gap >= floorClr) continue;
+            finalVerts[i] = Add(cp, Scale(nrm, floorClr));
+            ++floored;
+        }
+        HLog("path-b-shell: free-cloth restore blended=%d floored=%d (band %.2f-%.2f)",
+             restored, floored, blendStart, blendEnd);
+    }
 
 #if !defined(DRAPE_HARNESS_BUILD)
     if (pathBShellRequested && pathBShellScoped)
