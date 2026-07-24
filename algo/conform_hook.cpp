@@ -11401,6 +11401,26 @@ static void PathBDumpLiveFinal(const std::vector<Vec3>& verts,
 // is where a bug in ~8000 lines of solver code could raise a hardware exception
 // (bad index, div-by-zero, etc). The wrapper catches that so it can never take
 // OutfitStudio down with it.
+// STAGE DUMP (2026-07-24, DRAPE_STAGE_DUMP=1, off by default). Writes the mesh
+// after individual tail passes so the pass that ERASES the shell's drape can be
+// identified. Motivating measurement (yarl Cloak): the shell hands off flap
+// plumb 6.63 - matching the user's hand-sculpt at 6.73 - while the published
+// result is 7.62 (production 7.90), with the tail moving the cloak 3.25u on
+// average. So the physics works and something downstream undoes it.
+static void DrapeDumpStage(const std::vector<Vec3>& verts, const char* stage,
+                           const std::string& shape) {
+    if (EnvFloat("DRAPE_STAGE_DUMP", 0.0f) <= 0.5f) return;
+    const char* t = getenv("TEMP");
+    if (!t) return;
+    std::string path = std::string(t) + "/drape_stage_" + stage + "__" +
+                       SafeFilePart(shape) + ".obj";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
+    fclose(f);
+}
+
 static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                  const std::string& sliderName,
                                  int preset,
@@ -17355,6 +17375,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (totalMoved > 0)
             HLog("detour: final-selfcollision-tuck shape='%s' stage='%s' moved=%d",
                  shapeName.c_str(), stageLabel ? stageLabel : "", totalMoved);
+            DrapeDumpStage(finalVerts, "06_selfcol_tuck", shapeName);
         return totalMoved;
     };
 
@@ -17376,6 +17397,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // and tubular meshes. Cap against the vanilla-conformed support lengths so body
     // morph expansion is allowed, while solver-created tears are not.
     applyFinalSupportCap(64, "final-stretch-cap");
+    DrapeDumpStage(finalVerts, "04_stretch_cap", shapeName);
     // Final body clearance runs after the support cap because the cap can pull
     // a vertex slightly back into the body. Keep it deliberately limited: this
     // is a last-line penetration nudge, not another body-shaping pass.
@@ -17396,6 +17418,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (finalBodyAdjusted > 0)
             HLog("detour: final-body-clearance shape='%s' adjusted=%d",
                  shapeName.c_str(), finalBodyAdjusted);
+            DrapeDumpStage(finalVerts, "05_body_clearance", shapeName);
     }
     tracePathBTail("12-cap-clear");
     if (finalInnerLayerClearance)
@@ -17405,6 +17428,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     logProxSeamState("before-final-prox-cap");
     applyFinalProxSeamCap(24, "final-prox-seam-cap");
     applyFinalSupportCap(12, "post-prox-stretch-cap");
+    DrapeDumpStage(finalVerts, "07_post_prox_cap", shapeName);
     applyFinalSeamVectorPairs(8, "post-prox-boundary-seam-vector");
     applyFinalProxSeamCap(10, "final-prox-seam-polish");
     int finalExactMoved = applyFinalExactSeamWeld("final-exact-seam-weld");
@@ -18379,6 +18403,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 wPit[i] = std::max(wPit[i], wQual * wNear);
                 if (wPit[i] > 0.0f) ++nPit;
             }
+            // FALSIFIED (2026-07-24): skipping shell-solved FREE verts here -
+            // the same "the free panel must retain the shell solve" principle
+            // the legacy correction core follows - looked obvious because the
+            // stage dumps show THIS pass taking the yarl Cloak's flap plumb
+            // 6.63 -> 7.63 (+1.00 of the tail's +0.99, everything else <=0.19).
+            // But measured end to end it does NOT recover the drape: skipping
+            // free verts gives plumb 7.54 with sculpt distance WORSE (2.93 ->
+            // 3.05), and skipping the pass entirely for shell garments is worse
+            // still (plumb 7.88, flips 9 -> 18). The tail re-converges to
+            // ~7.5-7.9 whatever this pass does, so panel-flatten is where the
+            // number jumps but not what pins the result - the same attractor
+            // behaviour as the blacksmith butt groove. Do not "fix" it here
+            // without an end-to-end measurement. See project memory.
             if (wOut[i] > 0.0f || wPit[i] > 0.0f) { eligible[i] = 1; ++nElig; }
         }
         // Â§6 CHORD BRIDGE (2026-07-08, v2 â€” the user-visible crater): the defect verts
@@ -18814,6 +18851,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 applyFinalProxSeamCap(6, "post-pit-prox-cap");
             HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu chords=%zu seamGroups=%zu gapMin=%.2f iters=%d",
                  shapeName.c_str(), nElig, n, nPit, nChord, seamGroups.size(), gapMin, effIters);
+            DrapeDumpStage(finalVerts, "01_panel_flatten", shapeName);
         }
     }
 
@@ -19353,6 +19391,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (hemMoved > 0)
                     HLog("detour: hem-smooth shape='%s' hangVerts=%d moved=%d iters=%d cap=%.2f",
                          shapeName.c_str(), nHang, hemMoved, kHemIters, kHemCap);
+            DrapeDumpStage(finalVerts, "02_hem_smooth", shapeName);
             }
         }
     }
@@ -20590,6 +20629,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: anti-clip-safe-floor shape='%s' clr=%.2f first=%d units=%d verts=%d rejectFace=%d rejectEdge=%d rejectCross=%d step=%.2f",
                  shapeName.c_str(), kFinalFloorClear, floored, acceptedUnits,
                  acceptedVerts, rejectedFace, rejectedEdge, rejectedCross, maxStep);
+            DrapeDumpStage(finalVerts, "03_anticlip", shapeName);
         }
     }
     };
