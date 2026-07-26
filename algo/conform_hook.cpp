@@ -10625,8 +10625,48 @@ static bool PathBSimV2Solve(
         bool stalled = false;
         size_t lastMaxMover = 0;
         std::vector<Vec3> xPrev(n);
+        // GRAVITY AS A LOAD, NOT A PER-ITERATION NUDGE (2026-07-24,
+        // DRAPE_SHELL_GRAVITY_MODE=1). Legacy behaviour re-applies `gravity` on
+        // EVERY constraint iteration, which has two consequences: the loop can
+        // never converge to a gravity-free equilibrium (maxMove always contains
+        // a fresh gravity step, so the stall detector fires on all six morph
+        // steps - measured), and the achieved drop depends on the iteration
+        // count and constraint ordering rather than on the load. Raising the
+        // iteration cap silently raises gravity.
+        // Load mode is the standard quasi-static XPBD structure: apply the load
+        // ONCE per load step, then iterate constraints with NO load until the
+        // residual settles, repeat for the next load step. Iterations then buy
+        // CONVERGENCE, and the total load per morph step is explicit
+        // (gravityLoad, split over loadSteps).
+        const bool loadMode = EnvFloat("DRAPE_SHELL_GRAVITY_MODE", 0.0f) > 0.5f;
+        const int loadSteps = (int)ClampRange(
+            EnvFloat("DRAPE_SHELL_LOAD_STEPS", 4.0f), 1.0f, 32.0f);
+        // 0.09 = the drop the legacy loop actually delivers per morph step
+        // (0.002 x ~45 iterations), so load mode starts behaviour-comparable and
+        // can then be tuned as a real physical quantity.
+        const float gravityLoad = EnvFloat("DRAPE_SHELL_GRAVITY_LOAD", 0.09f);
+        // The load schedule must NOT be derived from kMaxIters: the loop breaks
+        // early on convergence/stall (measured: every morph step stalls around
+        // iteration 50), so tying the spacing to the cap meant a cap of 600
+        // applied ONE load while a cap of 60 applied four - the opposite of
+        // iteration-independence. Fixed spacing, and the convergence break is
+        // held off until every load step has actually been applied.
+        const int itersPerLoad = (int)ClampRange(
+            EnvFloat("DRAPE_SHELL_ITERS_PER_LOAD", 15.0f), 1.0f, 200.0f);
+        int loadsApplied = 0;
+        int itersSinceLoad = 0;
         for (int iteration = 0; iteration < kMaxIters; ++iteration) {
             xPrev = x;
+            const bool applyLoad = loadMode
+                ? (loadsApplied < loadSteps &&
+                   (loadsApplied == 0 || itersSinceLoad >= itersPerLoad))
+                : true;
+            if (loadMode) {
+                if (applyLoad) { ++loadsApplied; itersSinceLoad = 0; }
+                else ++itersSinceLoad;
+            }
+            const float gStep = loadMode ? (gravityLoad / (float)loadSteps)
+                                         : gravity;
             for (size_t i = 0; i < n; ++i) {
                 if (fixed[i]) { x[i] = anchorTarget[i]; continue; }
                 // worn-band friction proxy: soft pull toward the conform pose,
@@ -10636,7 +10676,7 @@ static bool PathBSimV2Solve(
                 // SIM CORE 2: gravity is a uniform ACCELERATION on every free
                 // vertex - mass-independent, exactly like the real thing. Mass
                 // (area) only weights how constraints share their corrections.
-                if (!kNoGravity) x[i].z -= gravity;
+                if (!kNoGravity && applyLoad) x[i].z -= gStep;
             }
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
                                stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
@@ -10916,13 +10956,31 @@ static bool PathBSimV2Solve(
             lastMaxMover = maxMover;
             // converge: equilibrium = the constraints return the mesh to
             // (almost) where the gravity dose found it.
-            if (maxMove <= kEps) break;
+            // In load mode a settled residual means "this load step has been
+            // absorbed", not "the solve is done" - the remaining load steps
+            // still have to be applied. Converging here would silently deliver
+            // a fraction of the requested load (the bug that made a 600
+            // iteration cap drop LESS than a 60 iteration one).
+            const bool loadsPending = loadMode && loadsApplied < loadSteps;
+            if (maxMove <= kEps && !loadsPending) break;
+            if (maxMove <= kEps && loadsPending) {
+                itersSinceLoad = itersPerLoad;   // absorbed: bring the next load in
+                continue;
+            }
             // stall detector: burning to the cap without >1% improvement in
             // 25 iterations is dishonest compute - break and say so.
             if (maxMove < stallBest * 0.99f) {
                 stallBest = maxMove;
                 stallIter = iteration;
             } else if (kStallWindow > 0 && iteration - stallIter >= kStallWindow) {
+                if (loadsPending) {
+                    // stalled under the current load: admit the next one rather
+                    // than abandoning the remaining load
+                    itersSinceLoad = itersPerLoad;
+                    stallBest = 1.0e30f;
+                    stallIter = iteration;
+                    continue;
+                }
                 stalled = true;
                 break;
             }
