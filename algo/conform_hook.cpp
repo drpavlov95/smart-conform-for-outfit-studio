@@ -13368,34 +13368,94 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (DrapeFlagExists("shell_transactions_off.flag"))
                     shellTransactions = false;
 #endif
+                // CLOSURE REPAIR MODE (2026-07-26) - IMPLEMENTED, MEASURED, AND
+                // FALSIFIED. Kept off by default and documented so nobody spends
+                // the day rediscovering it.
+                //
+                // The motivation was sound. With transactions ON the shell is
+                // rejected on every cloth garment in the corpus, and the log says
+                // why: the repairs SUCCEED (Cloak crossing=100->0 body=2->0
+                // face=18->0, accepted=1/1/1) but run on disposable probes, and
+                // acceptance asks only whether the candidate was clean BEFORE
+                // repair. So a fully repaired candidate is discarded. The only
+                // shipped alternative is transactions OFF, which bypasses the
+                // body and integrity gates wholesale and lets penetrations
+                // through (corpus: body penetrations worse on 8 of 8 garments
+                // that move at all). There was no setting between "reject
+                // everything" and "check nothing", and this tried to be it:
+                // chain the three closures on ONE copy, judge the FINAL state,
+                // publish the repaired copy.
+                //
+                // WHY IT FAILS: closing 100 crossings means reverting both faces
+                // of every crossing pair plus their exact-seam twins, and that
+                // cascades until essentially the whole panel is back at the
+                // production pose. Measured on the Cloak, the "repaired"
+                // candidate comes out identical to the entry on every integrity
+                // axis (maxEdge 13.313, maxArea 15.086 - the same numbers as
+                // productionEntry). It IS the global raw rollback the disposable
+                // probes were introduced to prevent, just arrived at one revert
+                // at a time. It also manufactures tears on the way: reverting a
+                // vertex to production while its neighbours hold the shell pose
+                // stretches the edge between the two poses (Cloak maxEdge 2.518
+                // without the repair, 13.313 with it).
+                //
+                // WHAT THE MEASUREMENT DID EXPOSE, and what a real fix must face:
+                // production's own Cloak is at 13.3x edge stretch / 15.1x area
+                // ratio, far above the host's 8.0 discard ceiling, and the shell
+                // FIXES it (13.3 -> 2.5). PathBIntegrityNoWorse applies its 8.0
+                // terms as ABSOLUTES to the candidate only, so whenever anything
+                // drags the candidate back toward an already-out-of-spec
+                // production pose, acceptance becomes unreachable. The gate is
+                // not wrong to want an absolute ceiling; the repair is wrong to
+                // reintroduce a pose that violates it.
+                const bool closureRepair =
+                    EnvToggle("DRAPE_SHELL_CLOSURE_REPAIR", false);
                 if (!shellTransactions) closureStable = true;
                 if (shellTransactions) {
                     PathBCrossingClosureStats crossCycle;
                     PathBBodyClosureStats bodyCycle;
                     PathBFaceClosureStats faceCycle;
+                    std::vector<Vec3> repaired = shellCandidate;
                     std::vector<Vec3> crossingProbe = shellCandidate;
                     closureOk = PathBCloseNewCrossings(
-                        productionEntry, crossingProbe, *tris,
-                        exactSeamGroups, crossCycle);
+                        productionEntry, closureRepair ? repaired : crossingProbe,
+                        *tris, exactSeamGroups, crossCycle);
                     std::vector<Vec3> bodyProbe = shellCandidate;
                     bodyClosureOk = PathBCloseBodySampleRegressions(
-                        productionEntry, bodyProbe, *tris, *bodyBVH,
-                        exactSeamGroups, bodyCycle);
+                        productionEntry, closureRepair ? repaired : bodyProbe,
+                        *tris, *bodyBVH, exactSeamGroups, bodyCycle);
                     bodyClosureStats = bodyCycle;
                     std::vector<Vec3> faceProbe = shellCandidate;
                     faceClosureOk = PathBCloseFaceRegressions(
-                        productionEntry, baseVerts, faceProbe, *tris,
-                        exactSeamGroups, faceCycle);
+                        productionEntry, baseVerts,
+                        closureRepair ? repaired : faceProbe,
+                        *tris, exactSeamGroups, faceCycle);
                     faceClosureStats = faceCycle;
                     initialCrossings = crossCycle.initialNewPairs;
                     initialBodyRegressions = bodyCycle.initialWorsened;
                     initialFaceRegressions = faceCycle.initialWorsened;
                     closureCycles = 1;
                     closureStats = crossCycle;
-                    closureStable = closureOk && bodyClosureOk && faceClosureOk &&
-                        initialCrossings == 0 &&
-                        initialBodyRegressions == 0 &&
-                        initialFaceRegressions == 0;
+                    if (closureRepair) {
+                        // Judge what the repair actually produced, not what it
+                        // started from, and keep it.
+                        closureStable = closureOk && bodyClosureOk && faceClosureOk &&
+                            closureStats.finalNewPairs == 0 &&
+                            bodyClosureStats.finalWorsened == 0 &&
+                            faceClosureStats.finalWorsened == 0;
+                        if (closureStable) {
+                            HLog("path-b-shell: closure-repair adopted "
+                                 "(crossing %d->0 body %d->0 face %d->0)",
+                                 initialCrossings, initialBodyRegressions,
+                                 initialFaceRegressions);
+                            shellCandidate = std::move(repaired);
+                        }
+                    } else {
+                        closureStable = closureOk && bodyClosureOk && faceClosureOk &&
+                            initialCrossings == 0 &&
+                            initialBodyRegressions == 0 &&
+                            initialFaceRegressions == 0;
+                    }
                 }
                 HLog("path-b-shell: local-closure cycles=%d crossReverted=%d bodyReverted=%d faceReverted=%d crossing=%d->%d bodyRegression=%d->%d faceRegression=%d->%d accepted=%d/%d/%d stable=%d",
                      closureCycles, crossingReverted, bodyReverted, faceReverted,
@@ -13487,7 +13547,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
         const double elapsedMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
-        HLog("path-b-shell: publish shape='%s' slider='%s' accepted=%d reason='%s' elapsedMs=%.1f entry(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f) candidate(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f p95Edge=%.3f maxEdge=%.3f seam=%.6f)",
+        HLog("path-b-shell: publish shape='%s' slider='%s' accepted=%d reason='%s' elapsedMs=%.1f entry(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f) candidate(flip=%d collapse=%d pen=%d depth=%.4f facePen=%d faceDepth=%.4f p95Edge=%.3f maxEdge=%.3f maxArea=%.3f entryMaxEdge=%.3f entryMaxArea=%.3f seam=%.6f)",
              shapeName.c_str(), sliderName.c_str(), pathBShellAccepted ? 1 : 0,
              pathBShellAccepted ? "accepted" : failReason.c_str(), elapsedMs,
              entryIntegrity.flips, entryIntegrity.collapsed,
@@ -13498,7 +13558,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              candidateIntegrity.penetrations, candidateIntegrity.worstPenetration,
              candidateIntegrity.bodyFacePenetrations,
              candidateIntegrity.worstBodyFacePenetration,
-             p95Stretch, candidateIntegrity.worstStretch, worstSeamSplit);
+             p95Stretch, candidateIntegrity.worstStretch,
+             candidateIntegrity.worstAreaRatio, entryIntegrity.worstStretch,
+             entryIntegrity.worstAreaRatio, worstSeamSplit);
         HLog("path-b-shell: body-samples compared=%d beforePen=%d afterPen=%d worsened=%d beforeDepth=%.4f afterDepth=%.4f regression=%.4f",
              bodySampleStats.compared, bodySampleStats.beforePenetrations,
              bodySampleStats.afterPenetrations, bodySampleStats.worsened,
