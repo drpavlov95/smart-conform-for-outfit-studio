@@ -9672,6 +9672,22 @@ static int PathBConvexCleftBridge(
     return affected;
 }
 
+// ONE CLASSIFICATION, SHARED (2026-07-24). The solver used to decide "worn vs
+// free" from the authored gap while the surrounding pipeline decided the same
+// thing from bone weights, and the two disagreed by an order of magnitude on the
+// same garment (yarl Cloak: the pipeline called 505 of 553 verts anchored, the
+// shell called almost all of them free). That is the measured source of the
+// "some outfits acceptable, some terrible" inconsistency, because which of the
+// two definitions wins depends on which passes run for that preset. The mask is
+// now computed ONCE by the caller and handed in; DRAPE_SHELL_SHARED_MASK=0
+// restores the solver's own authored-gap classification for A/B.
+enum DrapeClass : uint8_t {
+    DRAPE_CLASS_FIXED = 0,   // worn against the body: follows the conform
+    DRAPE_CLASS_TRANSITION,  // attachment band: mass ramps
+    DRAPE_CLASS_FREE,        // hanging cloth: physics owns it
+    DRAPE_CLASS_RIGID,       // plate/accessory: never simulated
+};
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -9680,6 +9696,7 @@ static bool PathBSimV2Solve(
     const BodyBVH& refBody,
     const BodyBVH& morphedBody,
     const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    const std::vector<uint8_t>& sharedMask,
     std::vector<Vec3>& out,
     std::string& failReason)
 {
@@ -9743,6 +9760,8 @@ static bool PathBSimV2Solve(
     const float kAttachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
     const float kAttachHi = std::max(kAttachLo + 0.05f,
         EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
+    const bool useSharedMask = sharedMask.size() == n &&
+        EnvFloat("DRAPE_SHELL_SHARED_MASK", 1.0f) > 0.5f;
     std::vector<float> authoredGapArr(n, 0.0f);
     std::vector<float> contactFloor(n, clearance);
     for (size_t i = 0; i < n; ++i) {
@@ -9880,7 +9899,15 @@ static bool PathBSimV2Solve(
     double areaSum = 0.0;
     size_t freeCount = 0;
     for (size_t i = 0; i < n; ++i) {
-        fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
+        // Prefer the SHARED mask when the caller supplied one, so the solver and
+        // every downstream pass agree on what is worn and what hangs. Falls back
+        // to the authored-gap rule when absent (or DRAPE_SHELL_SHARED_MASK=0).
+        if (useSharedMask) {
+            const uint8_t c = sharedMask[i];
+            fixed[i] = (c == DRAPE_CLASS_FIXED || c == DRAPE_CLASS_RIGID) ? 1 : 0;
+        } else {
+            fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
+        }
         // SCOPE THE PHYSICS (probe 2026-07-20): sleeves are fitted TUBES on the
         // arms, not hanging cloth. Treating them as free drape inverts their
         // faces (72 of our 98 flipped faces live there; production has ZERO),
@@ -12117,6 +12144,54 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     // drapeEl is the single source of truth downstream; alias it to drapeAmount.
     std::vector<float>& drapeEl = drapeAmount;
+
+    // THE SHARED CLASSIFICATION MASK (2026-07-24). Built ONCE here, handed to the
+    // shell solver, and reported per shape. Before this the solver classified by
+    // authored gap while the pipeline classified by bone weights, and on the same
+    // garment the two disagreed by an order of magnitude (yarl Cloak: pipeline
+    // 505/553 anchored, solver almost all free). Which definition won depended on
+    // which passes a preset happened to run - the measured source of "some
+    // outfits acceptable, some terrible".
+    // Rules, in priority order, all geometric or material - never per garment:
+    //   RIGID       a rigid island (plate/buckle): never simulated
+    //   FIXED       worn against the body (authored gap <= attach) OR the bone
+    //               profile says a limb drives it and it is not hanging free
+    //   FREE        clearly away from the body, or the bone signal says drape
+    //   TRANSITION  the band between, where mass ramps
+    std::vector<uint8_t> drapeMask(n, DRAPE_CLASS_FIXED);
+    {
+        const float attachLo = std::max(0.0f, EnvFloat("DRAPE_SHELL_ATTACH", 0.3f));
+        const float freeGap = std::max(attachLo + 0.1f,
+                                       EnvFloat("DRAPE_MASK_FREE_GAP", 2.5f));
+        int cF = 0, cT = 0, cR = 0, cG = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const bool rigid = !islandIdOut.empty() && i < islandIdOut.size() &&
+                               islandIdOut[i] >= 0 &&
+                               (size_t)islandIdOut[i] < islandRigidOut.size() &&
+                               islandRigidOut[(size_t)islandIdOut[i]];
+            if (rigid) { drapeMask[i] = DRAPE_CLASS_RIGID; ++cR; continue; }
+            // geometric: how far does the conformed vert sit off the body?
+            float gap = 0.0f;
+            bool haveGap = false;
+            if (bodyBVH && bodyBVH->valid && supportVerts.size() == n) {
+                Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                float d2 = 0.0f;
+                if (BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) {
+                    gap = std::sqrt(d2);
+                    if (Dot(Sub(supportVerts[i], cp), nrm) < 0.0f) gap = -gap;
+                    haveGap = true;
+                }
+            }
+            const float bone = i < drapeEl.size() ? drapeEl[i] : 0.0f;
+            if (haveGap && gap >= freeGap) { drapeMask[i] = DRAPE_CLASS_FREE; ++cG; }
+            else if (bone >= 0.30f)        { drapeMask[i] = DRAPE_CLASS_FREE; ++cG; }
+            else if (haveGap && gap <= attachLo) { drapeMask[i] = DRAPE_CLASS_FIXED; ++cF; }
+            else if (bone >= 0.20f)        { drapeMask[i] = DRAPE_CLASS_TRANSITION; ++cT; }
+            else                           { drapeMask[i] = DRAPE_CLASS_FIXED; ++cF; }
+        }
+        HLog("drape-mask shape='%s' fixed=%d transition=%d free=%d rigid=%d of %zu (freeGap=%.1f)",
+             shapeName.c_str(), cF, cT, cG, cR, n, freeGap);
+    }
     for (size_t i = 0; i < n; ++i)
         if (drapeEl[i] > 0.25f) ++stats.drapeEligibleVerts;
 
@@ -13013,7 +13088,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             failReason = "missing live topology/body input";
         } else if (PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
                                   g_refBodyBVH, *bodyBVH, exactSeamGroups,
-                                  shellCandidate, failReason)) {
+                                  drapeMask, shellCandidate, failReason)) {
             candidateFinite = shellCandidate.size() == productionEntry.size();
             for (const Vec3& p : shellCandidate) {
                 if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
@@ -21862,12 +21937,28 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             blendStart + 1.0e-3f, 1.0f);
         const float floorClr =
             std::max(0.0f, EnvFloat("DRAPE_PATHB_FREE_RESTORE_CLEAR", 0.15f));
+        // Drive the restore from the SHARED mask, not from the bone signal. The
+        // bone signal is what limited this to 57 of 553 verts on the yarl Cloak
+        // (it called 505 of them anchored); the shared mask calls 47% of that
+        // cape free, which is what "the physics owns the hanging panel" has to
+        // mean for the restore to do its job. FREE restores fully, TRANSITION
+        // blends, FIXED and RIGID keep the tail's pose.
         int restored = 0, floored = 0;
-        for (size_t i = 0; i < n; ++i) {
-            if (i >= drapeEl.size()) break;
+        auto restoreWeight = [&](size_t i) -> float {
+            if (i < drapeMask.size()) {
+                switch (drapeMask[i]) {
+                case DRAPE_CLASS_FREE:       return 1.0f;
+                case DRAPE_CLASS_TRANSITION: return 0.5f;
+                default:                     return 0.0f;
+                }
+            }
             const float t = ClampRange(
-                (drapeEl[i] - blendStart) / (blendEnd - blendStart), 0.0f, 1.0f);
-            const float w = t * t * (3.0f - 2.0f * t);
+                (i < drapeEl.size() ? drapeEl[i] : 0.0f - blendStart) /
+                (blendEnd - blendStart), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+        for (size_t i = 0; i < n; ++i) {
+            const float w = restoreWeight(i);
             if (w <= 1.0e-6f) continue;
             finalVerts[i] = Add(Scale(finalVerts[i], 1.0f - w),
                                 Scale(pathBShellPublishedReference[i], w));
@@ -21876,8 +21967,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // body floor on exactly the verts we moved (authored-inside keeps its
         // authored depth, matching every other floor in this pass)
         for (size_t i = 0; i < n; ++i) {
-            if (i >= drapeEl.size()) break;
-            if (drapeEl[i] < blendStart) continue;
+            if (restoreWeight(i) <= 1.0e-6f) continue;
             Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
             float d2 = 0.0f;
             if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
@@ -21907,19 +21997,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (const Vec3& p : v) s += p.z;
             return (float)(s / (double)n);
         };
-        // mask census from the signals the pipeline actually used
+        // census of the SHARED mask - the same one the solver used, so this
+        // number can no longer disagree with what the physics saw
         int mFixed = 0, mTrans = 0, mFree = 0, mRigid = 0;
-        for (size_t i = 0; i < n; ++i) {
-            const bool rigid = !islandRigidOut.empty() && i < islandIdOut.size() &&
-                               islandIdOut[i] >= 0 &&
-                               (size_t)islandIdOut[i] < islandRigidOut.size() &&
-                               islandRigidOut[(size_t)islandIdOut[i]];
-            if (rigid) { ++mRigid; continue; }
-            const float de = i < drapeEl.size() ? drapeEl[i] : 0.0f;
-            const bool pinned = i < invMass.size() && invMass[i] <= 0.0f;
-            if (pinned || de < 0.20f) ++mFixed;
-            else if (de < 0.30f) ++mTrans;
-            else ++mFree;
+        for (size_t i = 0; i < n && i < drapeMask.size(); ++i) {
+            switch (drapeMask[i]) {
+            case DRAPE_CLASS_RIGID:      ++mRigid; break;
+            case DRAPE_CLASS_FREE:       ++mFree;  break;
+            case DRAPE_CLASS_TRANSITION: ++mTrans; break;
+            default:                     ++mFixed; break;
+            }
         }
         const char* path = !pathBShellRequested ? "legacy(shell-off)"
             : (!pathBShellScoped ? "legacy(out-of-scope)"
