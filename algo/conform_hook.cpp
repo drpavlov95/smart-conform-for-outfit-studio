@@ -21832,6 +21832,85 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              restored, floored, blendStart, blendEnd);
     }
 
+    // ONE REPORT PER SHAPE (2026-07-24). The user's verdict on the universal
+    // build was "terrible and extremely inconsistent - some outfits acceptable,
+    // some terrible". The inconsistency is structural: different garments take
+    // different code paths (shell / fitted-solver / verlet), and the free-cloth
+    // classification differs wildly between them. Up to now I had to GUESS which
+    // case a garment hit, and guessed wrong repeatedly. This prints, for every
+    // shape, the two things that actually distinguish the failure modes:
+    //   - did gravity get a chance to act at all (path + mask + CoM drop), and
+    //   - was its result then erased downstream (shell->final displacement).
+    // Cheap, always on: one line per shape, no behaviour change.
+    {
+        auto comZ = [&](const std::vector<Vec3>& v) {
+            if (v.size() != n || n == 0) return 0.0f;
+            double s = 0.0;
+            for (const Vec3& p : v) s += p.z;
+            return (float)(s / (double)n);
+        };
+        // mask census from the signals the pipeline actually used
+        int mFixed = 0, mTrans = 0, mFree = 0, mRigid = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const bool rigid = !islandRigidOut.empty() && i < islandIdOut.size() &&
+                               islandIdOut[i] >= 0 &&
+                               (size_t)islandIdOut[i] < islandRigidOut.size() &&
+                               islandRigidOut[(size_t)islandIdOut[i]];
+            if (rigid) { ++mRigid; continue; }
+            const float de = i < drapeEl.size() ? drapeEl[i] : 0.0f;
+            const bool pinned = i < invMass.size() && invMass[i] <= 0.0f;
+            if (pinned || de < 0.20f) ++mFixed;
+            else if (de < 0.30f) ++mTrans;
+            else ++mFree;
+        }
+        const char* path = !pathBShellRequested ? "legacy(shell-off)"
+            : (!pathBShellScoped ? "legacy(out-of-scope)"
+               : (pathBShellAccepted ? "SHELL" : "legacy(shell-rejected)"));
+        const float zEntry = comZ(supportVerts);
+        const float zShell = pathBShellPublishedReference.size() == n
+            ? comZ(pathBShellPublishedReference) : zEntry;
+        const float zFinal = comZ(finalVerts);
+        // how much the tail moved the cloth AFTER the shell handed off
+        float tailRms = 0.0f, tailMax = 0.0f;
+        if (pathBShellPublishedReference.size() == n) {
+            double acc = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                const float d = Len(Sub(finalVerts[i], pathBShellPublishedReference[i]));
+                acc += (double)d * d;
+                tailMax = std::max(tailMax, d);
+            }
+            tailRms = (float)std::sqrt(acc / (double)n);
+        }
+        int pen = 0;
+        float worstPen = 0.0f;
+        if (bodyBVH && bodyBVH->valid) {
+            for (size_t i = 0; i < n; ++i) {
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                if (g < -0.3f) { ++pen; worstPen = std::max(worstPen, -g); }
+            }
+        }
+        int flips = 0;
+        if (tris) {
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                const Vec3 nb = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                      Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                const Vec3 nf = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                                      Sub(finalVerts[t[2]], finalVerts[t[0]]));
+                if (Len(nb) > 1.0e-9f && Dot(nb, nf) < 0.0f) ++flips;
+            }
+        }
+        HLog("DRAPE-REPORT shape='%s' slider='%s' preset=%d path=%s "
+             "mask(fixed=%d trans=%d free=%d rigid=%d of %zu) "
+             "comZ(entry=%.2f shell=%+.2f final=%+.2f) tail(rms=%.2f max=%.2f) "
+             "final(flips=%d pen=%d worstPen=%.2f)",
+             shapeName.c_str(), sliderName.c_str(), originalPreset, path,
+             mFixed, mTrans, mFree, mRigid, n,
+             zEntry, zShell - zEntry, zFinal - zEntry, tailRms, tailMax,
+             flips, pen, worstPen);
+    }
+
 #if !defined(DRAPE_HARNESS_BUILD)
     if (pathBShellRequested && pathBShellScoped)
         PathBDumpLiveFinal(finalVerts, shapeName.c_str(), pathBShellAccepted);
