@@ -12007,8 +12007,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // it is a plate, not drape - measured, boosting it regressed Pauldron
         // (Rigid Armor) against its sculpt. Same material rule the shell gate
         // uses, so the two agree on what counts as cloth.
+        bool geomHangReq = EnvFloat("DRAPE_HANG_GEOMETRIC", 0.0f) > 0.5f;
+#if !defined(DRAPE_HARNESS_BUILD)
+        // Live gate: MO2 cannot set env vars, so mirror the other passes and
+        // accept a flag file (hang_geometric_on/off.flag).
+        if (DrapeFlagExists("hang_geometric_off.flag")) geomHangReq = false;
+        else if (DrapeFlagExists("hang_geometric_on.flag")) geomHangReq = true;
+#endif
         const bool geomHang =
-            EnvFloat("DRAPE_HANG_GEOMETRIC", 0.0f) > 0.5f &&
+            geomHangReq &&
             (normPreset == DRAPE_PRESET_FITTED_CLOTH ||
              normPreset == DRAPE_PRESET_LOOSE_DRAPED) &&
             bodyBVH && bodyBVH->valid && supportVerts.size() == n;
