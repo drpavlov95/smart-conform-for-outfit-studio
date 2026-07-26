@@ -13313,6 +13313,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (pathBShellRequested && pathBShellScoped) {
         const auto started = std::chrono::steady_clock::now();
         const std::vector<Vec3> productionEntry = finalVerts;
+        // Stage-dump anchors (DRAPE_STAGE_DUMP=1). "Which pass first created
+        // this bump" cannot be answered without the pose BEFORE the physics and
+        // the pose the physics handed over.
+        DrapeDumpStage(productionEntry, "00_vanilla", shapeName);
         std::vector<Vec3> shellCandidate;
         std::string failReason;
         bool candidateFinite = false;
@@ -13529,6 +13533,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             finalVerts = std::move(shellCandidate);
                             pathBShellAccepted = true;
                         PathBDumpLivePublished(finalVerts, shapeName.c_str());
+                        DrapeDumpStage(finalVerts, "00b_shell", shapeName);
                         }
                     }
                     else if (!bodySamplesOk) failReason =
@@ -13541,6 +13546,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         finalVerts = std::move(shellCandidate);
                         pathBShellAccepted = true;
                         PathBDumpLivePublished(finalVerts, shapeName.c_str());
+                        DrapeDumpStage(finalVerts, "00b_shell", shapeName);
                     }
                 }
             }
@@ -22606,6 +22612,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
                 if (g < 0.0f) { ++insideAfter; worstAfter = std::max(worstAfter, -g); }
             }
+            DrapeDumpStage(finalVerts, "08_body_evict", shapeName);
             HLog("path-b-shell: body-evict shape='%s' rounds=%d/%d frozen=%d "
                  "abandoned=%d repairs=%d overStretch=%d clearance=%.3f inside %d->%d "
                  "worst %.3f->%.3f "
@@ -22615,6 +22622,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  flipsBefore, countFlips(finalVerts));
         }
     }
+
+    DrapeDumpStage(finalVerts, "09_final", shapeName);
 
     // ONE REPORT PER SHAPE (2026-07-24). The user's verdict on the universal
     // build was "terrible and extremely inconsistent - some outfits acceptable,
