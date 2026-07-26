@@ -22431,6 +22431,42 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 r.erase(std::unique(r.begin(), r.end()), r.end());
             }
 
+            // STRETCH GUARD. Evicting a vertex lengthens the edges that hold it,
+            // and ValidateSolveOutput refuses to publish a shape whose worst edge
+            // exceeds kMaxStretchCeiling (8.0) - the live hook then never calls
+            // HostSetResultDiff and the user is left with plain vanilla conform
+            // for that garment. Measured: without this the eviction pushed the
+            // vampire robe from 7.69 to 8.25 and cost it publication entirely,
+            // trading a penetration fix for the whole result. The guard is
+            // relative as well as absolute: an edge already over the line at
+            // entry is not this pass's to fix, it just may not get worse.
+            struct EvEdge { uint32_t a, b; float rest, entryRatio; };
+            std::vector<EvEdge> evEdges;
+            {
+                std::vector<uint64_t> seen;
+                seen.reserve(tris->size() * 3);
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    for (int k = 0; k < 3; ++k) {
+                        uint32_t a = t[k], b = t[(k + 1) % 3];
+                        if (a > b) std::swap(a, b);
+                        seen.push_back(((uint64_t)a << 32) | b);
+                    }
+                }
+                std::sort(seen.begin(), seen.end());
+                seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+                evEdges.reserve(seen.size());
+                for (uint64_t key : seen) {
+                    const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFFu);
+                    const float rest = Len(Sub(baseVerts[a], baseVerts[b]));
+                    if (rest <= 1.0e-6f) continue;
+                    evEdges.push_back(EvEdge{a, b, rest,
+                                             Len(Sub(finalVerts[a], finalVerts[b])) / rest});
+                }
+            }
+            const float stretchCeil = std::max(1.0f,
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_MAXSTRETCH", 7.5f));
+
             auto faceFlipped = [&](const std::vector<Vec3>& v,
                                    const std::array<uint16_t, 3>& t) {
                 if (t[0] >= n || t[1] >= n || t[2] >= n) return false;
@@ -22478,7 +22514,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // repair: repair the neighbourhood that failed, never roll back the
             // garment.
             std::vector<uint8_t> frozen(n, 0);
-            int roundsRun = 0, frozenCount = 0, abandoned = 0, repairSweeps = 0;
+            int roundsRun = 0, frozenCount = 0, abandoned = 0, repairSweeps = 0,
+                overStretched = 0;
 
             for (int r = 0; r < rounds; ++r) {
                 int violating = 0;
@@ -22533,18 +22570,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // round is fully undone) instead of costing every other vertex
                 // its eviction.
                 for (int fix = 0; fix < 24; ++fix) {
-                    int newlyFlipped = 0;
+                    int offenders = 0;
+                    auto giveBack = [&](uint32_t vi) {
+                        if (vi >= n) return;
+                        if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
+                        next[vi] = finalVerts[vi];
+                    };
                     for (const auto& t : *tris) {
                         if (!faceFlipped(next, t) || faceFlipped(finalVerts, t)) continue;
-                        ++newlyFlipped;
-                        for (int k = 0; k < 3; ++k) {
-                            const uint16_t vi = t[k];
-                            if (vi >= n) continue;
-                            if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
-                            next[vi] = finalVerts[vi];
-                        }
+                        ++offenders;
+                        for (int k = 0; k < 3; ++k) giveBack(t[k]);
                     }
-                    if (newlyFlipped == 0) break;
+                    for (const EvEdge& e : evEdges) {
+                        const float ratio = Len(Sub(next[e.a], next[e.b])) / e.rest;
+                        if (ratio <= stretchCeil) continue;
+                        if (ratio <= e.entryRatio + 1.0e-4f) continue;  // not ours to fix
+                        ++offenders;
+                        ++overStretched;
+                        giveBack(e.a);
+                        giveBack(e.b);
+                    }
+                    if (offenders == 0) break;
                     weldSeams(next);
                     ++repairSweeps;
                 }
@@ -22561,10 +22607,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (g < 0.0f) { ++insideAfter; worstAfter = std::max(worstAfter, -g); }
             }
             HLog("path-b-shell: body-evict shape='%s' rounds=%d/%d frozen=%d "
-                 "abandoned=%d repairs=%d clearance=%.3f inside %d->%d worst %.3f->%.3f "
+                 "abandoned=%d repairs=%d overStretch=%d clearance=%.3f inside %d->%d "
+                 "worst %.3f->%.3f "
                  "flips %d->%d",
                  shapeName.c_str(), roundsRun, rounds, frozenCount, abandoned,
-                 repairSweeps, clearance, insideBefore, insideAfter, worstBefore, worstAfter,
+                 repairSweeps, overStretched, clearance, insideBefore, insideAfter, worstBefore, worstAfter,
                  flipsBefore, countFlips(finalVerts));
         }
     }
@@ -23304,6 +23351,12 @@ static bool WriteFloatCsv(const fs::path& path,
 struct ReplayOutcome {
     int code = 0;
     bool passOk = false;
+    // Would the LIVE hook publish this, or fall back to vanilla? Reported for
+    // every capture, including the legacy ones whose replay stops at the
+    // candidate.
+    bool wouldPublish = false;
+    float validationStretch = 0.0f;
+    const char* validationReason = "";
     uint8_t publishMode = CAPTURE_PUBLISH_UNKNOWN;
     SolverCapture capture;
     TargetDataDiffs solvedDiff;
@@ -23449,6 +23502,26 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     if (out.solvedVerts.empty() && out.passOk)
         out.solvedVerts = SolvedVertsFromDiff(cap.baseVerts, out.solvedDiff);
 
+    // PUBLICATION VERDICT, ALWAYS REPORTED (2026-07-26). The live hook refuses
+    // to call HostSetResultDiff when ValidateSolveOutput fails, so the user is
+    // left looking at plain vanilla conform for that garment. The harness models
+    // that ladder correctly - but only for publication-aware captures, and the
+    // whole recorded corpus predates that field, so the block below is skipped
+    // and every number we read is the CANDIDATE, not what the host would get.
+    // That is how a garment can read `pass=1` here while falling back live:
+    // BlackSmithTorso publishes at 8.34 and the production Pants at 11.14, both
+    // over the 8.0 ceiling. Compute the verdict unconditionally and print it, so
+    // a rejection shows up in the corpus instead of in his session. Report only -
+    // the legacy candidate-only replay behaviour is unchanged, so goldens hold.
+    {
+        const SolveValidation v = ValidateSolveOutput(
+            cap.baseVerts, out.solvedVerts,
+            cap.edges.empty() ? nullptr : &cap.edges);
+        out.wouldPublish = out.passOk && v.ok;
+        out.validationStretch = v.worstStretch;
+        out.validationReason = v.ok ? (out.passOk ? "ok" : "solve failed") : v.reason;
+    }
+
     // Legacy captures intentionally preserve their historical candidate-only
     // replay.  Publication-aware captures mirror the live degradation ladder:
     // validate the candidate, then expose either SetResultDiff's merged result
@@ -23550,6 +23623,9 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
                   << " slider=" << cap.sliderName
                   << " preset=\"" << PresetName(cap.preset) << "\""
                   << " pass=" << (out.passOk ? 1 : 0)
+                  << " wouldPublish=" << (out.wouldPublish ? 1 : 0)
+                  << " publishStretch=" << out.validationStretch
+                  << " publishReason=\"" << out.validationReason << "\""
                   << " expectedPass=" << (cap.hasExpected ? (cap.expectedPassOk ? 1 : 0) : -1)
                   << (cap.publicationAware ? " publishMode=" : "")
                   << (cap.publicationAware ? CapturePublishModeName(out.publishMode) : "")

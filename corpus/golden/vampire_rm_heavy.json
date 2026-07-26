@@ -25,6 +25,8 @@
     "outers": "1",
     "pass": "1",
     "preset": "Auto",
+    "publishReason": "ok",
+    "publishStretch": "3.49886",
     "raw": "34",
     "residualByOuter": "vampire_robes_alt:30/body=20/worst=0.160002",
     "roughnessSolved": "6.68759",
@@ -42,6 +44,7 @@
     "worstGarmentFacePen": "0.160007",
     "worstGarmentPen": "0.160002",
     "worstSupportEdgeStretch": "1.03314",
+    "wouldPublish": "1",
     "written": "34"
   },
   "vampire_robes_alt": {
@@ -68,6 +71,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Loose Draped",
+    "publishReason": "edge stretch exploded",
+    "publishStretch": "8.93992",
     "raw": "4001",
     "roughnessSolved": "1.05547",
     "roughnessVanilla": "1.10644",
@@ -84,6 +89,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "8.90896",
+    "wouldPublish": "0",
     "written": "4005"
   }
 }

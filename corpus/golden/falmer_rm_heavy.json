@@ -25,6 +25,8 @@
     "outers": "3",
     "pass": "1",
     "preset": "Auto",
+    "publishReason": "ok",
+    "publishStretch": "3.2571",
     "raw": "603",
     "residualByOuter": "Cuirass_Torso:94/body=0/worst=0.907571",
     "roughnessSolved": "0.173608",
@@ -42,6 +44,7 @@
     "worstGarmentFacePen": "1.05715",
     "worstGarmentPen": "0.907571",
     "worstSupportEdgeStretch": "1.12",
+    "wouldPublish": "1",
     "written": "603"
   },
   "Cloth": {
@@ -69,6 +72,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Loose Draped",
+    "publishReason": "ok",
+    "publishStretch": "2.52139",
     "raw": "752",
     "roughnessSolved": "2.03994",
     "roughnessVanilla": "2.29278",
@@ -85,6 +90,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.33189",
+    "wouldPublish": "1",
     "written": "752"
   },
   "Cuirass": {
@@ -112,6 +118,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Auto",
+    "publishReason": "ok",
+    "publishStretch": "2.41184",
     "raw": "462",
     "roughnessSolved": "1.3116",
     "roughnessVanilla": "1.49471",
@@ -128,6 +136,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.12",
+    "wouldPublish": "1",
     "written": "462"
   },
   "Cuirass_Torso": {
@@ -156,6 +165,8 @@
     "outers": "2",
     "pass": "1",
     "preset": "Fitted Cloth",
+    "publishReason": "ok",
+    "publishStretch": "3.79139",
     "raw": "787",
     "residualByOuter": "Pauldron:20/body=10/worst=1.5151,Cloth:1/body=1/worst=0.299807",
     "roughnessSolved": "1.51038",
@@ -173,6 +184,7 @@
     "worstGarmentFacePen": "2.4705",
     "worstGarmentPen": "1.5151",
     "worstSupportEdgeStretch": "1.24176",
+    "wouldPublish": "1",
     "written": "804"
   },
   "Leg": {
@@ -200,6 +212,8 @@
     "outers": "3",
     "pass": "1",
     "preset": "Tubular",
+    "publishReason": "ok",
+    "publishStretch": "2.19815",
     "raw": "244",
     "roughnessSolved": "1.58483",
     "roughnessVanilla": "1.71251",
@@ -216,6 +230,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.12329",
+    "wouldPublish": "1",
     "written": "244"
   },
   "Pauldron": {
@@ -243,6 +258,8 @@
     "outers": "1",
     "pass": "1",
     "preset": "Rigid Armor",
+    "publishReason": "ok",
+    "publishStretch": "1.74876",
     "raw": "163",
     "roughnessSolved": "1.24709",
     "roughnessVanilla": "1.44577",
@@ -259,6 +276,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.12",
+    "wouldPublish": "1",
     "written": "163"
   },
   "Strap": {
@@ -286,6 +304,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Auto",
+    "publishReason": "ok",
+    "publishStretch": "3.31687",
     "raw": "198",
     "roughnessSolved": "1.11986",
     "roughnessVanilla": "1.1407",
@@ -302,6 +322,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.12",
+    "wouldPublish": "1",
     "written": "198"
   },
   "Undies": {
@@ -331,6 +352,8 @@
     "outers": "1",
     "pass": "1",
     "preset": "Auto",
+    "publishReason": "ok",
+    "publishStretch": "4.122",
     "raw": "1847",
     "residualByOuter": "Cuirass_Torso:814/body=777/worst=3.06114",
     "roughnessSolved": "0.83037",
@@ -348,6 +371,7 @@
     "worstGarmentFacePen": "3.08096",
     "worstGarmentPen": "3.06114",
     "worstSupportEdgeStretch": "1.14126",
+    "wouldPublish": "1",
     "written": "1847"
   }
 }

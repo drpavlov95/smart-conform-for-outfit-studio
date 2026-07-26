@@ -24,6 +24,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Belt / Waist Item",
+    "publishReason": "ok",
+    "publishStretch": "2.92931",
     "raw": "294",
     "roughnessSolved": "0.815937",
     "roughnessVanilla": "0.926744",
@@ -40,6 +42,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "2.46614",
+    "wouldPublish": "1",
     "written": "294"
   },
   "Cloak": {
@@ -66,6 +69,8 @@
     "outers": "0",
     "pass": "1",
     "preset": "Loose Draped",
+    "publishReason": "ok",
+    "publishStretch": "3.53374",
     "raw": "553",
     "roughnessSolved": "1.68614",
     "roughnessVanilla": "1.93093",
@@ -82,6 +87,7 @@
     "worstGarmentFacePen": "0",
     "worstGarmentPen": "0",
     "worstSupportEdgeStretch": "1.24798",
+    "wouldPublish": "1",
     "written": "553"
   },
   "Clothes": {
@@ -110,6 +116,8 @@
     "outers": "2",
     "pass": "1",
     "preset": "Loose Draped",
+    "publishReason": "ok",
+    "publishStretch": "5.34279",
     "raw": "1749",
     "residualByOuter": "Cloak:19/body=14/worst=1.93341,Belt:7/body=3/worst=1.4446",
     "roughnessSolved": "1.30711",
@@ -127,6 +135,7 @@
     "worstGarmentFacePen": "1.97273",
     "worstGarmentPen": "1.93341",
     "worstSupportEdgeStretch": "1.25672",
+    "wouldPublish": "1",
     "written": "1777"
   },
   "Pants": {
@@ -155,6 +164,8 @@
     "outers": "3",
     "pass": "1",
     "preset": "Tubular",
+    "publishReason": "ok",
+    "publishStretch": "4.16412",
     "raw": "575",
     "residualByOuter": "Clothes:21/body=20/worst=1.40294",
     "roughnessSolved": "1.40046",
@@ -172,6 +183,7 @@
     "worstGarmentFacePen": "1.98921",
     "worstGarmentPen": "1.40294",
     "worstSupportEdgeStretch": "1.19163",
+    "wouldPublish": "1",
     "written": "575"
   }
 }
