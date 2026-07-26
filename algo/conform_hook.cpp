@@ -22370,6 +22370,205 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              restored, floored, blendStart, blendEnd);
     }
 
+    // UNILATERAL BODY EVICTION (2026-07-26) - the safety net the shell never had.
+    //
+    // Measured cause of the one class the shell loses badly on. The ONLY
+    // body-penetration cleanup in the pipeline is in the verlet finishing block
+    // ("push every drape vert onto the REAL body surface"), gated on
+    // `legacyVerletTail = params.verletCloth && !pathBShellAccepted` - so it is
+    // off precisely when the shell publishes. The trace: vanilla conform enters
+    // at 193 penetrations and the production tail cleans it to 29, while the
+    // shell publishes 87 and the tail leaves 83. Across the corpus that is
+    // 0 wins / 8 losses on body penetration, the shell's worst result and the
+    // one that reads as cloth buried in flesh.
+    //
+    // That pass cannot just be re-enabled: pushing a vertex ONTO the surface
+    // also drags inward anything sitting outside it, which is the body-following
+    // positional constraint the raw-authority fix deliberately removed from free
+    // cloth. This is its unilateral half and only that half:
+    //   - a vertex already clear is NEVER moved toward the body, at any stage,
+    //     including by the smoothing;
+    //   - a vertex inside (or within `clearance`) is pushed OUT along the real
+    //     surface normal, which is what contact physically does.
+    // Being inside the body is wrong for every vertex class, so this is not
+    // gated on the drape mask.
+    //
+    // The correction is applied as a smoothed FIELD over small rounds instead of
+    // snapped. Snapping a buried vertex to the surface while its neighbours stay
+    // put is the exact mechanism that tore the closure-repair candidate (Cloak
+    // maxEdge 2.518 -> 13.313); smoothing the field lets the eviction arrive as a
+    // bend of the neighbourhood. Seams are re-welded inside the loop (per-vertex
+    // passes must restore seam invariants themselves) and any round that adds an
+    // inverted face is rolled back.
+    if (pathBShellAccepted && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
+        n > 0 && baseVerts.size() == n) {
+        bool evictOn = EnvToggle("DRAPE_SHELL_BODY_EVICT", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (DrapeFlagExists("shell_body_evict_off.flag"))     evictOn = false;
+        else if (DrapeFlagExists("shell_body_evict_on.flag")) evictOn = true;
+#endif
+        if (evictOn) {
+            const float clearance = std::max(0.0f,
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_CLEAR", 0.05f));
+            const int rounds = (int)ClampRange(
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_ROUNDS", 16.0f), 1.0f, 64.0f);
+            const float step = ClampRange(
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_STEP", 0.60f), 0.05f, 1.0f);
+            const float spread = ClampRange(
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_SPREAD", 0.50f), 0.0f, 1.0f);
+
+            std::vector<std::vector<uint32_t>> ring(n);
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t a = t[k], b = t[(k + 1) % 3];
+                    ring[a].push_back(b);
+                    ring[b].push_back(a);
+                }
+            }
+            for (auto& r : ring) {
+                std::sort(r.begin(), r.end());
+                r.erase(std::unique(r.begin(), r.end()), r.end());
+            }
+
+            auto faceFlipped = [&](const std::vector<Vec3>& v,
+                                   const std::array<uint16_t, 3>& t) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) return false;
+                const Vec3 nb = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                      Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                const Vec3 nf = Cross(Sub(v[t[1]], v[t[0]]),
+                                      Sub(v[t[2]], v[t[0]]));
+                return Len(nb) > 1.0e-9f && Dot(nb, nf) < 0.0f;
+            };
+            auto countFlips = [&](const std::vector<Vec3>& v) {
+                int f = 0;
+                for (const auto& t : *tris) if (faceFlipped(v, t)) ++f;
+                return f;
+            };
+            auto weldSeams = [&](std::vector<Vec3>& v) {
+                for (const auto& grp : exactSeamGroups) {
+                    if (grp.size() < 2) continue;
+                    Vec3 acc{0.0f, 0.0f, 0.0f};
+                    int c = 0;
+                    for (uint32_t vi : grp) {
+                        if (vi < n) { acc = Add(acc, v[vi]); ++c; }
+                    }
+                    if (c < 2) continue;
+                    const Vec3 avg = Scale(acc, 1.0f / (float)c);
+                    for (uint32_t vi : grp) if (vi < n) v[vi] = avg;
+                }
+            };
+
+            const int flipsBefore = countFlips(finalVerts);
+            float worstBefore = 0.0f;
+            int insideBefore = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                if (g < 0.0f) { ++insideBefore; worstBefore = std::max(worstBefore, -g); }
+            }
+
+            std::vector<Vec3> nrmOf(n, Vec3{0.0f, 0.0f, 1.0f});
+            std::vector<Vec3> corr(n);
+            // A vertex whose eviction inverted a face is handed back and left
+            // alone for the rest of the pass. Aborting the WHOLE pass on the
+            // first inverted face - which is what this did first - cost every
+            // other vertex its eviction: 4 of 6 garments stopped at round 1 with
+            // zero penetrations removed. Same lesson as the last-chance flip
+            // repair: repair the neighbourhood that failed, never roll back the
+            // garment.
+            std::vector<uint8_t> frozen(n, 0);
+            int roundsRun = 0, frozenCount = 0, abandoned = 0, repairSweeps = 0;
+
+            for (int r = 0; r < rounds; ++r) {
+                int violating = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    corr[i] = Vec3{0.0f, 0.0f, 0.0f};
+                    if (frozen[i]) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) continue;
+                    nrmOf[i] = nrm;
+                    const float gap = Dot(Sub(finalVerts[i], cp), nrm);
+                    if (gap >= clearance) continue;   // already clear: never touched
+                    corr[i] = Scale(nrm, (clearance - gap) * step);
+                    ++violating;
+                }
+                if (violating == 0) break;
+                ++roundsRun;
+
+                if (spread > 0.0f) {
+                    std::vector<Vec3> sm = corr;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (ring[i].empty()) continue;
+                        Vec3 acc{0.0f, 0.0f, 0.0f};
+                        for (uint32_t j : ring[i]) acc = Add(acc, corr[j]);
+                        acc = Scale(acc, 1.0f / (float)ring[i].size());
+                        sm[i] = Add(Scale(corr[i], 1.0f - spread), Scale(acc, spread));
+                    }
+                    corr.swap(sm);
+                }
+
+                // THE UNILATERAL INVARIANT. Keep only the component along the
+                // vertex's own outward body normal, and only when positive. A
+                // smoothed field can otherwise hand an inward push to a vertex
+                // that was already clear, which is exactly the body-following
+                // force this pass exists to avoid.
+                std::vector<Vec3> next = finalVerts;
+                for (size_t i = 0; i < n; ++i) {
+                    const float along = Dot(corr[i], nrmOf[i]);
+                    if (along <= 0.0f) continue;
+                    next[i] = Add(finalVerts[i], Scale(nrmOf[i], along));
+                }
+
+                weldSeams(next);
+
+                // Local flip repair, ITERATED: a face that inverted gives its
+                // three vertices back to the pre-round pose and freezes them.
+                // One sweep is not enough - handing a vertex back can invert a
+                // neighbouring face, and the re-weld moves seam twins again. A
+                // single sweep left 5 of 6 garments abandoning at round 1-3.
+                // Each sweep freezes strictly more vertices and returns them to
+                // the last accepted pose, so this converges (in the limit the
+                // round is fully undone) instead of costing every other vertex
+                // its eviction.
+                for (int fix = 0; fix < 24; ++fix) {
+                    int newlyFlipped = 0;
+                    for (const auto& t : *tris) {
+                        if (!faceFlipped(next, t) || faceFlipped(finalVerts, t)) continue;
+                        ++newlyFlipped;
+                        for (int k = 0; k < 3; ++k) {
+                            const uint16_t vi = t[k];
+                            if (vi >= n) continue;
+                            if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
+                            next[vi] = finalVerts[vi];
+                        }
+                    }
+                    if (newlyFlipped == 0) break;
+                    weldSeams(next);
+                    ++repairSweeps;
+                }
+
+                if (countFlips(next) > flipsBefore) { ++abandoned; break; }
+                finalVerts.swap(next);
+            }
+
+            float worstAfter = 0.0f;
+            int insideAfter = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                if (g < 0.0f) { ++insideAfter; worstAfter = std::max(worstAfter, -g); }
+            }
+            HLog("path-b-shell: body-evict shape='%s' rounds=%d/%d frozen=%d "
+                 "abandoned=%d repairs=%d clearance=%.3f inside %d->%d worst %.3f->%.3f "
+                 "flips %d->%d",
+                 shapeName.c_str(), roundsRun, rounds, frozenCount, abandoned,
+                 repairSweeps, clearance, insideBefore, insideAfter, worstBefore, worstAfter,
+                 flipsBefore, countFlips(finalVerts));
+        }
+    }
+
     // ONE REPORT PER SHAPE (2026-07-24). The user's verdict on the universal
     // build was "terrible and extremely inconsistent - some outfits acceptable,
     // some terrible". The inconsistency is structural: different garments take
