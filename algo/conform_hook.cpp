@@ -11988,6 +11988,39 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Non-verlet presets: per-vertex drape from bones (Z fallback if none) Ã¢â€â‚¬Ã¢â€â‚¬
     if (!params.verletCloth) {
+        // GEOMETRIC HANG (2026-07-24, DRAPE_HANG_GEOMETRIC, default off).
+        // The bone formula below reads "free-hanging cloth is weighted to the
+        // pelvis and legs", and the sleeve term actively SUPPRESSES drape. That
+        // is right for a skirt and wrong for anything that hangs from the UPPER
+        // body: a cape is weighted to torso/arms, so it scores ~0 and is
+        // classified as anchored material. Measured on the yarl Cloak: 505 of
+        // 553 verts anchored, which makes every "the shell owns free cloth"
+        // hand-off inert on it - the cape cannot be draped because nothing
+        // believes it hangs. The loose/verlet path already has the correct
+        // GEOMETRIC test (a vert far from the body is hanging cloth) but it is
+        // fenced off from this path, so a garment's preset label decides whether
+        // geometry is allowed to speak. Take the max of the two signals: bones
+        // still catch cloth that hangs while touching, and geometry catches
+        // cloth that hangs from anywhere. Same thresholds as the loose path.
+        // Material gate: geometry decides where CLOTH hangs. A rigid accessory
+        // also sits far from the body (a pauldron stands off the shoulder) but
+        // it is a plate, not drape - measured, boosting it regressed Pauldron
+        // (Rigid Armor) against its sculpt. Same material rule the shell gate
+        // uses, so the two agree on what counts as cloth.
+        const bool geomHang =
+            EnvFloat("DRAPE_HANG_GEOMETRIC", 0.0f) > 0.5f &&
+            (normPreset == DRAPE_PRESET_FITTED_CLOTH ||
+             normPreset == DRAPE_PRESET_LOOSE_DRAPED) &&
+            bodyBVH && bodyBVH->valid && supportVerts.size() == n;
+        // 2.5, not the loose path's 1.0: a fitted cuirass legitimately stands
+        // 1-2u off the chest, and treating that standoff as drape regressed
+        // Cuirass_Torso against its sculpt (0.05 -> 0.21 at 1.0, 0.17 at 2.5).
+        // Cloth only counts as hanging when it is CLEARLY away from the body -
+        // the Cloak's flaps sit ~3.9u out, so the cape gain is unaffected.
+        const float gapNear = EnvFloat("DRAPE_HANG_GAP_NEAR", 2.5f);
+        const float gapFar  = std::max(gapNear + 0.1f,
+                                       EnvFloat("DRAPE_HANG_GAP_FAR", 4.0f));
+        int geomBoosted = 0;
         for (size_t i = 0; i < n; ++i) {
             if (profiles && i < profiles->size()) {
                 const auto& bp = (*profiles)[i];
@@ -11998,7 +12031,23 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 float normZ = ClampRange((baseVerts[i].z - g_refMinZ) / bodyZRange, 0.0f, 1.0f);
                 drapeAmount[i] = (normZ < 0.50f) ? 0.50f : 0.0f;
             }
+            if (!geomHang) continue;
+            Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+            float d2 = 0.0f;
+            if (!BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) continue;
+            const float dist = std::sqrt(d2);
+            if (Dot(Sub(supportVerts[i], cp), nrm) <= 0.0f) continue;  // inside: not hanging
+            if (dist <= gapNear) continue;                             // hugs the body
+            const float hang =
+                ClampRange((dist - gapNear) / (gapFar - gapNear), 0.0f, 1.0f);
+            if (hang > drapeAmount[i] + 0.01f) {
+                drapeAmount[i] = hang;
+                ++geomBoosted;
+            }
         }
+        if (geomBoosted > 0)
+            HLog("  geometric-hang: %d verts reclassified as drape (gap>%.1f) shape='%s'",
+                 geomBoosted, gapNear, shapeName.c_str());
     }
 
     // drapeEl is the single source of truth downstream; alias it to drapeAmount.
