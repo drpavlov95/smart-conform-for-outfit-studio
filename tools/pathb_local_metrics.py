@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -156,6 +157,55 @@ class ImprintMetrics:
     body_laplacian_rms: float | None
     garment_laplacian_rms: float | None
     islands: ErrorIslandMetrics | None
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WholePanelTransferMetrics:
+    """Low-frequency transfer of a body morph into always-clear free cloth.
+
+    Unlike :class:`ImprintMetrics`, this deliberately does not take a graph
+    Laplacian.  It measures the whole free material component after removing
+    one constant radial offset per measurement.  A constant offset can be a
+    legitimate panel translation; a regression slope near one means that the
+    *shape* of the distant cloth is still copying the corresponding body
+    morph.
+    """
+
+    valid: bool
+    reason: str | None
+    mask_sha256: str
+    node_count: int
+    area: float | None
+    body_motion_mean: float | None
+    body_motion_std: float | None
+    garment_motion_mean: float | None
+    garment_motion_std: float | None
+    alpha: float | None
+    alpha_positive: float | None
+    correlation: float | None
+    intercept: float | None
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WholePanelTransferGate:
+    """One candidate's bounded-free-cloth transfer verdict."""
+
+    valid: bool
+    reason: str | None
+    passed: bool
+    raw_alpha_positive: float | None
+    candidate_alpha_positive: float | None
+    alpha_positive_ratio: float | None
+    max_alpha_positive_ratio: float
+    candidate_correlation: float | None
+    max_correlation: float
+    failures: tuple[str, ...]
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -776,6 +826,237 @@ def _metric_fields(
     )
 
 
+def measure_whole_panel_transfer(
+    context: LocalMetricContext,
+    candidate_vertices: np.ndarray,
+    *,
+    measurement_mask: np.ndarray | None = None,
+) -> WholePanelTransferMetrics:
+    """Measure broad body-shape transfer into a frozen free-cloth population.
+
+    Each material node receives two scalar signals along its authored
+    cloth-to-reference-body direction:
+
+    * ``b``: the morph of the corresponding reference-body material point;
+    * ``g``: the candidate cloth displacement from authored cloth.
+
+    The reported ``alpha`` is the weighted least-squares slope of ``g`` on
+    ``b`` *with an intercept*.  Before that projection, each vector field has
+    its best constant world-space translation removed.  Those two removals
+    make a rigid fall/translation of a panel non-evidence; a value near one is
+    instead the direct signature of a distant panel receiving the body's
+    spatial morph field.
+
+    The mask and body bindings are prepared before any candidate is inspected,
+    so a candidate cannot improve its score by reducing coverage.
+    """
+
+    candidate = _validate_vertices("candidate_vertices", candidate_vertices)
+    if candidate.shape != context.base_vertices.shape:
+        raise ValueError("candidate vertex count differs from context")
+    node_mask, mask_hash = _resolve_node_mask(context, measurement_mask)
+    binding = context.body_binding
+
+    garment_vector_vertex = np.full((context.graph.vertex_count, 3), np.nan)
+    body_vector_vertex = np.full((context.graph.vertex_count, 3), np.nan)
+    direction_vertex = np.full((context.graph.vertex_count, 3), np.nan)
+    garment_vector_vertex[binding.valid] = (
+        candidate - context.base_vertices
+    )[binding.valid]
+    body_vector_vertex[binding.valid] = binding.body_motion[binding.valid]
+    direction_vertex[binding.valid] = binding.direction[binding.valid]
+    node_garment_vector = collapse_vertex_values(
+        context.graph, np.nan_to_num(garment_vector_vertex)
+    )
+    node_body_vector = collapse_vertex_values(
+        context.graph, np.nan_to_num(body_vector_vertex)
+    )
+    node_direction = collapse_vertex_values(
+        context.graph, np.nan_to_num(direction_vertex)
+    )
+    direction_length = np.linalg.norm(node_direction, axis=1)
+    safe_direction = np.zeros_like(node_direction)
+    direction_ok = direction_length > context.body_signal_epsilon
+    safe_direction[direction_ok] = (
+        node_direction[direction_ok] / direction_length[direction_ok, None]
+    )
+    valid_binding_count = np.bincount(
+        context.graph.vertex_to_node,
+        weights=binding.valid.astype(np.int32),
+        minlength=context.graph.node_count,
+    )
+    member_count = np.asarray([len(ids) for ids in context.graph.node_members])
+    valid = (
+        node_mask
+        & (valid_binding_count == member_count)
+        & np.isfinite(node_garment_vector).all(axis=1)
+        & np.isfinite(node_body_vector).all(axis=1)
+        & direction_ok
+        & (context.graph.node_area > 0.0)
+    )
+    ids = np.flatnonzero(valid)
+    if len(ids) < context.min_metric_nodes:
+        return WholePanelTransferMetrics(
+            valid=False,
+            reason="insufficient_valid_nodes",
+            mask_sha256=mask_hash,
+            node_count=int(len(ids)),
+            area=None,
+            body_motion_mean=None,
+            body_motion_std=None,
+            garment_motion_mean=None,
+            garment_motion_std=None,
+            alpha=None,
+            alpha_positive=None,
+            correlation=None,
+            intercept=None,
+        )
+    weights = context.graph.node_area[ids]
+    total_area = float(weights.sum())
+    if total_area <= 1.0e-20:
+        return WholePanelTransferMetrics(
+            False, "zero_valid_area", mask_hash, int(len(ids)), None,
+            None, None, None, None, None, None, None, None,
+        )
+    normalized = weights / total_area
+    garment_translation = np.sum(
+        normalized[:, None] * node_garment_vector[ids], axis=0
+    )
+    body_translation = np.sum(
+        normalized[:, None] * node_body_vector[ids], axis=0
+    )
+    garment = np.einsum(
+        "ij,ij->i",
+        node_garment_vector[ids] - garment_translation,
+        safe_direction[ids],
+    )
+    body = np.einsum(
+        "ij,ij->i",
+        node_body_vector[ids] - body_translation,
+        safe_direction[ids],
+    )
+    body_mean = float(np.sum(normalized * body))
+    garment_mean = float(np.sum(normalized * garment))
+    centered_body = body - body_mean
+    centered_garment = garment - garment_mean
+    body_variance = float(np.sum(normalized * centered_body * centered_body))
+    garment_variance = float(
+        np.sum(normalized * centered_garment * centered_garment)
+    )
+    if body_variance <= context.body_signal_epsilon * context.body_signal_epsilon:
+        return WholePanelTransferMetrics(
+            valid=False,
+            reason="insufficient_body_shape_signal",
+            mask_sha256=mask_hash,
+            node_count=int(len(ids)),
+            area=total_area,
+            body_motion_mean=body_mean,
+            body_motion_std=float(np.sqrt(max(0.0, body_variance))),
+            garment_motion_mean=garment_mean,
+            garment_motion_std=float(np.sqrt(max(0.0, garment_variance))),
+            alpha=None,
+            alpha_positive=None,
+            correlation=None,
+            intercept=None,
+        )
+    covariance = float(np.sum(normalized * centered_garment * centered_body))
+    alpha = covariance / body_variance
+    correlation = _weighted_correlation(
+        garment,
+        body,
+        weights,
+        epsilon=context.body_signal_epsilon,
+        minimum_count=context.min_metric_nodes,
+    )
+    return WholePanelTransferMetrics(
+        valid=True,
+        reason=None,
+        mask_sha256=mask_hash,
+        node_count=int(len(ids)),
+        area=total_area,
+        body_motion_mean=body_mean,
+        body_motion_std=float(np.sqrt(max(0.0, body_variance))),
+        garment_motion_mean=garment_mean,
+        garment_motion_std=float(np.sqrt(max(0.0, garment_variance))),
+        alpha=float(alpha),
+        alpha_positive=float(max(0.0, alpha)),
+        correlation=correlation,
+        intercept=float(garment_mean - alpha * body_mean),
+    )
+
+
+def evaluate_whole_panel_transfer_gate(
+    raw: WholePanelTransferMetrics,
+    candidate: WholePanelTransferMetrics,
+    *,
+    max_alpha_positive_ratio: float = 0.75,
+    max_correlation: float = 0.90,
+    epsilon: float = DEFAULT_BODY_SIGNAL_EPSILON,
+) -> WholePanelTransferGate:
+    """Gate broad free-cloth body transfer against the capture's raw conform.
+
+    ``raw`` is always measured from the capture itself, not from a candidate
+    OBJ.  This makes the comparison immune to a candidate changing the mask.
+    A null candidate correlation is treated as no shape correlation, not as a
+    misleading numeric zero in the public metric.
+    """
+
+    if (
+        not np.isfinite(max_alpha_positive_ratio)
+        or max_alpha_positive_ratio < 0.0
+    ):
+        raise ValueError("max_alpha_positive_ratio must be finite and >= 0")
+    if not np.isfinite(max_correlation) or not -1.0 <= max_correlation <= 1.0:
+        raise ValueError("max_correlation must be finite and in [-1,1]")
+    if not raw.valid:
+        return WholePanelTransferGate(
+            False, f"raw:{raw.reason}", False, raw.alpha_positive,
+            candidate.alpha_positive, None, float(max_alpha_positive_ratio),
+            candidate.correlation, float(max_correlation), ("raw_metric_invalid",),
+        )
+    if not candidate.valid:
+        return WholePanelTransferGate(
+            False, f"candidate:{candidate.reason}", False, raw.alpha_positive,
+            candidate.alpha_positive, None, float(max_alpha_positive_ratio),
+            candidate.correlation, float(max_correlation),
+            ("candidate_metric_invalid",),
+        )
+    if raw.alpha_positive is None or raw.alpha_positive <= epsilon:
+        return WholePanelTransferGate(
+            False, "insufficient_raw_positive_transfer", False,
+            raw.alpha_positive, candidate.alpha_positive, None,
+            float(max_alpha_positive_ratio), candidate.correlation,
+            float(max_correlation), ("insufficient_raw_positive_transfer",),
+        )
+    if candidate.alpha_positive is None:
+        return WholePanelTransferGate(
+            False, "candidate_alpha_missing", False, raw.alpha_positive,
+            None, None, float(max_alpha_positive_ratio),
+            candidate.correlation, float(max_correlation),
+            ("candidate_alpha_missing",),
+        )
+    ratio = float(candidate.alpha_positive / raw.alpha_positive)
+    failures: list[str] = []
+    if ratio > max_alpha_positive_ratio:
+        failures.append("alpha_positive_ratio")
+    # A constant candidate field has no meaningful correlation. It is not a
+    # body-shape copy and must not be failed merely for lacking variance.
+    if candidate.correlation is not None and candidate.correlation > max_correlation:
+        failures.append("correlation")
+    return WholePanelTransferGate(
+        valid=True,
+        reason=None,
+        passed=not failures,
+        raw_alpha_positive=raw.alpha_positive,
+        candidate_alpha_positive=candidate.alpha_positive,
+        alpha_positive_ratio=ratio,
+        max_alpha_positive_ratio=float(max_alpha_positive_ratio),
+        candidate_correlation=candidate.correlation,
+        max_correlation=float(max_correlation),
+        failures=tuple(failures),
+    )
+
+
 def freeze_raw_error_threshold(
     context: LocalMetricContext,
     *,
@@ -1203,6 +1484,18 @@ def run_selftests() -> dict:
     if copied.islands is None or copied.islands.island_count < 1:
         raise AssertionError("synthetic bump must form at least one error island")
 
+    # The whole-panel metric intentionally retains the low-frequency body-copy
+    # signal that the Laplacian metric discards.  A direct copy must therefore
+    # be exactly one in both regression slope and correlation.
+    copied_whole = measure_whole_panel_transfer(context, fixture["raw"])
+    if not copied_whole.valid:
+        raise AssertionError(f"whole g=b metric invalid: {copied_whole.reason}")
+    _assert_close("whole g=b alpha", copied_whole.alpha, 1.0, 1.0e-10)
+    _assert_close("whole g=b corr", copied_whole.correlation, 1.0, 1.0e-10)
+    raw_copy_gate = evaluate_whole_panel_transfer_gate(copied_whole, copied_whole)
+    if raw_copy_gate.passed or "alpha_positive_ratio" not in raw_copy_gate.failures:
+        raise AssertionError("a raw whole-panel copy must fail the transfer gate")
+
     # A constant offset has zero degree-normalized Laplacian. Correlation must
     # be N/A rather than the misleading numeric zero used by the old audit.
     constant = fixture["base"].copy()
@@ -1219,6 +1512,21 @@ def run_selftests() -> dict:
     if constant_metric.correlation is not None:
         raise AssertionError("constant-field correlation must be N/A")
 
+    # Whole-panel alpha has an intercept.  A rigid cloth translation is not a
+    # body-shape imprint even though the body bump has a non-zero mean.
+    constant_whole = measure_whole_panel_transfer(context, constant)
+    if not constant_whole.valid:
+        raise AssertionError(
+            f"whole constant metric invalid: {constant_whole.reason}"
+        )
+    _assert_close("whole constant alpha", constant_whole.alpha, 0.0, 1.0e-10)
+    if constant_whole.correlation is not None:
+        raise AssertionError("whole constant correlation must be N/A")
+    clear_whole = measure_whole_panel_transfer(context, fixture["base"])
+    clear_gate = evaluate_whole_panel_transfer_gate(copied_whole, clear_whole)
+    if not clear_gate.valid or not clear_gate.passed:
+        raise AssertionError(f"body-independent cloth failed gate: {clear_gate}")
+
     # With no body morph there is no causal body-imprint signal to measure.
     # Report N/A explicitly; do not turn absent variance into a numeric zero.
     no_morph = prepare_context(
@@ -1234,10 +1542,16 @@ def run_selftests() -> dict:
     )
     no_morph_threshold = freeze_raw_error_threshold(no_morph)
     no_morph_metric = measure_imprint(no_morph, fixture["base"])
+    no_morph_whole = measure_whole_panel_transfer(no_morph, fixture["base"])
     if no_morph_threshold.valid or no_morph_threshold.reason != "insufficient_body_signal":
         raise AssertionError("zero body signal must invalidate the raw threshold")
     if no_morph_metric.valid or no_morph_metric.reason != "insufficient_body_signal":
         raise AssertionError("zero body signal must produce an N/A metric")
+    if (
+        no_morph_whole.valid
+        or no_morph_whole.reason != "insufficient_body_shape_signal"
+    ):
+        raise AssertionError("zero body shape signal must produce whole-panel N/A")
 
     # Removing the copied bump must reduce both energy and frozen-threshold
     # area; entry/candidate coverage is necessarily identical.
@@ -1273,6 +1587,9 @@ def run_selftests() -> dict:
         translated, fixture["raw"] + translation,
         error_threshold=translated_threshold,
     )
+    translated_whole = measure_whole_panel_transfer(
+        translated, fixture["raw"] + translation
+    )
     if context.frozen_mask.interior_node_count != translated.frozen_mask.interior_node_count:
         raise AssertionError("translation changed frozen-mask coverage")
     _assert_close(
@@ -1285,6 +1602,18 @@ def run_selftests() -> dict:
         "translation threshold",
         translated_threshold.value,
         float(threshold.value),
+        1.0e-10,
+    )
+    _assert_close(
+        "whole translation alpha",
+        translated_whole.alpha,
+        float(copied_whole.alpha),
+        1.0e-10,
+    )
+    _assert_close(
+        "whole translation corr",
+        translated_whole.correlation,
+        float(copied_whole.correlation),
         1.0e-10,
     )
 
@@ -1336,18 +1665,27 @@ def run_selftests() -> dict:
     fine_metric = measure_imprint(fine_context, fine_fixture["raw"])
     _assert_close("subdivision alpha", fine_metric.alpha, 1.0, 1.0e-10)
     _assert_close("subdivision corr", fine_metric.correlation, 1.0, 1.0e-10)
+    fine_whole = measure_whole_panel_transfer(fine_context, fine_fixture["raw"])
+    _assert_close("whole subdivision alpha", fine_whole.alpha, 1.0, 1.0e-10)
+    _assert_close("whole subdivision corr", fine_whole.correlation, 1.0, 1.0e-10)
 
     return {
         "status": "PASS",
         "tests": [
             "translation_invariance",
             "body_copy_g_equals_b",
+            "whole_panel_body_copy_g_equals_b",
+            "whole_panel_raw_copy_gate_rejects",
             "constant_field_corr_is_null",
+            "whole_panel_constant_translation_is_not_transfer",
+            "whole_panel_body_independent_cloth_passes",
             "zero_body_signal_is_na",
+            "whole_panel_zero_body_shape_signal_is_na",
             "local_bump_error_island",
             "causal_shared_mask_delta",
             "exact_seam_weld",
             "subdivision_dimensionless_alpha_corr",
+            "whole_panel_subdivision_dimensionless_alpha_corr",
         ],
         "coarse": {
             "vertices": context.graph.vertex_count,
@@ -1357,8 +1695,136 @@ def run_selftests() -> dict:
             "correlation": copied.correlation,
             "positiveEnergy": copied.positive_projection_energy,
             "errorIslands": copied.islands.island_count if copied.islands else None,
+            "wholePanelAlpha": copied_whole.alpha,
+            "wholePanelCorrelation": copied_whole.correlation,
         },
     }
+
+
+def _parse_named_candidate(value: str) -> tuple[str, Path]:
+    """Parse either ``path.obj`` or ``label=path.obj`` deterministically."""
+
+    raw = value.strip()
+    if not raw:
+        raise argparse.ArgumentTypeError("candidate path must not be empty")
+    if "=" in raw:
+        label, raw_path = (part.strip() for part in raw.split("=", 1))
+        if not label or not raw_path:
+            raise argparse.ArgumentTypeError(
+                "candidate must be OBJ_PATH or LABEL=OBJ_PATH"
+            )
+        return label, Path(raw_path)
+    path = Path(raw)
+    label = path.stem
+    if not label:
+        raise argparse.ArgumentTypeError("candidate path has no usable label")
+    return label, path
+
+
+def _validate_cli_float(
+    parser: argparse.ArgumentParser,
+    flag: str,
+    value: float,
+    *,
+    lower: float | None = None,
+    upper: float | None = None,
+) -> None:
+    if not np.isfinite(value):
+        parser.error(f"{flag} must be finite")
+    if lower is not None and value < lower:
+        parser.error(f"{flag} must be >= {lower}")
+    if upper is not None and value > upper:
+        parser.error(f"{flag} must be <= {upper}")
+
+
+def _candidate_mesh_or_error(path: Path, capture: ss.CaptureFront) -> ss.ObjMesh:
+    if not path.is_file():
+        raise SystemExit(f"candidate OBJ does not exist: {path}")
+    mesh = ss.load_obj(path)
+    if len(mesh.verts) != len(capture.base_verts):
+        raise SystemExit(
+            f"candidate OBJ vertex count differs from capture: "
+            f"{len(mesh.verts)} != {len(capture.base_verts)} ({path})"
+        )
+    if not np.array_equal(mesh.tris, capture.tris):
+        raise SystemExit(f"candidate OBJ topology differs from capture: {path}")
+    if not np.isfinite(mesh.verts).all():
+        raise SystemExit(f"candidate OBJ contains non-finite coordinates: {path}")
+    return mesh
+
+
+def _free_transfer_report(
+    capture_path: Path,
+    candidates: Sequence[tuple[str, Path]],
+    *,
+    gap: float,
+    drape: float,
+    min_component_nodes: int,
+    min_metric_nodes: int,
+    max_alpha_positive_ratio: float,
+    max_correlation: float,
+) -> tuple[dict, bool]:
+    """Build one deterministic, candidate-independent transfer-gate report."""
+
+    capture = ss.read_capture_front(capture_path)
+    context = prepare_context_from_capture(
+        capture,
+        gap_threshold=gap,
+        drape_threshold=drape,
+        min_component_nodes=min_component_nodes,
+        min_metric_nodes=min_metric_nodes,
+    )
+    raw_vertices = context.raw_vertices
+    local_threshold = freeze_raw_error_threshold(context)
+    raw_whole = measure_whole_panel_transfer(context, raw_vertices)
+    raw_local = measure_imprint(
+        context, raw_vertices, error_threshold=local_threshold
+    )
+    report: dict[str, object] = {
+        "capture": str(capture_path.resolve()),
+        "capture_sha256": hashlib.sha256(capture_path.read_bytes()).hexdigest(),
+        "frozen_mask": {
+            "vertex_count": context.frozen_mask.vertex_count,
+            "node_count": context.frozen_mask.node_count,
+            "interior_node_count": context.frozen_mask.interior_node_count,
+            "mask_sha256": context.frozen_mask.mask_sha256,
+            "gap_threshold": context.frozen_mask.gap_threshold,
+            "drape_threshold": context.frozen_mask.drape_threshold,
+            "min_component_nodes": context.frozen_mask.min_component_nodes,
+        },
+        "gate_thresholds": {
+            "max_alpha_positive_ratio": max_alpha_positive_ratio,
+            "max_correlation": max_correlation,
+        },
+        "raw": {
+            "whole_panel": raw_whole.as_dict(),
+            "local_laplacian": raw_local.as_dict(),
+        },
+        "candidates": {},
+    }
+    all_passed = True
+    candidate_rows: dict[str, object] = {}
+    for label, candidate_path in candidates:
+        resolved = candidate_path.resolve()
+        mesh = _candidate_mesh_or_error(resolved, capture)
+        whole = measure_whole_panel_transfer(context, mesh.verts)
+        local = measure_imprint(context, mesh.verts, error_threshold=local_threshold)
+        verdict = evaluate_whole_panel_transfer_gate(
+            raw_whole,
+            whole,
+            max_alpha_positive_ratio=max_alpha_positive_ratio,
+            max_correlation=max_correlation,
+        )
+        candidate_rows[label] = {
+            "path": str(resolved),
+            "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+            "whole_panel": whole.as_dict(),
+            "local_laplacian": local.as_dict(),
+            "gate": verdict.as_dict(),
+        }
+        all_passed = all_passed and verdict.valid and verdict.passed
+    report["candidates"] = candidate_rows
+    return report, all_passed
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1366,11 +1832,89 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--selftest", action="store_true", help="run deterministic synthetic tests"
     )
+    parser.add_argument(
+        "--capture", type=Path,
+        help="Drape capture used to freeze free-cloth coverage and body bindings",
+    )
+    parser.add_argument(
+        "--candidate", action="append", type=_parse_named_candidate, default=[],
+        metavar="[LABEL=]OBJ",
+        help="candidate OBJ to gate; repeat for multiple candidates",
+    )
+    parser.add_argument("--gap", type=float, default=DEFAULT_GAP_THRESHOLD)
+    parser.add_argument("--drape", type=float, default=DEFAULT_DRAPE_THRESHOLD)
+    parser.add_argument(
+        "--min-component-nodes", type=int, default=DEFAULT_MIN_COMPONENT_NODES
+    )
+    parser.add_argument(
+        "--min-metric-nodes", type=int, default=DEFAULT_MIN_METRIC_NODES
+    )
+    parser.add_argument(
+        "--max-alpha-positive-ratio", type=float, default=0.75,
+        help=("candidate/free raw whole-panel transfer slope ratio ceiling "
+              "(default: 0.75)"),
+    )
+    parser.add_argument(
+        "--max-correlation", type=float, default=0.90,
+        help="candidate whole-panel body-shape correlation ceiling (default: 0.90)",
+    )
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="write/report metrics but return success even when a gate fails",
+    )
+    parser.add_argument("--json", type=Path, dest="json_path")
     args = parser.parse_args(argv)
-    if not args.selftest:
-        parser.error("no action selected; use --selftest or import this module")
-    print(json.dumps(run_selftests(), indent=2, sort_keys=True))
-    return 0
+
+    _validate_cli_float(parser, "--gap", args.gap, lower=0.0)
+    _validate_cli_float(parser, "--drape", args.drape, lower=0.0, upper=1.0)
+    _validate_cli_float(
+        parser, "--max-alpha-positive-ratio",
+        args.max_alpha_positive_ratio, lower=0.0,
+    )
+    _validate_cli_float(
+        parser, "--max-correlation", args.max_correlation, lower=-1.0, upper=1.0
+    )
+    if args.min_component_nodes < 1:
+        parser.error("--min-component-nodes must be >= 1")
+    if args.min_metric_nodes < 1:
+        parser.error("--min-metric-nodes must be >= 1")
+
+    selftest_report = run_selftests() if args.selftest else None
+    if args.capture is None:
+        if args.candidate:
+            parser.error("--candidate requires --capture")
+        if selftest_report is None:
+            parser.error("use --selftest or provide --capture with --candidate")
+        print(json.dumps(selftest_report, indent=2, sort_keys=True, allow_nan=False))
+        return 0
+    if not args.candidate:
+        parser.error("--capture requires at least one --candidate")
+    capture_path = args.capture.resolve()
+    if not capture_path.is_file():
+        parser.error(f"--capture does not exist: {capture_path}")
+    labels = [label for label, _path in args.candidate]
+    duplicates = sorted({label for label in labels if labels.count(label) > 1})
+    if duplicates:
+        parser.error("duplicate candidate label(s): " + ", ".join(duplicates))
+
+    report, all_passed = _free_transfer_report(
+        capture_path,
+        args.candidate,
+        gap=args.gap,
+        drape=args.drape,
+        min_component_nodes=args.min_component_nodes,
+        min_metric_nodes=args.min_metric_nodes,
+        max_alpha_positive_ratio=args.max_alpha_positive_ratio,
+        max_correlation=args.max_correlation,
+    )
+    if selftest_report is not None:
+        report["selftest"] = selftest_report
+    rendered = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
+    print(rendered)
+    if args.json_path is not None:
+        args.json_path.parent.mkdir(parents=True, exist_ok=True)
+        args.json_path.write_text(rendered + "\n", encoding="utf-8")
+    return 0 if args.report_only or all_passed else 1
 
 
 if __name__ == "__main__":

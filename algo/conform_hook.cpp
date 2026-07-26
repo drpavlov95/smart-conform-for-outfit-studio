@@ -4217,7 +4217,7 @@ static int BuildNearContactSupportBridgeField(
 //
 // A frictionless body contact must not do net upward work against gravity.
 // For lower-body drape vertices only, propose a bounded vertical descent when
-// the solved point is above BOTH the authored and nominal-conform poses. If
+// the solved point is above BOTH the authored and a physical checkpoint. If
 // descending would reduce its current body clearance, slide the point radially
 // outward at the new height until that clearance is restored. The caller
 // applies this field through the topology/crossing transaction, so this rule
@@ -4225,7 +4225,7 @@ static int BuildNearContactSupportBridgeField(
 static int BuildElevatedContactReleaseField(
     const std::vector<Vec3>& verts,
     const std::vector<Vec3>& baseVerts,
-    const std::vector<Vec3>& supportVerts,
+    const std::vector<Vec3>& referenceVerts,
     const std::vector<float>& drapeEl,
     const BodyBVH& body,
     float minDrape,
@@ -4243,7 +4243,7 @@ static int BuildElevatedContactReleaseField(
     const size_t n = verts.size();
     outField.assign(n, Vec3{0.0f, 0.0f, 0.0f});
     if (!body.valid || n == 0 || baseVerts.size() < n ||
-        supportVerts.size() < n || drapeEl.size() < n)
+        referenceVerts.size() < n || drapeEl.size() < n)
         return 0;
 
     minDrape = Clamp01(minDrape);
@@ -4269,7 +4269,7 @@ static int BuildElevatedContactReleaseField(
             continue;
 
         const float supportZ =
-            std::max(baseVerts[i].z, supportVerts[i].z);
+            std::max(baseVerts[i].z, referenceVerts[i].z);
         const float uplift = verts[i].z - supportZ;
         if (uplift <= upliftStart) continue;
 
@@ -8845,6 +8845,24 @@ static void PathBSeamWeld(
                 ++nFree;
             }
         }
+        // A fixed/free mixed group is an ownership error, not permission to
+        // copy the support pose into a free material node.  That old behaviour
+        // was one of the hidden raw-conform paths: a UV seam could teleport a
+        // hanging panel to a fixed member's vanilla target even with no body
+        // contact.  The caller closes ownership across verified coincident
+        // seams before the solve.  If malformed input still reaches here,
+        // preserve the two domains separately; the resulting seam split is
+        // deliberately caught by the seam gate instead of being hidden by a
+        // non-physical raw-position transfer.
+        if (nFixed > 0 && nFree > 0) {
+            const Vec3 fixedTarget = Scale(fixedMean, 1.0f / (float)nFixed);
+            const Vec3 freeTarget = Scale(freeMean, 1.0f / (float)nFree);
+            for (uint32_t vi : group) {
+                if (vi >= x.size()) continue;
+                x[vi] = fixed[vi] ? fixedTarget : freeTarget;
+            }
+            continue;
+        }
         Vec3 target{0.0f, 0.0f, 0.0f};
         if (nFixed > 0) target = Scale(fixedMean, 1.0f / (float)nFixed);
         else if (nFree > 0) target = Scale(freeMean, 1.0f / (float)nFree);
@@ -9267,6 +9285,108 @@ static bool PathBCloseFaceRegressions(
     stats.finalWorsened = (int)worsenedFaces.size();
     for (uint8_t r : everReverted) if (r) ++stats.revertedVerts;
     return worsenedFaces.empty();
+}
+
+// Repair only the material neighbourhood that actually lost orientation or
+// area.  The old anti-clip guard treated a handful of bad faces as evidence
+// that the entire garment should be reset to the vanilla/raw conform.  On a
+// connected skirt that overwrote thousands of unrelated, free vertices and
+// was the direct route by which a distant thigh/body motion reappeared in a
+// panel with no contact.
+//
+// `reference` is deliberately a *checkpoint*, not necessarily raw conform:
+// Path B supplies its accepted physical pose, while the legacy path supplies
+// its only structural checkpoint.  We restore the offending face vertices and
+// their exact seam twins, then rescan.  If a neighbouring face becomes bad it
+// is added on the following round.  Thus the repair grows only as far as the
+// topological defect demands; it never chooses a garment name or resets a
+// whole connected component pre-emptively.
+struct LocalFaceIntegrityRepairStats {
+    int initialFaces = 0;
+    int finalFaces = 0;
+    int restoredVerts = 0;
+    int seamExpandedVerts = 0;
+    int rounds = 0;
+    bool converged = false;
+};
+
+static bool RepairLocalFaceIntegrity(
+    const std::vector<Vec3>& reference,
+    std::vector<Vec3>& candidate,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    const std::vector<std::vector<uint32_t>>& exactSeamGroups,
+    LocalFaceIntegrityRepairStats& stats)
+{
+    stats = LocalFaceIntegrityRepairStats{};
+    if (reference.size() != candidate.size()) return false;
+    const size_t n = reference.size();
+    if (n == 0 || tris.empty()) { stats.converged = true; return true; }
+    const std::vector<uint32_t> seamRep =
+        BuildExactSeamRepresentatives(n, exactSeamGroups);
+
+    auto invalid = [](const Vec3& p) {
+        return !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z);
+    };
+    auto findDefects = [&](std::vector<uint32_t>& out) {
+        out.clear();
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            if (invalid(candidate[t[0]]) || invalid(candidate[t[1]]) ||
+                invalid(candidate[t[2]])) {
+                out.push_back(ti);
+                continue;
+            }
+            const Vec3 rn = Cross(Sub(reference[t[1]], reference[t[0]]),
+                                  Sub(reference[t[2]], reference[t[0]]));
+            const float ra = Len(rn);
+            // A degenerate checkpoint cannot authoritatively judge this face;
+            // leave it to the broader integrity audit instead of spreading an
+            // arbitrary raw pose through the mesh.
+            if (ra <= 1.0e-8f) continue;
+            const Vec3 cn = Cross(Sub(candidate[t[1]], candidate[t[0]]),
+                                  Sub(candidate[t[2]], candidate[t[0]]));
+            const float ca = Len(cn);
+            if (!std::isfinite(ca) || Dot(rn, cn) < 0.0f || ca < ra * 0.10f)
+                out.push_back(ti);
+        }
+    };
+
+    std::vector<uint32_t> defects;
+    for (int round = 0; round < 32; ++round) {
+        findDefects(defects);
+        if (round == 0) stats.initialFaces = (int)defects.size();
+        if (defects.empty()) {
+            stats.finalFaces = 0;
+            stats.converged = true;
+            return true;
+        }
+        stats.rounds = round + 1;
+        std::vector<uint8_t> restore(n, 0);
+        for (uint32_t ti : defects)
+            for (uint16_t vi : tris[ti]) if (vi < n) restore[vi] = 1;
+
+        std::unordered_set<uint32_t> restoreReps;
+        for (size_t i = 0; i < n; ++i)
+            if (restore[i]) restoreReps.insert(seamRep[i]);
+        for (size_t i = 0; i < n; ++i) {
+            if (!restoreReps.count(seamRep[i])) continue;
+            if (!restore[i]) ++stats.seamExpandedVerts;
+            restore[i] = 1;
+        }
+
+        int changed = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!restore[i]) continue;
+            candidate[i] = reference[i];
+            ++changed;
+        }
+        stats.restoredVerts += changed;
+        if (changed == 0) break;
+    }
+    findDefects(defects);
+    stats.finalFaces = (int)defects.size();
+    return false;
 }
 
 static bool PathBIntegrityNoWorse(
@@ -9895,9 +10015,8 @@ static bool PathBSimV2Solve(
     }
     std::vector<float> invMass(n, 0.0f);
     std::vector<uint8_t> fixed(n, 0);
+    std::vector<uint8_t> transition(n, 0);
     std::vector<Vec3> raw(n, Vec3{0.0f, 0.0f, 0.0f});
-    double areaSum = 0.0;
-    size_t freeCount = 0;
     for (size_t i = 0; i < n; ++i) {
         // Prefer the SHARED mask when the caller supplied one, so the solver and
         // every downstream pass agree on what is worn and what hangs. Falls back
@@ -9905,8 +10024,10 @@ static bool PathBSimV2Solve(
         if (useSharedMask) {
             const uint8_t c = sharedMask[i];
             fixed[i] = (c == DRAPE_CLASS_FIXED || c == DRAPE_CLASS_RIGID) ? 1 : 0;
+            transition[i] = c == DRAPE_CLASS_TRANSITION ? 1 : 0;
         } else {
             fixed[i] = authoredGapArr[i] <= kAttachLo ? 1 : 0;
+            transition[i] = !fixed[i] && authoredGapArr[i] < kAttachHi ? 1 : 0;
         }
         // SCOPE THE PHYSICS (probe 2026-07-20): sleeves are fitted TUBES on the
         // arms, not hanging cloth. Treating them as free drape inverts their
@@ -9925,13 +10046,46 @@ static bool PathBSimV2Solve(
             if (ax > armX || az > armZ) fixed[i] = 1;
         }
         raw[i] = DiffAt(rawDiff, (uint16_t)i);
+    }
+    // Exact coincident seam twins represent one physical material node.  Close
+    // support ownership across them before the solve: a free twin of a fixed
+    // support is an attached node, not a free node that may be overwritten by
+    // a late seam weld.  This is topology/material based; no garment names or
+    // target raw positions decide it.
+    int seamSupportPromoted = 0;
+    int mixedSeamGroups = 0;
+    for (const auto& group : exactSeamGroups) {
+        bool hasFixed = false, hasFree = false;
+        for (uint32_t vi : group) {
+            if (vi >= n) continue;
+            hasFixed = hasFixed || fixed[vi] != 0;
+            hasFree = hasFree || fixed[vi] == 0;
+        }
+        if (!hasFixed || !hasFree) continue;
+        ++mixedSeamGroups;
+        for (uint32_t vi : group) {
+            if (vi >= n || fixed[vi]) continue;
+            fixed[vi] = 1;
+            transition[vi] = 0;
+            ++seamSupportPromoted;
+        }
+    }
+    if (mixedSeamGroups > 0) {
+        HLog("path-b-shell: seam ownership closure mixedGroups=%d promoted=%d",
+             mixedSeamGroups, seamSupportPromoted);
+    }
+
+    double areaSum = 0.0;
+    size_t freeCount = 0;
+    for (size_t i = 0; i < n; ++i) {
         if (!fixed[i]) { areaSum += vertArea[i]; ++freeCount; }
     }
     // Isolated material-metric probe.  The default shell still uses authored
     // (base/slim) lengths for free-free edges even though its fixed supports
     // already follow the target slider.  That mismatch can contract a Heavy
     // garment into the body.  The opt-in probe grades only intrinsic edge
-    // lengths to the target slider; raw positions never become an attractor.
+    // lengths to the target slider.  The raw conform is allowed here only as
+    // a SCALAR material metric, never as a free-vertex pose target.
     bool gradedRest = EnvToggle("DRAPE_SHELL_GRADED_REST", false);
 #if !defined(DRAPE_HARNESS_BUILD)
     // Live A/B: free-free rest lengths follow the target metric instead of the
@@ -10011,23 +10165,25 @@ static bool PathBSimV2Solve(
     // MOBILITY != MASS (hard-won): scaling invMass down across the worn band
     // gave transition verts near-infinite mass; uniform gravity still pulls
     // them but constraint corrections scale with invMass -> they sink
-    // unbraked and rip the mesh (measured: flip=738, maxEdge=71). Mass stays
-    // healthy (authored area, clamped); the worn band is instead held by a
-    // SOFT ANCHOR ramp - the physical proxy for the friction/clamp that keeps
-    // worn cloth on the body, which the sim does not model yet.
-    // PURE-PHYSICS TEST (user, 2026-07-16): 0 = no artificial pull toward the
-    // vanilla pose; worn band held only by hard pins + the radial floor.
+    // unbraked and rip the mesh (measured: flip=738, maxEdge=71).  Do NOT
+    // compensate with a soft pull toward the vanilla conform: that makes every
+    // free/transition node a distributed raw-position target and recreates the
+    // very body imprint this solver is meant to remove.  Until transition
+    // support has a validated physical skin binding, only hard FIXED supports,
+    // material constraints, gravity, and unilateral contact own the position.
     const float kSoftAnchor = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_SOFT_ANCHOR", 0.0f));
     std::vector<float> softAnchor(n, 0.0f);
+    int suppressedRawSoftAnchors = 0;
     for (size_t i = 0; i < n; ++i) {
         if (fixed[i]) { invMass[i] = 0.0f; continue; }
         const float mass = std::max(vertArea[i], 1.0e-6f) / std::max(meanArea, 1.0e-6f);
         invMass[i] = ClampRange(1.0f / mass, 0.25f, 4.0f);
-        float u = ClampRange((authoredGapArr[i] - kAttachLo) /
-                             (kAttachHi - kAttachLo), 0.0f, 1.0f);
-        u = u * u * (3.0f - 2.0f * u);
-        softAnchor[i] = kSoftAnchor * (1.0f - u) * (1.0f - u);
+        if (kSoftAnchor > 0.0f && transition[i]) ++suppressedRawSoftAnchors;
+    }
+    if (suppressedRawSoftAnchors > 0) {
+        HLog("path-b-shell: raw soft-anchor suppressed on %d transition verts; "
+             "no physical transition binding is available", suppressedRawSoftAnchors);
     }
     std::vector<float> faceContactFloor(
         tris.size() * std::size(kTriangleSamples), clearance);
@@ -10077,15 +10233,22 @@ static bool PathBSimV2Solve(
         }
     }
 
-    // PRODUCTION-SILHOUETTE CEILING (user's circles, 2026-07-17): his taste
+    // PRODUCTION-SILHOUETTE CEILING (historical experiment, OFF by default):
+    // it samples the vanilla/raw conform and then moves free vertices toward
+    // that sample.  That makes it a positional imitation constraint, not a
+    // material or contact law, so it violates the physical ownership contract
+    // for a hanging panel.  Keep the experiment available for explicit A/B,
+    // but never let a raw envelope be a default force in the shell.
     // measured pointwise = the TIGHTER of {production, plumb-sim} everywhere
     // (front: min(10,14.8)=10; back: min(17.4,16.3)=16.3). The sim may fall
     // tighter than production (the approved plumb) but never WIDER - which
     // kills the front hem-tip flare (14.0 vs prod 10.0) and the profile
     // lumps. Declared prosthesis: references the entry (production) result
     // as an outer bound only; one-sided inward, capped, azimuth-smoothed.
+    const bool productionCeilingRequested =
+        EnvFloat("DRAPE_SHELL_CEIL", 0.0f) > 0.5f;
     PathBDrapeHull prodCeil;
-    {
+    if (productionCeilingRequested) {
         std::vector<Vec3> entry(n);
         for (size_t i = 0; i < n; ++i)
             entry[i] = Add(baseVerts[i], raw[i]);
@@ -10191,8 +10354,7 @@ static bool PathBSimV2Solve(
         std::max(0.0f, EnvFloat("DRAPE_SHELL_CEIL_SLACK", 0.5f));
     const float kFloorSlack =
         std::max(0.0f, EnvFloat("DRAPE_SHELL_CHAN_FLOOR_SLACK", 1.2f));
-    const bool ceilOn =
-        prodCeil.valid && EnvFloat("DRAPE_SHELL_CEIL", 1.0f) > 0.5f;
+    const bool ceilOn = productionCeilingRequested && prodCeil.valid;
     // ── SKIN-BOUND SUPPORT (user request 2026-07-19: "gravidade real com
     // cloth sim e ancoragem de vertices/edges") ────────────────────────────
     // Until now the "anchor" for the worn band was the VANILLA CONFORM pose
@@ -10338,6 +10500,10 @@ static bool PathBSimV2Solve(
          analyticVariant, gradErr,
          analyticVariant >= 0 ? "analytic" : "NUMERIC FALLBACK");
     int totalIters = 0;
+    // Last support field produced by the continuation.  Post-loop safety
+    // passes must use this field, not rebuild `base + raw` and accidentally
+    // turn a free physical recovery into a vanilla-position recovery.
+    std::vector<Vec3> finalSupportTarget(baseVerts);
     for (int step = 1; step <= kMorphSteps; ++step) {
         const size_t traceOffset = (size_t)(step - 1) * n;
         std::vector<uint32_t> faceMovesThisStep;
@@ -10393,10 +10559,16 @@ static bool PathBSimV2Solve(
             PathBBuildDrapeHull(bodyVerts, refBody.verts, baseVerts,
                                 authoredGapArr, fixed, clearance, stepHull);
 
-        std::vector<Vec3> anchorTarget(n);
+        // Only validated supports own a body-following target.  A free vertex
+        // deliberately keeps its authored position here; its motion may come
+        // only from the connected material, gravity, and an actual contact
+        // constraint.  Keeping an array of base positions for free vertices
+        // also makes accidental target reads harmless and auditable.
+        std::vector<Vec3> anchorTarget(baseVerts);
         for (size_t i = 0; i < n; ++i) {
+            if (!fixed[i]) continue;
             anchorTarget[i] = Add(baseVerts[i], Scale(raw[i], t));
-            if (skinBind && fixed[i] && skinBinds[i].tri >= 0) {
+            if (skinBind && skinBinds[i].tri >= 0) {
                 // transport the authored binding through the lerped body
                 const auto& bt = refBody.tris[(size_t)skinBinds[i].tri];
                 const Vec3& A = bodyVerts[bt[0]];
@@ -10418,7 +10590,7 @@ static bool PathBSimV2Solve(
             // (measured as the 0.1-0.25 maxMove plateau). Project the target
             // out to the contact floor - the production pipeline floors these
             // verts at the end anyway, so this matches the published look.
-            if (fixed[i]) {
+            {
                 // AUTHORED-INSIDE PARITY (fix 2026-07-20). Cloth the artist
                 // placed INSIDE the body (knee straps at -4..-6u) must keep its
                 // authored depth, exactly as every other pass here already
@@ -10606,6 +10778,7 @@ static bool PathBSimV2Solve(
                      anchorRounds, worstAnchorFace, residCount, residWorst);
             }
         }
+        finalSupportTarget = anchorTarget;
         // Material metric follows the morph multiplicatively. Geometric
         // interpolation would bias large slider ratios; log interpolation is
         // positive and matches the already validated offline contract.
@@ -10615,13 +10788,15 @@ static bool PathBSimV2Solve(
                 rest *= std::exp(t * std::log(targetEdgeRest[ei] / rest));
             edges[ei].rest = rest;
         }
-        // Edges touching the pinned band: rest = the STEP's anchor-pose
-        // length. With rest = base length and the fixed endpoint at its
-        // conform-displaced position, these edges carried permanent
-        // unresolvable tension - measured as stall culprits at authored
-        // 0.39-0.44 (just past the 0.3 attach line), oscillating forever.
+        // A fully supported edge can take its metric from the support pose.
+        // Do not do this for a fixed/free edge: its free endpoint's raw pose
+        // would become the rest length and inject the body's distant movement
+        // into the free panel.  The material metric above (authored or the
+        // explicit scalar graded metric) is the only rest law across an
+        // attachment boundary; the resulting tension is the real mechanism
+        // by which support motion reaches hanging cloth.
         for (auto& e : edges) {
-            if (fixed[e.a] || fixed[e.b])
+            if (fixed[e.a] && fixed[e.b])
                 e.rest = Len(Sub(anchorTarget[e.a], anchorTarget[e.b]));
         }
         std::vector<float> stretchLambda(edges.size(), 0.0f);
@@ -11050,7 +11225,7 @@ static bool PathBSimV2Solve(
         float worst = 0.0f; int cnt = 0;
         for (size_t i = 0; i < n; ++i) {
             if (!fixed[i]) continue;
-            const float d = Len(Sub(x[i], Add(baseVerts[i], raw[i])));
+            const float d = Len(Sub(x[i], finalSupportTarget[i]));
             if (d > 0.05f) ++cnt;
             worst = std::max(worst, d);
         }
@@ -11071,12 +11246,7 @@ static bool PathBSimV2Solve(
     // (the 22:59 live conform left one twin pair 0.06u apart and the seam gate
     // rejected the WHOLE sim, publishing production - the 'no gravity at all'
     // the user reported). The weld is idempotent and cheap.
-    {
-        std::vector<Vec3> lastAnchor(n);
-        for (size_t i = 0; i < n; ++i)
-            lastAnchor[i] = Add(baseVerts[i], raw[i]);
-        PathBSeamWeld(x, exactSeamGroups, fixed, lastAnchor);
-    }
+    PathBSeamWeld(x, exactSeamGroups, fixed, finalSupportTarget);
     driftAt("after-defensive-weld");
     // CLEFT BRIDGE (user 2026-07-17 "a saia nao pode entrar na bunda"): the
     // solved skirt shrink-wraps the buttocks and dips into the gluteal cleft.
@@ -11090,9 +11260,7 @@ static bool PathBSimV2Solve(
         if (BuildHorizontalBridgeProfile(morphedBody.verts, morphedBody.tris,
                                          kHBridgeZCell, kHBridgeAngleBins,
                                          1.0e30f, hbp) && hbp.valid) {
-            std::vector<Vec3> bridgeAnchor(n);
-            for (size_t i = 0; i < n; ++i)
-                bridgeAnchor[i] = Add(baseVerts[i], raw[i]);
+            const std::vector<Vec3>& bridgeAnchor = finalSupportTarget;
             std::vector<float> drapeEl(n, 0.0f);
             for (size_t i = 0; i < n; ++i)
                 drapeEl[i] = (!fixed[i] && authoredGapArr[i] >= -0.1f) ? 1.0f : 0.0f;
@@ -11183,13 +11351,16 @@ static bool PathBSimV2Solve(
             x, morphedBody.verts, movableMask, vertNeighbors, exactSeamGroups,
             EnvFloat("DRAPE_SHELL_CLEFT_CONCAVE", 0.45f),
             EnvFloat("DRAPE_SHELL_CLEFT_MAXLIFT", 2.5f));
-        std::vector<Vec3> bridgeAnchor(n);
-        for (size_t i = 0; i < n; ++i)
-            bridgeAnchor[i] = Add(baseVerts[i], raw[i]);
+        const std::vector<Vec3>& bridgeAnchor = finalSupportTarget;
         PathBSeamWeld(x, exactSeamGroups, fixed, bridgeAnchor);
         HLog("path-b-shell: true-2d cleft bridge affected=%d", convexAffected);
     }
     driftAt("after-cleft-bridge");
+    // This is the last pose produced by the physical continuation before the
+    // final safety reconciliation.  A local flip/penetration repair may roll
+    // a FREE vertex back only to this physical checkpoint, never to the raw
+    // vanilla conform.  Fixed vertices still use finalSupportTarget below.
+    const std::vector<Vec3> physicalRecoveryPose = x;
     // UNIFIED FINISH (2026-07-21). Replaces the old sequence {hard
     // reconciliation (60 rounds, contact only)} -> {final strain (24 rounds,
     // tension only)} -> {flip repair}. Measured live (15:39 capture): the
@@ -11211,9 +11382,7 @@ static bool PathBSimV2Solve(
             std::max(clearance, EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
         const bool kPinContact = EnvFloat("DRAPE_SHELL_PIN_CONTACT", 1.0f) > 0.5f;
         const float kPinCap = std::max(0.05f, EnvFloat("DRAPE_SHELL_PIN_CAP", 1.0f));
-        std::vector<Vec3> lastAnchor(n);
-        for (size_t i = 0; i < n; ++i)
-            lastAnchor[i] = Add(baseVerts[i], raw[i]);
+        const std::vector<Vec3>& lastAnchor = finalSupportTarget;
         std::vector<uint8_t> touchedPinned(n, 0);
         float worstFinalFace = 0.0f;
         int rounds = 0, contactMovesT = 0, strainMovesT = 0;
@@ -11322,7 +11491,8 @@ static bool PathBSimV2Solve(
                 if (flipped > 0) {
                     for (size_t i = 0; i < n; ++i) {
                         if (!pull[i]) continue;
-                        const Vec3 nom = Add(baseVerts[i], raw[i]);
+                        const Vec3& nom = fixed[i]
+                            ? lastAnchor[i] : physicalRecoveryPose[i];
                         x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
                         if (fixed[i]) touchedPinned[i] = 1;
                     }
@@ -11338,10 +11508,12 @@ static bool PathBSimV2Solve(
         // (armpit crease) around cloth the sim let fall into them. Contact
         // reaches a dynamic equilibrium against strain at 0.8-1.8u INSIDE the
         // flesh there - the skin patches the user circled. Cloth inside flesh
-        // is never a valid sim outcome. Any authored-OUTSIDE vert still
-        // penetrating after the unified loop defers toward its NOMINAL pose
-        // (base+raw, the entry state proves it body-clean), with strain and
-        // weld interleaved so the rescue cannot tear what the loop settled.
+        // is never a valid sim outcome.  The old rescue pulled a free vertex
+        // toward `base + raw`, which made deep-contact recovery a hidden
+        // vanilla-conform attraction and reintroduced the body imprint even
+        // after the cloth had become free.  Resolve it as contact instead:
+        // push only toward the closest feasible body floor, then let strain
+        // and welding answer in the same loop.
         if (fullBody.valid) {
             int evRounds = 0, evTotal = 0;
             for (; evRounds < 20; ++evRounds) {
@@ -11356,8 +11528,38 @@ static bool PathBSimV2Solve(
                         ? vertHardFloor[i] - 0.05f
                         : -0.05f;
                     if (g >= bad) continue;
-                    const Vec3 nom = Add(baseVerts[i], raw[i]);
-                    x[i] = Add(x[i], Scale(Sub(nom, x[i]), 0.30f));
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(fullBody, x[i], cp, nrm, d2)) continue;
+                    const float floor = authoredGapArr[i] < -0.1f
+                        ? vertHardFloor[i]
+                        : kVertHard;
+                    Vec3 target = Add(cp, Scale(nrm, floor));
+                    float targetGap = 0.0f;
+                    if (BVHSignedGap(fullBody, target, targetGap, nullptr) &&
+                        targetGap < 0.0f) {
+                        float bestGap = g;
+                        Vec3 best = x[i];
+                        for (int s = 1; s <= 4; ++s) {
+                            Vec3 candidate = Add(x[i], Scale(Sub(target, x[i]),
+                                                              (float)s / 4.0f));
+                            float candidateGap = 0.0f;
+                            if (!BVHSignedGap(fullBody, candidate, candidateGap, nullptr))
+                                continue;
+                            if (candidateGap > bestGap) {
+                                bestGap = candidateGap;
+                                best = candidate;
+                            }
+                        }
+                        target = best;
+                    }
+                    Vec3 move = Sub(target, x[i]);
+                    const float moveLen = Len(move);
+                    if (moveLen <= 1.0e-7f) continue;
+                    const float maxStep = 0.5f;
+                    if (moveLen > maxStep)
+                        move = Scale(move, maxStep / moveLen);
+                    x[i] = Add(x[i], move);
                     ++evicted;
                 }
                 evTotal += evicted;
@@ -11414,7 +11616,7 @@ static bool PathBSimV2Solve(
         int drifted = 0;
         for (size_t i = 0; i < n; ++i) {
             if (!fixed[i]) continue;
-            const Vec3 tgt = Add(baseVerts[i], raw[i]);
+            const Vec3& tgt = finalSupportTarget[i];
             const float d = Len(Sub(x[i], tgt));
             if (d > 0.05f) ++drifted;
             if (d > worstDrift) { worstDrift = d; worstIdx = i; }
@@ -12170,15 +12372,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                (size_t)islandIdOut[i] < islandRigidOut.size() &&
                                islandRigidOut[(size_t)islandIdOut[i]];
             if (rigid) { drapeMask[i] = DRAPE_CLASS_RIGID; ++cR; continue; }
-            // geometric: how far does the conformed vert sit off the body?
+            // Geometric ownership is measured in the AUTHORED configuration.
+            // The old query used supportVerts (= base + raw vanilla conform),
+            // so merely perturbing the target body's morph could reclassify a
+            // remote panel from FREE to FIXED before the physical solve even
+            // began.  That is a hidden raw-position dependency.  Attachment
+            // is a material/authored property; target-body contact is handled
+            // later by the unilateral collision constraint.
             float gap = 0.0f;
             bool haveGap = false;
-            if (bodyBVH && bodyBVH->valid && supportVerts.size() == n) {
+            if (g_refBodyBVH.valid) {
                 Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
                 float d2 = 0.0f;
-                if (BVHClosestPoint(*bodyBVH, supportVerts[i], cp, nrm, d2)) {
+                if (BVHClosestPoint(g_refBodyBVH, baseVerts[i], cp, nrm, d2)) {
                     gap = std::sqrt(d2);
-                    if (Dot(Sub(supportVerts[i], cp), nrm) < 0.0f) gap = -gap;
+                    if (Dot(Sub(baseVerts[i], cp), nrm) < 0.0f) gap = -gap;
                     haveGap = true;
                 }
             }
@@ -12189,7 +12397,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             else if (bone >= 0.20f)        { drapeMask[i] = DRAPE_CLASS_TRANSITION; ++cT; }
             else                           { drapeMask[i] = DRAPE_CLASS_FIXED; ++cF; }
         }
-        HLog("drape-mask shape='%s' fixed=%d transition=%d free=%d rigid=%d of %zu (freeGap=%.1f)",
+        HLog("drape-mask shape='%s' fixed=%d transition=%d free=%d rigid=%d of %zu "
+             "(authoredGap free=%.1f)",
              shapeName.c_str(), cF, cT, cG, cR, n, freeGap);
     }
     for (size_t i = 0; i < n; ++i)
@@ -12227,6 +12436,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // independent and no layer has to chase an already-deformed neighbour.
     std::vector<uint8_t> crossMeshSeamAnchor(n, 0);
     int crossMeshSeamAnchorCount = 0;
+    // The legacy seam path temporarily pins endpoints to its vanilla target.
+    // Preserve the pre-pin material fields so an accepted Path-B solve can
+    // release them again; otherwise a cross-shape UV split becomes another
+    // hidden way to classify free cloth as body-following.
+    std::vector<float> crossMeshOriginalDrape;
+    std::vector<float> crossMeshOriginalAnchor;
+    std::vector<float> crossMeshOriginalInvMass;
     if ((normPreset == DRAPE_PRESET_FITTED_CLOTH ||
          normPreset == DRAPE_PRESET_LOOSE_DRAPED) &&
         tris && !tris->empty() &&
@@ -12260,6 +12476,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         };
         collectShared(outerColliders);
         collectShared(innerColliders);
+        if (crossMeshSeamAnchorCount > 0) {
+            crossMeshOriginalDrape = drapeEl;
+            crossMeshOriginalAnchor = anchorWeight;
+            crossMeshOriginalInvMass = invMass;
+        }
         for (size_t i = 0; i < n; ++i) {
             if (!crossMeshSeamAnchor[i]) continue;
             finalVerts[i] = supportVerts[i];
@@ -12853,6 +13074,33 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: exact-seam-groups shape='%s' groups=%zu",
                  shapeName.c_str(), exactSeamGroups.size());
     }
+    // Keep the caller's material classification seam-coherent as well as the
+    // solver's.  Otherwise the shell can correctly promote a coincident free
+    // twin to a support while a downstream hand-off still calls it free and
+    // blends two incompatible solver domains at that one material node.
+    int maskSeamPromoted = 0;
+    for (const auto& group : exactSeamGroups) {
+        bool hasFixed = false, hasRigid = false, hasMobile = false;
+        for (uint32_t vi : group) {
+            if (vi >= drapeMask.size()) continue;
+            hasFixed = hasFixed || drapeMask[vi] == DRAPE_CLASS_FIXED;
+            hasRigid = hasRigid || drapeMask[vi] == DRAPE_CLASS_RIGID;
+            hasMobile = hasMobile || drapeMask[vi] == DRAPE_CLASS_FREE ||
+                        drapeMask[vi] == DRAPE_CLASS_TRANSITION;
+        }
+        if ((!hasFixed && !hasRigid) || !hasMobile) continue;
+        const uint8_t supportClass = hasRigid ? DRAPE_CLASS_RIGID
+                                              : DRAPE_CLASS_FIXED;
+        for (uint32_t vi : group) {
+            if (vi >= drapeMask.size() || drapeMask[vi] == supportClass) continue;
+            drapeMask[vi] = supportClass;
+            ++maskSeamPromoted;
+        }
+    }
+    if (maskSeamPromoted > 0) {
+        HLog("drape-mask: seam ownership closure shape='%s' promoted=%d",
+             shapeName.c_str(), maskSeamPromoted);
+    }
     const bool needsNonTopoSeamCaps =
         params.verletCloth ||
         normPreset == DRAPE_PRESET_FITTED_CLOTH ||
@@ -13107,53 +13355,47 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 int crossingReverted = 0, bodyReverted = 0, faceReverted = 0;
                 int initialCrossings = 0, initialBodyRegressions = 0;
                 int initialFaceRegressions = 0;
-                // EXPERIMENTAL SIM MODE: the transactional closures compare the
-                // candidate against the PRODUCTION pose and revert divergence -
-                // correct for a corrective pilot, but a real cloth sim
-                // legitimately reorganizes the drape and always diverges.
-                // DRAPE_SHELL_TRANSACTIONS=0 (or shell_transactions_off.flag)
-                // bypasses the pose-vs-production closures for the opt-in sim;
-                // NaN/seam/final-floor safety still applies.
+                // Production is a useful *gate* but not a valid position
+                // target for a free physical panel.  The old transaction
+                // helpers edited shellCandidate in place toward productionEntry;
+                // that was a default-on raw-conform leak.  Probe each closure
+                // on a disposable copy, reject a candidate that violates the
+                // gate, and leave the actual physical candidate untouched.
+                // Sim mode remains an explicit diagnostic bypass of these
+                // comparative gates; it still never copies raw positions.
                 bool shellTransactions = EnvToggle("DRAPE_SHELL_TRANSACTIONS", true);
 #if !defined(DRAPE_HARNESS_BUILD)
                 if (DrapeFlagExists("shell_transactions_off.flag"))
                     shellTransactions = false;
 #endif
                 if (!shellTransactions) closureStable = true;
-                for (int cycle = 0; shellTransactions && cycle < 8; ++cycle) {
+                if (shellTransactions) {
                     PathBCrossingClosureStats crossCycle;
                     PathBBodyClosureStats bodyCycle;
                     PathBFaceClosureStats faceCycle;
+                    std::vector<Vec3> crossingProbe = shellCandidate;
                     closureOk = PathBCloseNewCrossings(
-                        productionEntry, shellCandidate, *tris,
+                        productionEntry, crossingProbe, *tris,
                         exactSeamGroups, crossCycle);
-                    if (!closureOk) break;
+                    std::vector<Vec3> bodyProbe = shellCandidate;
                     bodyClosureOk = PathBCloseBodySampleRegressions(
-                        productionEntry, shellCandidate, *tris, *bodyBVH,
+                        productionEntry, bodyProbe, *tris, *bodyBVH,
                         exactSeamGroups, bodyCycle);
                     bodyClosureStats = bodyCycle;
-                    bodyReverted += bodyCycle.revertedVerts;
-                    if (!bodyClosureOk) break;
+                    std::vector<Vec3> faceProbe = shellCandidate;
                     faceClosureOk = PathBCloseFaceRegressions(
-                        productionEntry, baseVerts, shellCandidate, *tris,
+                        productionEntry, baseVerts, faceProbe, *tris,
                         exactSeamGroups, faceCycle);
                     faceClosureStats = faceCycle;
-                    faceReverted += faceCycle.revertedVerts;
-                    if (!faceClosureOk) break;
-                    if (cycle == 0) {
-                        initialCrossings = crossCycle.initialNewPairs;
-                        initialBodyRegressions = bodyCycle.initialWorsened;
-                        initialFaceRegressions = faceCycle.initialWorsened;
-                    }
-                    crossingReverted += crossCycle.revertedVerts;
-                    ++closureCycles;
+                    initialCrossings = crossCycle.initialNewPairs;
+                    initialBodyRegressions = bodyCycle.initialWorsened;
+                    initialFaceRegressions = faceCycle.initialWorsened;
+                    closureCycles = 1;
                     closureStats = crossCycle;
-                    if (crossCycle.initialNewPairs == 0 &&
-                        bodyCycle.initialWorsened == 0 &&
-                        faceCycle.initialWorsened == 0) {
-                        closureStable = true;
-                        break;
-                    }
+                    closureStable = closureOk && bodyClosureOk && faceClosureOk &&
+                        initialCrossings == 0 &&
+                        initialBodyRegressions == 0 &&
+                        initialFaceRegressions == 0;
                 }
                 HLog("path-b-shell: local-closure cycles=%d crossReverted=%d bodyReverted=%d faceReverted=%d crossing=%d->%d bodyRegression=%d->%d faceRegression=%d->%d accepted=%d/%d/%d stable=%d",
                      closureCycles, crossingReverted, bodyReverted, faceReverted,
@@ -13169,7 +13411,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 } else if (!faceClosureOk) {
                     failReason = "face-integrity closure gate";
                 } else if (!closureStable) {
-                    failReason = "local closure did not converge";
+                    failReason = (initialCrossings > 0 ||
+                                  initialBodyRegressions > 0 ||
+                                  initialFaceRegressions > 0)
+                        ? "comparative closure gate (reject, no raw rollback)"
+                        : "local closure did not converge";
                 } else if (!([&]{ std::vector<uint8_t> scratchB; return PathBBuildTopology(baseVerts, *tris, gateEdges, gateHinges, scratchB); }()) ||
                            !PathBComputeIntegrity(productionEntry, baseVerts, gateEdges,
                                                   *tris, *bodyBVH, entryIntegrity) ||
@@ -13263,7 +13509,28 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // garments and sliders the shell declines, on a tool that has to work
         // for any slider on any mesh.
         HLog("path-b-shell: scope skip shape='%s' slider='%s' originalPreset=%d",
-             shapeName.c_str(), sliderName.c_str(), originalPreset);
+              shapeName.c_str(), sliderName.c_str(), originalPreset);
+    }
+
+    // The pre-shell legacy cross-mesh seam staging is needed only if the
+    // legacy pipeline publishes.  Once Path B has accepted, restore the
+    // material fields that staging changed and let the shell's exact material
+    // seams/physical checkpoint own mobile cloth.  Do not leave a free panel
+    // artificially pinned merely because its author split it across shapes.
+    if (pathBShellAccepted && crossMeshSeamAnchorCount > 0 &&
+        crossMeshOriginalDrape.size() == n &&
+        crossMeshOriginalAnchor.size() == n &&
+        crossMeshOriginalInvMass.size() == n) {
+        int released = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!crossMeshSeamAnchor[i]) continue;
+            drapeEl[i] = crossMeshOriginalDrape[i];
+            anchorWeight[i] = crossMeshOriginalAnchor[i];
+            invMass[i] = crossMeshOriginalInvMass[i];
+            ++released;
+        }
+        HLog("path-b-shell: released %d staged cross-mesh seam anchors to material ownership",
+             released);
     }
 
     // Measurement-only bisection of the legacy post-solve tail. The Path-B
@@ -13320,16 +13587,53 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // on that pose solves the garment a second time toward vanilla/raw targets.
     // The live Blacksmith capture measured this fallthrough at RMS 2.54u /
     // max 9.41u and all eight rear under-belt penetrations were created here.
-    // Preserve the old core for the anchored material only: sleeves/bodice need
-    // its fitted correction, while the free panel must retain the shell solve.
-    // DRAPE_PATHB_ATTACHED_CORE=0 is the clean-shell diagnostic. Setting the
-    // legacy knob reproduces the former broken full-mesh fallthrough.
+    // The historical core does not yet have per-constraint material ownership:
+    // its anchor pass can target supportVerts on any vertex it reaches.  Keep
+    // it OFF by default for an accepted shell rather than claiming its
+    // whole-mesh solve is "attached only" and relying on a later undo.  It can
+    // remain an explicit A/B until each legacy operator is mask-safe.
     const bool pathBAttachedCore =
-        EnvToggle("DRAPE_PATHB_ATTACHED_CORE", true);
+        EnvToggle("DRAPE_PATHB_ATTACHED_CORE", false);
     const bool pathBFullLegacyCore =
         EnvToggle("DRAPE_PATHB_LEGACY_CORE", false);
     const bool runLegacyCorrectionCore =
         !pathBShellAccepted || pathBAttachedCore || pathBFullLegacyCore;
+
+    // Once Path B has published a shell, the legacy Verlet finishers are not
+    // a harmless polish pass: several of them were authored around
+    // `supportVerts` and therefore reintroduced a body-following positional
+    // constraint after the physical solve.  Keep that legacy tail available
+    // for the legacy solver only.  Accepted Path-B cloth may still receive
+    // unilateral contact/integrity work below, never a non-contact envelope,
+    // support-offset seam snap, or support-pose smoothing pass.
+    const bool legacyVerletTail = params.verletCloth && !pathBShellAccepted;
+
+    // The final safety tail needs a metric to cap a genuine tear, but using a
+    // live support length on an edge with a free/transition endpoint is
+    // another indirect raw-conform force.  For that domain use the authored
+    // material rest, widened only to the accepted physical checkpoint.  A
+    // fully supported edge may retain the body morph metric: both endpoints
+    // are intentional supports, not hanging cloth.
+    auto isPathBMobileVertex = [&](uint32_t v) -> bool {
+        if (!pathBShellAccepted || v >= drapeMask.size()) return false;
+        const uint8_t c = drapeMask[v];
+        return c == DRAPE_CLASS_FREE || c == DRAPE_CLASS_TRANSITION;
+    };
+    auto tailRestForEdge = [&](const EdgeConstraint& e, size_t ei) -> float {
+        const bool touchesMobile =
+            isPathBMobileVertex(e.a) || isPathBMobileVertex(e.b);
+        if (touchesMobile) {
+            float rest = e.restLength;
+            if (pathBShellPublishedReference.size() == n &&
+                e.a < n && e.b < n) {
+                rest = std::max(rest, Len(Sub(
+                    pathBShellPublishedReference[e.a],
+                    pathBShellPublishedReference[e.b])));
+            }
+            return rest;
+        }
+        return (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+    };
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Cloth drape solve (momentum-free relaxation) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Keeps the key idea from johnBuffer/ClothSimulation Ã¢â‚¬â€ distance constraints
@@ -13340,7 +13644,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // relaxation toward a gravity-loaded equilibrium always converges Ã¢â€ â€™ no tears.
     // A hard per-vert max-drop and a hard edge-length cap make it unconditionally
     // stable. Pinned verts (low drape eligibility) hold the garment at the waist.
-    if (params.verletCloth && !pathBShellAccepted) {
+    if (legacyVerletTail) {
         std::vector<float> m(n, 0.0f);   // effective inv-mass; 0 = pinned
         for (size_t i = 0; i < n; ++i) {
             bool pinned = (invMass[i] <= 0.0f) || (drapeEl[i] < 0.20f);
@@ -13774,7 +14078,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (e.a >= n || e.b >= n) continue;
                     Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                     float len = Len(dir);
-                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    float rest = tailRestForEdge(e, ei);
                     float cap = rest * kMaxStretch;
                     if (len <= cap || len <= kLenEps) continue;
                     // Weights: use inverse-mass when available, but if BOTH verts are
@@ -13813,7 +14117,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                 const auto& e = useEdges[ei];
                 if (e.a >= n || e.b >= n) continue;
-                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                float rest = tailRestForEdge(e, ei);
                 if (rest <= 1e-6f) continue;
                 float ratio = Len(Sub(finalVerts[e.a], finalVerts[e.b])) / rest;
                 if (ratio > 1.5f) ++over;
@@ -13859,8 +14163,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // modes. The conformed garment already fits the morphed body, so
                 // stretch holds the cloth at that fitted size instead of fighting
                 // body growth back toward the slim base mesh (which crumples it).
-                float restLen = (ei < supportRestLen.size())
-                    ? supportRestLen[ei] : e.restLength;
+                float restLen = tailRestForEdge(e, ei);
                 Vec3 delta = Scale(dir, ((len - restLen) / len) * stretchStep / wSum);
                 if (w1 > 0.0f)
                     finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, w1));
@@ -13997,42 +14300,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (!params.verletCloth && runLegacyCorrectionCore)
         ApplyEdgeConstraintPass(finalVerts, useEdges, invMass, params, stats);
 
-    // Material-domain handoff. The legacy correction core remains authoritative
-    // on attached cloth (drapeEl~=0: sleeve, cuff, collar, fitted bodice), while
-    // Path-B remains authoritative on freely hanging panels. Blend only across
-    // the classifier's narrow transition band so the two domains stay C0
-    // continuous. This is garment-agnostic and uses the same material signal
-    // that already controls anchors, gravity and mobility throughout the pass.
+    // Material-domain handoff.  Class ownership, not the older heuristic
+    // `drapeEl`, decides which pose publishes.  A vertex classified FREE or
+    // TRANSITION is mobile in Path B, so it must not keep even a partial legacy
+    // raw-conform correction just because a bone-weight heuristic scored it
+    // low.  This is deliberately a hard ownership boundary: continuity belongs
+    // in the material constraints/seam closure, never in a positional blend.
     if (pathBShellAccepted && runLegacyCorrectionCore &&
         !pathBFullLegacyCore &&
         pathBShellPublishedReference.size() == n) {
-        const float blendStart = ClampRange(
-            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_START", 0.15f),
-            0.0f, 1.0f);
-        const float blendEnd = ClampRange(
-            EnvFloat("DRAPE_PATHB_ATTACHED_BLEND_END", 0.30f),
-            blendStart + 1.0e-3f, 1.0f);
         int attachedLegacy = 0;
         int transition = 0;
         int freeShell = 0;
         for (size_t i = 0; i < n; ++i) {
-            const float t = ClampRange(
-                (drapeEl[i] - blendStart) / (blendEnd - blendStart),
-                0.0f, 1.0f);
-            const float shellWeight = t * t * (3.0f - 2.0f * t);
-            if (shellWeight <= 1.0e-6f) {
+            const uint8_t c = i < drapeMask.size()
+                ? drapeMask[i] : DRAPE_CLASS_FIXED;
+            const bool mobile = c == DRAPE_CLASS_FREE ||
+                c == DRAPE_CLASS_TRANSITION;
+            if (!mobile) {
                 ++attachedLegacy;
                 continue;
             }
-            if (shellWeight >= 1.0f - 1.0e-6f) ++freeShell;
+            if (c == DRAPE_CLASS_FREE) ++freeShell;
             else ++transition;
-            finalVerts[i] = Add(
-                Scale(finalVerts[i], 1.0f - shellWeight),
-                Scale(pathBShellPublishedReference[i], shellWeight));
+            finalVerts[i] = pathBShellPublishedReference[i];
         }
         HLog("path-b-shell: material-handoff attached=%d transition=%d "
-             "free=%d band=[%.2f,%.2f]",
-             attachedLegacy, transition, freeShell, blendStart, blendEnd);
+             "free=%d ownership=mask",
+             attachedLegacy, transition, freeShell);
     }
     tracePathBTail("01-layer-order");
 
@@ -14497,7 +14792,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // shell envelope as the shaper Ã¢â‚¬â€ the result follows the actual belly/hip/bust
     // geometry instead of a central-axis approximation. The loose "don't tuck in"
     // rule will be layered back on top of this as an auxiliary constraint.
-    if (params.verletCloth && !pathBShellAccepted && bodyBVH && bodyBVH->valid) {
+    if (legacyVerletTail && bodyBVH && bodyBVH->valid) {
         // Finishing rounds scale with intensity: Low=5, Medium=9, High=14.
         static const int kFinishRounds[] = {5, 9, 14};
         int intensity = g_processingIntensity.load(std::memory_order_relaxed);
@@ -14756,7 +15051,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 lastZ[ab] = dv.z;
             }
         }
-    } else if (params.verletCloth && bodyShell && bodyShell->valid) {
+    } else if (legacyVerletTail && bodyShell && bodyShell->valid) {
         // Fallback: radial-shell two-sided envelope (no BVH available).
         for (int it = 0; it < 6; ++it) {
             if (!useEdges.empty()) {
@@ -14789,7 +15084,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // here so no edge can leave this function over-stretched. Symmetric 50/50 split so
     // it works even between anchored verts (which have invMass 0). Global fix: any
     // garment, any preset that uses the finishing path.
-    if (params.verletCloth && !useEdges.empty()) {
+    if (legacyVerletTail && !useEdges.empty()) {
         const float kPostCap = 1.12f;     // tight cap, close to the solve cap (1.10)
         // Many iterations: a 10Ãƒâ€”+ stretched cluster needs the correction to PROPAGATE
         // across the mesh (Gauss-Seidel), and 4 passes left the cloak at 11Ãƒâ€” (28 torn
@@ -14821,7 +15116,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Final seam weld (verletCloth): the post-PBD passes (surface smoothing,
     // drape envelope, layer order) move coincident verts independently and can
     // re-open seams the solver welded. Close them once more before writing.
-    if (params.verletCloth) {
+    if (legacyVerletTail) {
         std::unordered_map<uint64_t, std::vector<uint32_t>> coin;
         coin.reserve(n);
         auto qk = [](const Vec3& p) -> uint64_t {
@@ -15154,7 +15449,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // vanilla had, so the seam can never open wider than the body actually grew.
     // We move the higher-drape (looser) side toward the other to avoid fighting an
     // anchored side; if both are loose, split the correction.
-    if (params.verletCloth && !islandIdOut.empty() && islandIdOut.size() == n) {
+    if (legacyVerletTail && !islandIdOut.empty() && islandIdOut.size() == n) {
         // near-touching radius: 0.65u catches the back butt-joint (vanSep~0.4) AND
         // the belt-strap mini-island gaps (slightly wider). Front-to-back false
         // pairs are impossible Ã¢â‚¬â€ those are >5u apart (body width). Cell Ã¢â€°Â¥ radius so
@@ -15979,7 +16274,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                     float len = Len(dir);
                     if (len <= 1e-6f) continue;
-                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    float rest = tailRestForEdge(e, ei);
                     if (len <= rest) continue;                 // only resist over-stretch
                     Vec3 corr = Scale(dir, ((len - rest) / len) * 0.5f * 0.5f);
                     finalVerts[e.a] = Sub(finalVerts[e.a], corr);
@@ -16390,7 +16685,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     exactSeamGroupOf[e.a] >= 0 &&
                     exactSeamGroupOf[e.a] == exactSeamGroupOf[e.b])
                     continue;
-                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                float rest = tailRestForEdge(e, ei);
                 if (rest <= 1.0e-6f) continue;
                 Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                 float len = Len(dir);
@@ -16424,8 +16719,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     auto proxCapForPair = [&](const EdgeConstraint& e, size_t ei) -> float {
         float baseRest = (ei < proxRestLen.size()) ? proxRestLen[ei] : e.restLength;
         if (baseRest <= 1.0e-6f) return 0.0f;
+        const bool touchesMobile =
+            isPathBMobileVertex(e.a) || isPathBMobileVertex(e.b);
+        if (touchesMobile && pathBShellPublishedReference.size() == n &&
+            e.a < n && e.b < n) {
+            // The proximity pair may span a mesh split, so it is not present
+            // in useEdges.  Its accepted physical separation is the only
+            // valid widening metric for mobile cloth; never borrow the raw
+            // support separation here.
+            baseRest = std::max(baseRest, Len(Sub(
+                pathBShellPublishedReference[e.a],
+                pathBShellPublishedReference[e.b])));
+        }
         float supportRest = baseRest;
-        if (e.a < supportVerts.size() && e.b < supportVerts.size())
+        if (!touchesMobile && e.a < supportVerts.size() && e.b < supportVerts.size())
             supportRest = std::max(supportRest, Len(Sub(supportVerts[e.a], supportVerts[e.b])));
         if (ei < proxIsBoundarySeam.size() && proxIsBoundarySeam[ei])
             return std::max(baseRest * 1.03f + 0.018f,
@@ -16475,6 +16782,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
 
     auto applyFinalSeamVectorPairs = [&](int rounds, const char* stageLabel) -> int {
+        // `supportOffset` is a relative raw-conform pose.  An exact seam is
+        // already physically welded; a merely nearby split needs a real
+        // cross-shape material constraint before it can be closed in Path B.
+        // Replaying this legacy offset onto a mobile endpoint is precisely the
+        // distant body-transfer bug we are removing.
+        if (pathBShellAccepted) return 0;
         if (seamVectorPairs.empty()) return 0;
         const float kEps = 0.006f;
         const float kMaxMove = 0.085f;
@@ -17367,7 +17680,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         for (size_t ei = 0; ei < useEdges.size(); ++ei) {
             const auto& e = useEdges[ei];
             if (e.a >= n || e.b >= n) continue;
-            float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+            float rest = tailRestForEdge(e, ei);
             if (rest < 1e-4f) continue;
             vEdges[e.a].emplace_back((uint16_t)e.b, rest);
             vEdges[e.b].emplace_back((uint16_t)e.a, rest);
@@ -17490,7 +17803,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         for (size_t ei = 0; ei < useEdges.size(); ++ei) {
             const auto& e = useEdges[ei];
             if (e.a >= n || e.b >= n) continue;
-            float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+            float rest = tailRestForEdge(e, ei);
             if (rest < 1e-4f) continue;
             vEdges[e.a].emplace_back((uint16_t)e.b, rest);
             vEdges[e.b].emplace_back((uint16_t)e.a, rest);
@@ -18328,7 +18641,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                 const auto& e = useEdges[ei];
                 if (e.a >= n || e.b >= n) continue;
-                float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                float rest = tailRestForEdge(e, ei);
                 if (rest <= 1.0e-6f) continue;
                 Vec3 dir = Sub(finalVerts[e.a], finalVerts[e.b]);
                 float len = Len(dir);
@@ -19017,7 +19330,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     const auto& e = useEdges[ei];
                     if (e.a >= n || e.b >= n) continue;
                     if (!eligible[e.a] && !eligible[e.b]) continue;
-                    float rest = (ei < supportRestLen.size()) ? supportRestLen[ei] : e.restLength;
+                    float rest = tailRestForEdge(e, ei);
                     // Pit edges: the vanilla rest length IS the defect there (the fold
                     // squeezed them short), so capping against it yanks the unfold back.
                     // Cap against AUTHORED spacing instead (D1: authored, not vanilla).
@@ -21054,8 +21367,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Final degradation guard for the anti-clip pilot.  The captured Vampire
     // failure is not merely a few body penetrations: the legacy final floor can
     // turn panels through one another, leaving flipped or nearly zero-area
-    // triangles.  Compare against the vanilla-conformed pose, which Outfit
-    // Studio has already computed and can always serve as a safe fallback.
+    // triangles.  Compare against a trusted checkpoint and repair the local
+    // defect only; a structural guard must never re-conform unrelated hanging
+    // cloth merely because another panel failed.
     // A compound threshold is intentional: the corpus contains legitimate
     // large panel rotations (many negative normal dots) and a few thin faces,
     // but only the broken Vampire baseline has both failure signals together.
@@ -21079,12 +21393,24 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             vanillaVerts[i] = Add(baseVerts[i],
                 DiffAt(rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
 
+        // A shell publication already owns a physically solved checkpoint.
+        // Its safety guard must measure and repair against that checkpoint, not
+        // silently switch the whole garment back to vanilla.  Legacy has no
+        // equivalent physical checkpoint yet, so it retains vanilla only as a
+        // *local* structural reference below.
+        const bool hasPhysicalCheckpoint = pathBShellAccepted &&
+            pathBShellPublishedReference.size() == n;
+        const std::vector<Vec3>& integrityReference = hasPhysicalCheckpoint
+            ? pathBShellPublishedReference : vanillaVerts;
+        const char* integrityReferenceName = hasPhysicalCheckpoint
+            ? "path-b-checkpoint" : "legacy-vanilla-checkpoint";
+
         int flippedFaces = 0;
         int collapsedFaces = 0;
         for (const auto& t : *tris) {
             if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
-            const Vec3 vb = Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]);
-            const Vec3 vc = Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]);
+            const Vec3 vb = Sub(integrityReference[t[1]], integrityReference[t[0]]);
+            const Vec3 vc = Sub(integrityReference[t[2]], integrityReference[t[0]]);
             const Vec3 sb = Sub(finalVerts[t[1]], finalVerts[t[0]]);
             const Vec3 sc = Sub(finalVerts[t[2]], finalVerts[t[0]]);
             const double vnx = (double)vb.y * vc.z - (double)vb.z * vc.y;
@@ -21106,14 +21432,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             (int)EnvFloat("DRAPE_ANTICLIP_MAX_COLLAPSED", 2.0f));
         if (flippedFaces > maxFlips && collapsedFaces > maxCollapsed) {
             const std::vector<Vec3> rejectedCandidate = finalVerts;
-            finalVerts = vanillaVerts;
+            LocalFaceIntegrityRepairStats localRepair;
+            const bool repairConverged = RepairLocalFaceIntegrity(
+                integrityReference, finalVerts, *tris, exactSeamGroups, localRepair);
             // Any proxy captured by a rejected pass is rejected with it.  The
-            // next garment must collide against the trusted published surface,
-            // never against geometry the integrity ladder just discarded.
+            // next garment must collide against the locally repaired published
+            // surface, never against geometry the integrity ladder just found
+            // structurally broken.
             downstreamColliderProxy.clear();
-            HLog("detour: anti-clip-integrity BASELINE shape='%s' flips=%d/%d collapsed=%d/%d -> vanilla+guarded-cleanup",
-                 shapeName.c_str(), flippedFaces, maxFlips,
-                 collapsedFaces, maxCollapsed);
+            HLog("detour: anti-clip-integrity LOCAL-REPAIR shape='%s' ref=%s flips=%d/%d collapsed=%d/%d defects=%d->%d verts=%d seamExtra=%d rounds=%d converged=%d",
+                 shapeName.c_str(), integrityReferenceName,
+                 flippedFaces, maxFlips, collapsedFaces, maxCollapsed,
+                 localRepair.initialFaces, localRepair.finalFaces,
+                 localRepair.restoredVerts, localRepair.seamExpandedVerts,
+                 localRepair.rounds, repairConverged ? 1 : 0);
 
             std::vector<uint8_t> cleanupProtected(n, 0);
             for (size_t i = 0; i < n; ++i) {
@@ -21152,14 +21484,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // Both passes spend from one trusted-root topology budget;
                 // otherwise hybrid (+.02) followed by floor (+.02) can compose
                 // into a material local stretch that neither stage sees alone.
-                finalFloorIntegrityReference = vanillaVerts;
+                finalFloorIntegrityReference = integrityReference;
                 applyFinalBodyFloorPass();
                 int floorFlips = 0, floorCollapsed = 0;
                 int floorEdgeViolations = 0, floorBodyFaceViolations = 0;
                 for (const auto& t : *tris) {
                     if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
-                    Vec3 vn = Cross(Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]),
-                                    Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]));
+                    Vec3 vn = Cross(Sub(integrityReference[t[1]], integrityReference[t[0]]),
+                                    Sub(integrityReference[t[2]], integrityReference[t[0]]));
                     Vec3 fn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
                                     Sub(finalVerts[t[2]], finalVerts[t[0]]));
                     float va = Len(vn), fa = Len(fn);
@@ -21171,7 +21503,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     if (e.a >= n || e.b >= n) continue;
                     float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
                     if (rest <= 1.0e-6f) continue;
-                    float beforeRatio = Len(Sub(vanillaVerts[e.a], vanillaVerts[e.b])) / rest;
+                    float beforeRatio = Len(Sub(integrityReference[e.a], integrityReference[e.b])) / rest;
                     float afterRatio = Len(Sub(finalVerts[e.a], finalVerts[e.b])) / rest;
                     float minAllowed = beforeRatio < 0.75f
                         ? beforeRatio * 0.90f : 0.75f;
@@ -21186,7 +21518,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
                         for (const TriangleSample& sample : kTriangleSamples) {
                             Vec3 bp = SampleTrianglePoint(baseVerts, t, sample);
-                            Vec3 vp = SampleTrianglePoint(vanillaVerts, t, sample);
+                            Vec3 vp = SampleTrianglePoint(integrityReference, t, sample);
                             Vec3 fp = SampleTrianglePoint(finalVerts, t, sample);
                             float baseGap = 0.0f, vanillaGap = 0.0f, floorGap = 0.0f;
                             if (!BVHSignedGap(g_refBodyBVH, bp, baseGap, nullptr) ||
@@ -21242,8 +21574,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             int cleanupFlips = 0, cleanupCollapsed = 0;
             for (const auto& t : *tris) {
                 if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
-                Vec3 vn = Cross(Sub(vanillaVerts[t[1]], vanillaVerts[t[0]]),
-                                Sub(vanillaVerts[t[2]], vanillaVerts[t[0]]));
+                Vec3 vn = Cross(Sub(integrityReference[t[1]], integrityReference[t[0]]),
+                                Sub(integrityReference[t[2]], integrityReference[t[0]]));
                 Vec3 cn = Cross(Sub(finalVerts[t[1]], finalVerts[t[0]]),
                                 Sub(finalVerts[t[2]], finalVerts[t[0]]));
                 float va = Len(vn), ca = Len(cn);
@@ -21419,25 +21751,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         }
 
         if (!finalAccepted) {
-            // FALLBACK CHOICE (2026-07-21). Reverting unconditionally to the
-            // RAW shell candidate throws away everything the production
-            // cleaners (layer tuck, body clearance, anti-clip floor) just
-            // fixed. Measured on the user's live scene: the cleaned final had
-            // pen=98 while the raw candidate had pen=294 - and the raw one is
-            // what shipped, which is precisely the skin-through-the-sleeve he
-            // circled. A rejection must fall back to something SAFER than
-            // what it rejected, never to a state with more body penetration.
-            const bool rawIsCleaner =
-                referenceIntegrity.penetrations <= finalIntegrity.penetrations &&
-                referenceIntegrity.worstPenetration <=
-                    finalIntegrity.worstPenetration + 1.0e-4f;
-            if (rawIsCleaner) {
-                finalVerts = pathBShellPublishedReference;
-            } else {
-                finalReason += " (kept post-pass pose: raw candidate pen=" +
-                    std::to_string(referenceIntegrity.penetrations) + " > final pen=" +
-                    std::to_string(finalIntegrity.penetrations) + ")";
-            }
+            // The tail may improve one aggregate (for example, penetration)
+            // while violating a different hard invariant.  Keeping such a
+            // rejected pose leaks arbitrary legacy positional edits back into
+            // free cloth.  The accepted Path-B checkpoint is the sole trusted
+            // fallback domain: it keeps support ownership, material state and
+            // free-panel position coherent.  A later pass may only publish a
+            // locally repaired candidate once it passes this transaction; it
+            // cannot buy a lower penetration count by retaining a failed pose.
+            finalVerts = pathBShellPublishedReference;
+            finalReason += " -> restored physical checkpoint";
         }
         // The downstream proxy must always match the pose this transaction
         // actually publishes, including its deterministic fallback.
@@ -21490,17 +21813,15 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // inverted faces, but production post-passes that run between the solve
     // and this point (stretch caps, prox-seam, anti-clip floor...) re-invert
     // a handful on the pinned sleeves. This is the true output - nothing
-    // runs after it - so repairs held here stay held. Same rule as in-solve:
-    // blend the broken face's verts toward the nominal (base+raw) pose,
-    // which has the authored orientation.
+    // runs after it - so repairs held here stay held.  A shell publication has
+    // a physical checkpoint; repair toward that checkpoint rather than toward
+    // base+raw.  The latter made a late topology repair a second, hidden
+    // vanilla-conform force on free cloth.
     if (pathBShellAccepted && tris &&
+        pathBShellPublishedReference.size() == n &&
         EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
         auto nominalOf = [&](size_t i) {
-            auto it = rawDiff.find(static_cast<uint16_t>(i));
-            Vec3 d{0.0f, 0.0f, 0.0f};
-            if (it != rawDiff.end())
-                d = Vec3{it->second.x, it->second.y, it->second.z};
-            return Add(baseVerts[i], d);
+            return pathBShellPublishedReference[i];
         };
         // Seam groups from the AUTHORED pose: pulling individual verts toward
         // nominal splits exact-seam twins when only some of them belong to a
@@ -21524,13 +21845,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kRepairStrain =
             std::max(1.05f, EnvFloat("DRAPE_SHELL_REPAIR_STRAIN", 2.0f));
 
-        // BODY-AWARE REPAIR (2026-07-21). THE sleeve defect. This pass fixes
-        // inverted faces by pulling their verts toward the NOMINAL pose - but
-        // nominal is production's ENTRY, which itself penetrates the body in
-        // 212 places, and the pull had no body term at all. Measured on the
-        // user's live capture: body penetration 97 with this pass off, 211
-        // with it on. It was repairing flips by burying cloth in flesh, which
-        // is exactly the skin-through-the-sleeve he circled.
+        // BODY-AWARE REPAIR (2026-07-21). This pass fixes inverted faces by
+        // pulling their verts toward the accepted physical checkpoint.  It
+        // still needs a body floor: even a valid checkpoint can lie closer to
+        // the body than a later safe tail edit, and a topology repair must not
+        // spend that clearance to remove a flip.
         // The pass is still essential (without it: 973 inverted faces on
         // vampire), so instead of weakening it, give it a floor: a vert may
         // never end up deeper than the pose being pulled toward, and cloth
@@ -21541,11 +21860,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             EnvFloat("DRAPE_SHELL_REPAIR_BODY", 1.0f) > 0.5f;
         if (repairBodyAware) {
             // The floor is the clearance the pipeline ALREADY achieved on this
-            // vertex, not the nominal pose's. Nominal is production's entry and
-            // penetrates in 212 places; the downstream cleaners had just cut
-            // that to 97, and anchoring the floor at nominal would license the
-            // repair to undo exactly that work (measured: it did - 97 -> 211).
-            // Invariant: repair flips, never regress body clearance.
+            // vertex, not the checkpoint's.  Invariant: repair flips, never
+            // regress body clearance.
             repairFloor.assign(n, 0.0f);
             for (size_t i = 0; i < n; ++i) {
                 float gBefore = 0.0f;
@@ -21695,7 +22011,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float releaseLayerEps = std::max(
             0.0f, EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_LAYER_EPS", 0.0001f));
         const int releaseSeeds = BuildElevatedContactReleaseField(
-            finalVerts, baseVerts, supportVerts, drapeEl, *bodyBVH,
+            finalVerts, baseVerts, pathBShellPublishedReference, drapeEl, *bodyBVH,
             EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_DRAPE", 0.50f),
             EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_UPLIFT", 0.25f),
             EnvFloat("DRAPE_PATHB_CONTACT_RELEASE_GAP_MIN", -0.05f),
@@ -21803,7 +22119,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // can move the early seam anchors again. Restore the two sides to their own
     // coincident vanilla targets only if doing so introduces no new face
     // regression, self-crossing, body penetration or global integrity loss.
-    if (crossMeshSeamAnchorCount > 0 && tris && !tris->empty() &&
+    if (!pathBShellAccepted && crossMeshSeamAnchorCount > 0 && tris && !tris->empty() &&
         EnvToggle("DRAPE_CROSS_MESH_SEAM_FINAL", true)) {
         const std::vector<Vec3> seamEntry = finalVerts;
         std::vector<Vec3> seamCandidate = finalVerts;
@@ -23605,6 +23921,40 @@ static int RunSelfTest() {
     if (ReferenceBodyNameScore("3BBB") <= ReferenceBodyNameScore("00BDOR0008Armor1")) {
         std::cerr << "self-test: reference-body recognition FAIL\n";
         return 22;
+    }
+
+    // A local integrity fallback must not turn a handful of malformed faces
+    // into a whole-garment vanilla reset.  Exercise a flipped face, an exact
+    // seam twin, and a distant panel in one tiny deterministic fixture.
+    {
+        const std::vector<Vec3> reference = {
+            {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+            {8.0f, 0.0f, 0.0f}, {9.0f, 0.0f, 0.0f}, {8.0f, 1.0f, 0.0f},
+            {0.0f, 0.0f, 0.0f},
+        };
+        std::vector<Vec3> candidate = reference;
+        candidate[2] = Vec3{0.0f, -1.0f, 0.0f}; // flip face 0,1,2
+        candidate[6] = Vec3{3.0f, 3.0f, 3.0f};  // twin of vertex 0
+        const Vec3 remoteBefore = candidate[3];
+        const std::vector<std::array<uint16_t, 3>> localTris = {
+            {0, 1, 2}, {3, 4, 5},
+        };
+        const std::vector<std::vector<uint32_t>> localSeams = {{0, 6}};
+        LocalFaceIntegrityRepairStats localStats;
+        if (!RepairLocalFaceIntegrity(reference, candidate, localTris,
+                                      localSeams, localStats) ||
+            !localStats.converged || localStats.initialFaces != 1 ||
+            localStats.restoredVerts < 4 ||
+            Len(Sub(candidate[0], reference[0])) > 1.0e-6f ||
+            Len(Sub(candidate[1], reference[1])) > 1.0e-6f ||
+            Len(Sub(candidate[2], reference[2])) > 1.0e-6f ||
+            Len(Sub(candidate[6], reference[6])) > 1.0e-6f ||
+            Len(Sub(candidate[3], remoteBefore)) > 1.0e-6f ||
+            Len(Sub(candidate[4], reference[4])) > 1.0e-6f ||
+            Len(Sub(candidate[5], reference[5])) > 1.0e-6f) {
+            std::cerr << "self-test: local integrity repair locality FAIL\n";
+            return 32;
+        }
     }
 
     fs::path path = fs::current_path() / "drape_harness_selftest.drcap";
