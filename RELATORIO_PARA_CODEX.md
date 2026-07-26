@@ -223,3 +223,106 @@ costura**. Prioridade por dano medido: layer/inter-garment contact primeiro.
    sintoma — desconfie deles.
 5. **Um probe meu não imprimia o nome da peça**, e quase culpei o passe errado
    com contagens que vinham de outra shape. Sempre imprima `shapeName`.
+
+---
+
+# Continuação — Claude, 26/07 (retomando de onde o Codex parou)
+
+O trabalho do Codex estava **não commitado** (usage cut-off). Preservei, validei e
+commitei: `40145e2`. Depois achei e consertei uma regressão dele: `9a2e08c`.
+
+## O que validei no trabalho dele
+
+Compila, `--self-test` passa, corpus 18/18 verde — **no harness RELEASE**. Nota:
+ele rodou o corpus com `RelWithDebInfo`, que produz regressão-fantasma porque os
+goldens são Release.
+
+O gate de transferência dele confirma que a correção arquitetural funciona:
+
+```
+transferência de morph (painel inteiro):  raw 0.990 -> shell 0.493
+cópia de forma local:                     raw 0.956 -> shell 0.286
+gate: PASSOU
+```
+
+**A transferência do morph corporal pro tecido livre caiu pela metade.**
+
+## A regressão que ele deixou, e o conserto
+
+Ele apontou o last-chance flip repair para o checkpoint do shell, para impedir
+que ele agisse como força vanilla escondida. **O princípio está certo, mas isso
+removeu a única referência de orientação VÁLIDA do reparo**: o checkpoint é
+exatamente a pose cujas faces inverteram, então puxar uma face invertida na
+direção dele não faz nada.
+
+```
+custo medido:  vampire 34 -> 661 faces invertidas
+               BlackSmithTorso 3 -> 60
+               Cuirass_Torso 8 -> 59
+```
+
+Restaurei para `authored + raw`, que é bem-orientada por construção. **Não é
+reintrodução global do raw**: o passe só toca vértices de faces **já quebradas**
+— a física falhou nelas por definição — que é exatamente a regra de reparo local
+que o próprio refactor estabeleceu.
+
+Resultado (faces invertidas, produção → shell):
+
+```
+Cloth            21 ->  4    ← shell agora MELHOR que produção
+Cuirass_Torso    10 ->  5    ← melhor
+Cloak            10 ->  3    ← melhor
+BlackSmithTorso   1 ->  6
+Clothes           7 -> 10
+vampire          34 -> 56    ← ainda pior, é o defeito remanescente
+```
+
+## Estado da arquitetura agora
+
+| propriedade | antes da sessão | agora |
+|---|---|---|
+| autoridade do shell (queda que sobrevive ao rabo) | 0–45% | **83–88%** |
+| transferência de morph em tecido livre | 0.99 | **0.49** |
+| faces invertidas vs produção | pior em todas | **melhor em 3 de 6** |
+| classificação | duas definições conflitantes | **uma máscara** |
+
+**O item 4 do plano ("shell autoritativo") está essencialmente entregue** — não
+por um restore tardio (que eu provei que rasga a fronteira), mas por remover a
+autoridade posicional do raw, que era a causa de verdade.
+
+## O achado que reenquadra o objetivo
+
+Contra os hand-sculpts do usuário, o shell continua **pior em 5 de 6 peças**:
+
+```
+Cloth 0.36 -> 3.06 · Cuirass_Torso 0.05 -> 1.18 · BlackSmithTorso 1.77 -> 2.40
+vampire 1.23 -> 1.56 · Clothes 0.67 -> 1.60 · Cloak 2.96 -> 2.42 (MELHOR)
+```
+
+E isso **não é um bug** — é a consequência de a física finalmente funcionar. O
+`Cloth` piorou porque o shell agora o derruba +4.68 (a gravidade age de verdade)
+e isso o afasta da forma esculpida à mão.
+
+**O sculpt do usuário não é um caimento de gravidade; é a forma artística dele.**
+Medido antes por outro caminho: subir a gravidade até o pano cair de verdade
+move o resultado para longe do sculpt (2.94 → 3.19).
+
+A única peça que melhorou é **exatamente aquela onde ele pediu gravidade** ("cadê
+a gravidade?" — as abas do Cloak).
+
+**Implicação para o próximo passo:** o alvo não pode ser "minimizar distância ao
+sculpt" globalmente. Ou o solver é physically-driven onde o usuário quer queda
+(painéis livres pendurados) e conform-driven onde ele quer a forma dele (corpetes,
+peças justas) — e essa é justamente a máscara `FREE` vs `FIXED` que agora existe —
+ou o sculpt precisa virar um alvo explícito em vez de a física ser cobrada de
+adivinhá-lo.
+
+## Prioridades que eu sugiro daqui
+
+1. **vampire 56 flips** — único caso onde o shell perde feio em integridade.
+2. **Usar a máscara para modular o objetivo**, não só a simulação: `FREE` julga
+   por física/prumo, `FIXED` julga por distância ao conform/sculpt. Hoje eu meço
+   as duas com a mesma régua e por isso "melhorar" e "piorar" se misturam.
+3. Os itens do seu diagnóstico que continuam abertos e válidos: self-collision e
+   contato entre camadas, bending GS + membrana por triângulo, transporte da
+   métrica do slider.
