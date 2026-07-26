@@ -21820,8 +21820,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (pathBShellAccepted && tris &&
         pathBShellPublishedReference.size() == n &&
         EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
+        // ORIENTATION SOURCE (2026-07-26). This was briefly pointed at the shell
+        // checkpoint to stop the repair acting as a hidden vanilla-conform force
+        // on free cloth - right principle, but it removed the repair's only
+        // VALID orientation reference: the checkpoint is exactly the pose whose
+        // faces inverted, so pulling a flipped face toward it does nothing.
+        // Measured cost: vampire flips 34 -> 661, blacksmith 3 -> 60.
+        // The authored+raw pose is well oriented by construction, and this pass
+        // only ever touches vertices of faces that are ALREADY broken - physics
+        // has failed on them by definition. That is Codex's own local-repair
+        // rule ("repair only the neighbourhood that actually lost orientation"),
+        // not a global reintroduction of raw: intact free cloth never sees it.
         auto nominalOf = [&](size_t i) {
-            return pathBShellPublishedReference[i];
+            return Add(baseVerts[i],
+                       DiffAt(rawDiff, (uint16_t)std::min<size_t>(i, 0xFFFF)));
         };
         // Seam groups from the AUTHORED pose: pulling individual verts toward
         // nominal splits exact-seam twins when only some of them belong to a
