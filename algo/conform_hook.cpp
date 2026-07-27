@@ -10562,8 +10562,39 @@ static bool PathBSimV2Solve(
         // a plumb correction is a short push to the local silhouette wall
         // (<=4 cells); the pathological between-legs push needs to cross the
         // whole leg region (>4 cells) and is skipped.
-        const int kShadowRing =
-            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 0.0f));
+        // ANTI-TUCK RESTORED IN THE SHELL (2026-07-26). This defaulted to 0,
+        // which meant the gravity shadow was never even BUILT here
+        // (shadowMoves=0 across every logged step) while the legacy production
+        // tail runs it. That asymmetry is the "o vestido gruda demais no corpo"
+        // the user reported: the shadow is this project's own "cloth may not
+        // tuck into a gap it is hanging over" rule, and the shell was the only
+        // path without it.
+        //
+        // How it was found: a radial profile of the Blacksmith dress showed the
+        // cloth radius collapsing from 30.6 to 23.1 in one band below the hip
+        // and then tracking the body within ~1u all the way down - a body
+        // offset, not a drape. Narrowing it down, 8 vertices in 4 exact-seam
+        // PAIRS had fallen to radius 6.8 (the centre line, i.e. into the gap
+        // between the legs) where the authored garment has them at 12.9 and
+        // production pushes them out to 17.9. Production had the anti-tuck; we
+        // did not.
+        //
+        // Ring 1 is the MINIMUM meaningful neighbourhood, chosen so this is
+        // "turn the missing rule on", not a fitted constant. Ring 2 scored
+        // better on the Blacksmith alone and is rejected: it costs the vampire
+        // robe its publication (285 penetrations). Measured at ring 1 across
+        // the user's own six scenes: BlackSmithTorso penetrations 18 -> 11,
+        // vampire 33 -> 11, yarl Pants 83 -> 36, Fine Clothes Pants 46 -> 37,
+        // ThalmorRobesF 56 -> 54, against one regression (yarl Clothes 9 -> 31);
+        // worst edge stretch falls almost everywhere (Blacksmith 5.89 -> 4.50);
+        // fallbacks unchanged. Body-silhouette correlation, which is the metric
+        // that actually tracks his complaint, drops 0.718 -> 0.702.
+        int shadowRing =
+            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 1.0f));
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (DrapeFlagExists("shell_shadow_off.flag")) shadowRing = 0;
+#endif
+        const int kShadowRing = shadowRing;
         // catenary return (production-tested knob): below a protrusion the
         // cloth falls BACK toward the body by this rate per unit depth -
         // the physical fix for the belly-shelf the pure plumb made of the
@@ -13462,9 +13493,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (drapeMask[i] == DRAPE_CLASS_FREE || drapeMask[i] == DRAPE_CLASS_TRANSITION)
             ++shellFreeVerts;
     const float shellFreeFrac = n > 0 ? (float)shellFreeVerts / (float)n : 0.0f;
+    // DEFAULT OFF (2026-07-26, same day it landed). The admission is right in
+    // principle - AUTO is "undecided", not "not cloth" - and the metrics agreed:
+    // Fur 1 BaseArmor went from 25 body penetrations to 1. The user looked at it
+    // and said the opposite: "o tecido gruda demais no corpo, nao tem caimento
+    // nenhum". He is right and the metric is complicit - a garment shrink-wrapped
+    // onto the body has almost no penetration BY CONSTRUCTION. Low penetration
+    // rewards hugging, so it cannot be used alone to judge free cloth.
+    // Admitting more shapes to the cloth path therefore SPREADS the open
+    // free-cloth-hugs-the-body defect instead of fixing anything. Re-enable
+    // (>0) once free cloth actually hangs.
     const float kAutoFreeFrac = ClampRange(
-        EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.10f), 0.0f, 1.0f);
-    const bool autoHasCloth =
+        EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.0f), 0.0f, 1.0f);
+    const bool autoHasCloth = kAutoFreeFrac > 0.0f &&
         originalPreset == DRAPE_PRESET_AUTO && shellFreeFrac >= kAutoFreeFrac;
     const bool pathBShellScoped =
         (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
