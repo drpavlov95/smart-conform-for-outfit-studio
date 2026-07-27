@@ -37,6 +37,7 @@ STAGES = [
     ("04_stretch_cap", "stretch-cap"),
     ("05_body_clearance", "body-clearance"),
     ("06_selfcol_tuck", "selfcol-tuck"),
+    ("06b_prox_seam_cap", "prox-seam-cap"),
     ("07_post_prox_cap", "post-prox-cap"),
     ("08_body_evict", "body-evict"),
     ("09_final", "final"),
@@ -113,6 +114,11 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--topology", type=Path, default=None,
                     help="OBJ com as FACES da peça (--result-obj) para agrupar ofensores")
+    ap.add_argument("--authored", type=Path, default=None,
+                    help="OBJ da peça AUTORADA (--base-obj); com --refbody define o "
+                         "afastamento que o artista pediu")
+    ap.add_argument("--refbody", type=Path, default=None,
+                    help="OBJ do corpo de REFERÊNCIA (--refbody-obj)")
     args = ap.parse_args()
 
     safe = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in args.shape)
@@ -166,7 +172,26 @@ def main() -> int:
     # started, from a start pose already too clear for contact to have reached
     # it. Contact can only push what it touches; a gap that grows from open air
     # had no physical cause.
+    # THE AUTHORED STANDOFF IS NOT AN OFFENCE. Without this the audit flags the
+    # radial rule doing its job: on Fine Clothes it reported a 20-vertex
+    # connected cluster "flying outward", and those vertices are authored 10.8,
+    # 11.9, 10.6u off the body and land at 10.82, 11.84, 10.55 - the conform had
+    # collapsed a flared coat skirt onto the legs and the floor put it back,
+    # to the centimetre. An outward move is only unexplained if it goes BEYOND
+    # what the artist asked for.
+    excess = None
+    if args.authored is not None and args.refbody is not None:
+        av = read_obj_verts(args.authored)
+        rb, rtris = read_obj(args.refbody)
+        if len(av) == n:
+            authored_gap, _ = nearest_body(av, rb, vertex_normals(rb, rtris))
+            excess = gapN - authored_gap
+            print(f"afastamento autorado: médio {authored_gap.mean():.2f}  "
+                  f"máx {authored_gap.max():.2f}")
+
     unsupported = (gapRise > args.outward) & (gap0 > args.contact_range)
+    if excess is not None:
+        unsupported &= excess > args.outward
     print(f"\nunsupportedOutward: {int(unsupported.sum())} de {n} vértices "
           f"(gap subiu > {args.outward}u, partindo de gap > {args.contact_range}u)")
     print(f"deslocamento total: médio {total_mag.mean():.3f}  máx {total_mag.max():.3f}")

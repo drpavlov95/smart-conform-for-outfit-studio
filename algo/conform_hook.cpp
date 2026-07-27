@@ -13546,18 +13546,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (drapeMask[i] == DRAPE_CLASS_FREE || drapeMask[i] == DRAPE_CLASS_TRANSITION)
             ++shellFreeVerts;
     const float shellFreeFrac = n > 0 ? (float)shellFreeVerts / (float)n : 0.0f;
-    // DEFAULT OFF (2026-07-26, same day it landed). The admission is right in
-    // principle - AUTO is "undecided", not "not cloth" - and the metrics agreed:
-    // Fur 1 BaseArmor went from 25 body penetrations to 1. The user looked at it
+    // Turned OFF on 2026-07-26 and BACK ON on 07-27, and the round trip is the
+    // point. It first landed with the metrics agreeing loudly - Fur 1 BaseArmor
+    // went from 25 body penetrations to 1 - and the user looked at the result
     // and said the opposite: "o tecido gruda demais no corpo, nao tem caimento
-    // nenhum". He is right and the metric is complicit - a garment shrink-wrapped
-    // onto the body has almost no penetration BY CONSTRUCTION. Low penetration
-    // rewards hugging, so it cannot be used alone to judge free cloth.
-    // Admitting more shapes to the cloth path therefore SPREADS the open
-    // free-cloth-hugs-the-body defect instead of fixing anything. Re-enable
-    // (>0) once free cloth actually hangs.
+    // nenhum". He was right and the metric was complicit: a garment
+    // shrink-wrapped onto the body has almost no penetration BY CONSTRUCTION,
+    // so penetration count REWARDS hugging and cannot judge free cloth alone.
+    // Admitting more shapes to the cloth path merely spread the hugging defect,
+    // so this went to 0 until the cloth actually hung.
+    //
+    // The radial floor is that fix, and on the very garment he rejected it is
+    // decisive. Measuring only cloth the mask calls FREE (authored more than
+    // 2.5u off the REFERENCE body - 352 of 1984 verts, authored mean gap 4.25),
+    // against how far each ends up from the MORPHED body:
+    //     production  mean 3.81, 248 vertices closer than authored
+    //     shell       mean 4.16,  51
+    // The shell now holds the authored standoff instead of collapsing onto the
+    // body, which is what "caimento" means. Re-admitted.
     const float kAutoFreeFrac = ClampRange(
-        EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.0f), 0.0f, 1.0f);
+        EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.10f), 0.0f, 1.0f);
     const bool autoHasCloth = kAutoFreeFrac > 0.0f &&
         originalPreset == DRAPE_PRESET_AUTO && shellFreeFrac >= kAutoFreeFrac;
     const bool pathBShellScoped =
@@ -18279,6 +18287,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
     logProxSeamState("before-final-prox-cap");
     applyFinalProxSeamCap(24, "final-prox-seam-cap");
+    DrapeDumpStage(finalVerts, "06b_prox_seam_cap", shapeName);
     applyFinalSupportCap(12, "post-prox-stretch-cap");
     DrapeDumpStage(finalVerts, "07_post_prox_cap", shapeName);
     applyFinalSeamVectorPairs(8, "post-prox-boundary-seam-vector");
