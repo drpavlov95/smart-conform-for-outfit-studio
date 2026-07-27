@@ -9808,6 +9808,228 @@ enum DrapeClass : uint8_t {
     DRAPE_CLASS_RIGID,       // plate/accessory: never simulated
 };
 
+// ── Cloth-vs-cloth proximity ────────────────────────────────────────────────
+// The collision the solver never had. Everything else here collides cloth with
+// the BODY; nothing stopped one part of a garment from passing through another.
+// The user's report is the clean case: on the vampire robe the trouser leg
+// clips through the overskirt, and BOTH ARE THE SAME MESH (vampire_robes_alt),
+// so no amount of inter-layer or per-shape work can see it. Measured before
+// writing this: zero self-collision of any kind inside the solve. The tail has
+// a "self-collision tuck", but reading it, it is a coverage-cone heuristic that
+// only ever pulls cloth INWARD - it cannot separate two surfaces.
+//
+// Proximity, not CCD: the solve is quasi-static, so there is no trajectory to
+// sweep - only the final configuration has to be free of interpenetration.
+//
+// Two choices that keep this universal rather than tuned:
+//   - thickness comes from the MESH's own mean edge length, so a dense mesh and
+//     a coarse one get proportionate fabric thickness instead of a constant
+//     that is huge on one and invisible on the other;
+//   - the exclusion set is topological (2-ring), so a fold touching itself is
+//     resolved while a triangle never fights its own neighbours.
+// The push is unilateral and mass-weighted, and a pair already separated is
+// never pulled together.
+struct PathBSelfCollideStats {
+    int candidates = 0;
+    int resolved = 0;
+    float worst = 0.0f;
+};
+
+static void PathBBuildNearRings(size_t n,
+                                const std::vector<std::array<uint16_t, 3>>& tris,
+                                std::vector<std::vector<uint32_t>>& out)
+{
+    std::vector<std::vector<uint32_t>> ring1(n);
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        for (int k = 0; k < 3; ++k)
+            for (int j = 0; j < 3; ++j)
+                if (k != j) ring1[t[k]].push_back(t[j]);
+    }
+    out.assign(n, {});
+    for (size_t i = 0; i < n; ++i) {
+        std::vector<uint32_t> acc = ring1[i];
+        acc.push_back((uint32_t)i);
+        for (uint32_t j : ring1[i])
+            acc.insert(acc.end(), ring1[j].begin(), ring1[j].end());
+        std::sort(acc.begin(), acc.end());
+        acc.erase(std::unique(acc.begin(), acc.end()), acc.end());
+        out[i] = std::move(acc);
+    }
+}
+
+// SIDE-PRESERVING, NOT PUSH-APART (2026-07-27, after measuring the naive form).
+// A pure proximity constraint CANNOT untangle a mesh that is already tangled:
+// once a vertex is on the wrong side of a surface, "move away from the nearest
+// point" moves it further the wrong way. And these garments ARRIVE tangled -
+// the vampire robe is AUTHORED with 3517 crossing triangle pairs, because the
+// trousers are modelled inside the overskirt on purpose. Measured: push-apart
+// at every strength tried barely moves the total (3788 without, 3721 weak, 3759
+// strong, 3785 with double thickness) - it is not a tuning problem.
+//
+// What the authored mesh does carry is the ANSWER: which side of the skirt the
+// trouser vertex is supposed to be on. So the constraint is not "stay apart",
+// it is "stay on the side the artist put you". A pair that starts inside stays
+// inside (nested shells are left alone, which is what the artist wanted); a
+// pair that has FLIPPED since authoring is pushed back through, which is
+// exactly the clip the user sees. Thickness is then applied only in the
+// direction that agrees with the authored side, so it can never drive a vertex
+// through a surface to gain clearance.
+static void PathBSelfCollide(std::vector<Vec3>& x,
+                             const std::vector<Vec3>& baseVerts,
+                             const std::vector<std::array<uint16_t, 3>>& tris,
+                             const std::vector<float>& invMass,
+                             const std::vector<std::vector<uint32_t>>& nearRing,
+                             float thickness,
+                             float relaxation,
+                             PathBSelfCollideStats& stats)
+{
+    const size_t n = x.size();
+    if (n == 0 || tris.empty() || thickness <= 0.0f) return;
+
+    // Uniform grid over triangle bounding boxes. Cell = thickness, so a vertex
+    // only ever probes the 27 cells around it.
+    const float cell = std::max(thickness, 1.0e-3f);
+    const float inv = 1.0f / cell;
+    auto hashOf = [](int a, int b, int c) -> uint64_t {
+        return ((uint64_t)(uint32_t)a * 73856093ull) ^
+               ((uint64_t)(uint32_t)b * 19349663ull) ^
+               ((uint64_t)(uint32_t)c * 83492791ull);
+    };
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    grid.reserve(tris.size() * 2);
+    for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+        const auto& t = tris[ti];
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        Vec3 lo = x[t[0]], hi = x[t[0]];
+        for (int k = 1; k < 3; ++k) {
+            lo.x = std::min(lo.x, x[t[k]].x); hi.x = std::max(hi.x, x[t[k]].x);
+            lo.y = std::min(lo.y, x[t[k]].y); hi.y = std::max(hi.y, x[t[k]].y);
+            lo.z = std::min(lo.z, x[t[k]].z); hi.z = std::max(hi.z, x[t[k]].z);
+        }
+        const int x0 = (int)std::floor((lo.x - thickness) * inv);
+        const int x1 = (int)std::floor((hi.x + thickness) * inv);
+        const int y0 = (int)std::floor((lo.y - thickness) * inv);
+        const int y1 = (int)std::floor((hi.y + thickness) * inv);
+        const int z0 = (int)std::floor((lo.z - thickness) * inv);
+        const int z1 = (int)std::floor((hi.z + thickness) * inv);
+        // A triangle spanning a huge box would be pathological; skip it rather
+        // than fill the grid with it.
+        if ((int64_t)(x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) continue;
+        for (int ix = x0; ix <= x1; ++ix)
+            for (int iy = y0; iy <= y1; ++iy)
+                for (int iz = z0; iz <= z1; ++iz)
+                    grid[hashOf(ix, iy, iz)].push_back(ti);
+    }
+
+    for (size_t vi = 0; vi < n; ++vi) {
+        const float wv = (vi < invMass.size()) ? invMass[vi] : 0.0f;
+        if (wv <= 0.0f) continue;                    // pinned: nothing to move
+        const int cx = (int)std::floor(x[vi].x * inv);
+        const int cy = (int)std::floor(x[vi].y * inv);
+        const int cz = (int)std::floor(x[vi].z * inv);
+        const std::vector<uint32_t>* excl =
+            (vi < nearRing.size()) ? &nearRing[vi] : nullptr;
+        for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz) {
+            auto it = grid.find(hashOf(cx + dx, cy + dy, cz + dz));
+            if (it == grid.end()) continue;
+            for (uint32_t ti : it->second) {
+                const auto& t = tris[ti];
+                bool skip = false;
+                for (int k = 0; k < 3 && !skip; ++k) {
+                    if (t[k] == vi) skip = true;
+                    else if (excl && std::binary_search(excl->begin(), excl->end(),
+                                                        (uint32_t)t[k]))
+                        skip = true;
+                }
+                if (skip) continue;
+                ++stats.candidates;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                const Vec3 cp = ClosestPtTriangleBary(
+                    x[vi], x[t[0]], x[t[1]], x[t[2]], bu, bv, bw);
+                // Face normal now, and the side the artist put this vertex on.
+                Vec3 nrm = Cross(Sub(x[t[1]], x[t[0]]), Sub(x[t[2]], x[t[0]]));
+                const float nl = Len(nrm);
+                if (nl <= 1.0e-12f) continue;
+                nrm = Scale(nrm, 1.0f / nl);
+                const float sNow = Dot(Sub(x[vi], cp), nrm);
+                float sAuthored = sNow;
+                if (baseVerts.size() == n) {
+                    Vec3 an = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                    Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                    const float al = Len(an);
+                    if (al > 1.0e-12f) {
+                        an = Scale(an, 1.0f / al);
+                        float au = 0.0f, av = 0.0f, aw = 0.0f;
+                        const Vec3 acp = ClosestPtTriangleBary(
+                            baseVerts[vi], baseVerts[t[0]], baseVerts[t[1]],
+                            baseVerts[t[2]], au, av, aw);
+                        sAuthored = Dot(Sub(baseVerts[vi], acp), an);
+                    }
+                }
+                const float side = (sAuthored >= 0.0f) ? 1.0f : -1.0f;
+                // Signed clearance measured on the AUTHORED side. Negative means
+                // the vertex has crossed through since authoring - the clip.
+                const float signed_d = sNow * side;
+                if (signed_d >= thickness) continue;   // correct side, clear
+                const Vec3 dir = Scale(nrm, side);
+                // Untangling is a LARGE correction - a trouser vertex can sit
+                // several units through the skirt - so it has to arrive over
+                // many iterations rather than in one shove. Unclamped, the
+                // first pass flung the vampire robe hard enough to fail
+                // validation outright (285 body penetrations, publish refused).
+                // One thickness per application, same discipline as the body
+                // contact step.
+                // STEP POLICY, AND THE OPEN PROBLEM. Untangling is a LARGE
+                // correction - a trouser vertex can sit several units through
+                // the skirt - and the two obvious policies both fail, in
+                // opposite ways. Measured on the vampire robe (crossing
+                // triangle pairs; authored baseline 3517, production 3663, this
+                // solver without self-collision 3788):
+                //   unclamped   2477 pairs, a 35% cut and below BOTH baselines,
+                //               but it flings the mesh hard enough to fail
+                //               validation (285 body penetrations, publish
+                //               refused).
+                //   clamped to  3914 / 3991 / 4343 at relax 0.3 / 0.6 / 1.0 -
+                //   one thickness  WORSE than doing nothing, because a vertex
+                //               pushed halfway out crosses fresh triangles on
+                //               the way through.
+                // So partial untangling is worse than none, and full
+                // untangling cannot be done while the solver is still moving.
+                // The side-preserving CRITERION is right; what is missing is
+                // applying it as a single post-convergence resolution with the
+                // integrity repair behind it, rather than as a per-iteration
+                // constraint. Left gated off until that exists.
+                const float d = signed_d;
+                const float clampStep = std::max(0.0f,
+                    EnvFloat("DRAPE_SHELL_SELF_MAX_STEP", 0.0f));
+                float need = (thickness - d) * relaxation;
+                if (clampStep > 0.0f) need = std::min(need, clampStep);
+                const float bary[3] = {bu, bv, bw};
+                float wt = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const float wk = (t[k] < invMass.size()) ? invMass[t[k]] : 0.0f;
+                    wt += wk * bary[k] * bary[k];
+                }
+                const float denom = wv + wt;
+                if (denom <= 1.0e-12f) continue;
+                const float lam = need / denom;
+                x[vi] = Add(x[vi], Scale(dir, wv * lam));
+                for (int k = 0; k < 3; ++k) {
+                    const float wk = (t[k] < invMass.size()) ? invMass[t[k]] : 0.0f;
+                    if (wk <= 0.0f) continue;
+                    x[t[k]] = Sub(x[t[k]], Scale(dir, wk * bary[k] * lam));
+                }
+                ++stats.resolved;
+                stats.worst = std::max(stats.worst, thickness - d);
+                (void)cp;
+            }
+        }
+    }
+}
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -10502,6 +10724,17 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_CONTACT_STABLE_DOT", 0.90f), 0.0f, 0.999f);
     const float kContactStepMax = std::max(kContactStepC,
         EnvFloat("DRAPE_SHELL_CONTACT_STEP_MAX", 4.0f));
+    // SELF-COLLISION (2026-07-27). Off by default until judged live. Thickness
+    // is derived from the mesh's own mean edge below, not set here, so a dense
+    // and a coarse garment get proportionate fabric thickness.
+    const bool kSelfCollideReq = EnvToggle("DRAPE_SHELL_SELF_COLLIDE", false);
+    const float kSelfThickFrac = ClampRange(
+        EnvFloat("DRAPE_SHELL_SELF_THICK_FRAC", 0.35f), 0.02f, 2.0f);
+    const int kSelfEvery = (int)ClampRange(
+        EnvFloat("DRAPE_SHELL_SELF_EVERY", 4.0f), 1.0f, 32.0f);
+    const float kSelfRelax = ClampRange(
+        EnvFloat("DRAPE_SHELL_SELF_RELAX", 0.6f), 0.05f, 1.0f);
+
     // Contact solved as an XPBD constraint with its own multiplier instead
     // of a post-sweep projection. DEFAULT ON inside the shell path: the
     // projection is measured converging to an infeasible equilibrium (see
@@ -10560,6 +10793,25 @@ static bool PathBSimV2Solve(
     HLog("path-b-shell: analytic dihedral calibration variant=%d maxErr=%.6f -> %s",
          analyticVariant, gradErr,
          analyticVariant >= 0 ? "analytic" : "NUMERIC FALLBACK");
+    // Built once: topology does not move. The 2-ring exclusion is what lets a
+    // fold touch itself without a triangle fighting its own neighbours.
+    std::vector<std::vector<uint32_t>> selfNearRing;
+    float selfThickness = 0.0f;
+    const int selfCollideEvery = kSelfEvery;
+    bool selfCollideOn = false;
+    PathBSelfCollideStats selfStats;
+    if (kSelfCollideReq && !tris.empty()) {
+        double edgeSum = 0.0; size_t edgeCnt = 0;
+        for (const auto& e : edges) { edgeSum += e.rest; ++edgeCnt; }
+        const float meanEdge = edgeCnt ? (float)(edgeSum / (double)edgeCnt) : 0.0f;
+        selfThickness = meanEdge * kSelfThickFrac;
+        if (selfThickness > 1.0e-3f) {
+            PathBBuildNearRings(n, tris, selfNearRing);
+            selfCollideOn = true;
+            HLog("path-b-shell: self-collide ON meanEdge=%.3f thickness=%.3f every=%d",
+                 meanEdge, selfThickness, selfCollideEvery);
+        }
+    }
     int totalIters = 0;
     // Last support field produced by the continuation.  Post-loop safety
     // passes must use this field, not rebuild `base + raw` and accidentally
@@ -11333,6 +11585,14 @@ static bool PathBSimV2Solve(
                     kFaceStepC, kFaceRelaxC,
                     worstFaceContact, &triActive, /*countOnly=*/false,
                     traceContact ? &faceMovesThisStep : nullptr);
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
+            // Cloth against itself. Runs after the body contact so the body has
+            // the last word on where cloth may not be, and is re-welded because
+            // it is a per-vertex pass like the others.
+            if (selfCollideOn && (iteration % selfCollideEvery) == 0) {
+                PathBSelfCollide(x, baseVerts, tris, invMass, selfNearRing,
+                                 selfThickness, kSelfRelax, selfStats);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             // BENDING LAST (ordering probe 2026-07-20): bending currently runs
