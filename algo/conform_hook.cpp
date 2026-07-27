@@ -13426,9 +13426,39 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // cloth (fitted/draped), while skin-tight, rigid and tubular presets are
     // different physics and keep their own paths. DRAPE_SHELL_SOLVE (or
     // shell_solve_on.flag) is still the global feature switch.
+    //
+    // AUTO IS NOT A VERDICT (2026-07-26). The test above still had a silent
+    // hole: DRAPE_PRESET_AUTO is what GuessPresetFromGeometry returns from its
+    // FALL-THROUGH, meaning "none of my rules matched" - undecided, not "this
+    // is not cloth". Excluding it meant a garment the classifier could not
+    // label got no physics at all and nothing said so. Measured on the user's
+    // own scene: Fur 1 `BaseArmor` is AUTO with 565 of 1984 vertices classed
+    // FREE, and its hanging front flaps were pure production output - which is
+    // exactly the "stiff, tilted outward, does not fall like cloth" he
+    // reported. `FemaleUnderwearSH` is AUTO with 339 of 339 free.
+    //
+    // The resolution is the criterion already sitting right here: the shared
+    // drape mask, which is measured per vertex from the geometry the solver
+    // itself will use. If an unlabelled shape carries a material amount of
+    // hanging cloth, the shell solves it and the mask decides which vertices
+    // move; if it does not, nothing changes. That is a geometric decision, not
+    // a preset label and not an identity check.
+    int shellFreeVerts = 0;
+    for (size_t i = 0; i < n && i < drapeMask.size(); ++i)
+        if (drapeMask[i] == DRAPE_CLASS_FREE || drapeMask[i] == DRAPE_CLASS_TRANSITION)
+            ++shellFreeVerts;
+    const float shellFreeFrac = n > 0 ? (float)shellFreeVerts / (float)n : 0.0f;
+    const float kAutoFreeFrac = ClampRange(
+        EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.10f), 0.0f, 1.0f);
+    const bool autoHasCloth =
+        originalPreset == DRAPE_PRESET_AUTO && shellFreeFrac >= kAutoFreeFrac;
     const bool pathBShellScoped =
         (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
-         originalPreset == DRAPE_PRESET_LOOSE_DRAPED);
+         originalPreset == DRAPE_PRESET_LOOSE_DRAPED ||
+         autoHasCloth);
+    if (pathBShellRequested && autoHasCloth)
+        HLog("path-b-shell: AUTO preset admitted by geometry shape='%s' free=%d/%zu (%.0f%%)",
+             shapeName.c_str(), shellFreeVerts, n, shellFreeFrac * 100.0f);
     if (pathBShellRequested && pathBShellScoped) {
         const auto started = std::chrono::steady_clock::now();
         const std::vector<Vec3> productionEntry = finalVerts;
