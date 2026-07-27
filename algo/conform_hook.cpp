@@ -9910,7 +9910,42 @@ static bool PathBSimV2Solve(
     // anti-concavity is the plumb shadow's job, and nothing pulls cloth
     // inward (softAnchor=0). DRAPE_SHELL_RADIAL=1 restores the old floors
     // for A/B. Authored-inside cloth (straps): parity, no enforcement.
-    const bool kRadialFloors = EnvFloat("DRAPE_SHELL_RADIAL", 0.0f) > 0.5f;
+    //
+    // RADIAL FLOORS BACK ON (2026-07-27). The paragraph above is a correct
+    // description of a solver that no longer exists. The floor was disabled
+    // because it is infeasible in pinch corridors - a panel between the thighs
+    // cannot hold authored standoff from both legs - and the old MEMORYLESS
+    // contact projection turned that infeasibility into permanent churn:
+    // contact, stretch and gravity traded the same displacement forever,
+    // worstContact 7-10u every iteration, hem edges at 1.85x rest.
+    //
+    // Contact is now an XPBD constraint carrying its own Lagrange multiplier,
+    // so an infeasible constraint no longer oscillates: lambda grows, the
+    // residual settles at alpha*lambda, and the solve converges to the physical
+    // compromise (the fabric IS squeezed between the thighs). The floor became
+    // affordable the moment the projection was replaced.
+    //
+    // Proof that this is the mechanism and not a coincidence, on the user's own
+    // Blacksmith capture - radial ON with the OLD projection still fails (1
+    // band sucked in, worst -4.45), radial ON with XPBD does not (0 bands,
+    // worst +0.14, i.e. the cloth is never narrower than authored anywhere).
+    //
+    // Turning it on is also the direct form of the user's own long-standing
+    // rule - the body may push cloth OUT, never suck it IN - instead of the
+    // voxel gravity shadow, which tried to serve the same rule by guessing a
+    // silhouette and blew the hem into a bell when switched on.
+    //
+    // Measured over his six live scenes, penetrations production -> shell:
+    //   BlackSmithTorso 37 -> 7, Fine Clothes Body 11 -> 0, Pants 32 -> 23,
+    //   Thalmor Pants 28 -> 27, ThalmorRobesF 5 -> 0, vampire 20 -> 6,
+    //   yarl Cloak 0 -> 0, Clothes 18 -> 1, Pants 50 -> 23.
+    // It wins on every shape, worst depth improves everywhere, and fallbacks
+    // are unchanged. DRAPE_SHELL_RADIAL=0 / shell_radial_off.flag reverts.
+    bool radialFloors = EnvFloat("DRAPE_SHELL_RADIAL", 1.0f) > 0.5f;
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("shell_radial_off.flag")) radialFloors = false;
+#endif
+    const bool kRadialFloors = radialFloors;
     std::vector<float> vertHardFloor(n, clearance);
     {
         const float kVertHardF =
@@ -10579,6 +10614,24 @@ static bool PathBSimV2Solve(
         // production pushes them out to 17.9. Production had the anti-tuck; we
         // did not.
         //
+        // REVERTED TO 0 (2026-07-26, same evening). Turning it on scored well on
+        // every number I had - penetrations, stretch, body-silhouette
+        // correlation - and the user looked at the result and said it was WORSE.
+        // He is right: the render shows the hem blown out into a bell and a
+        // tent-like structure between the legs. That is the shadow's own
+        // mechanism showing through - it pushes a vertex HORIZONTALLY out to the
+        // silhouette of whatever voxel column sits above it, so a distant or
+        // unrelated surface above becomes a "ceiling" that shoves cloth
+        // sideways with no wall actually there. An outside review had flagged
+        // exactly this failure mode; I dismissed it because the shadow was off,
+        // and switching it on reproduced the prediction.
+        //
+        // The rule the shadow was trying to serve is right and is the user's
+        // own, stated long before this: THE BODY MAY PUSH CLOTH OUT, NEVER SUCK
+        // IT IN. The shadow is just a bad implementation of it - a voxel
+        // silhouette guess instead of a per-vertex statement. See the authored
+        // gap floor for the direct form.
+        //
         // Ring 1 is the MINIMUM meaningful neighbourhood, chosen so this is
         // "turn the missing rule on", not a fitted constant. Ring 2 scored
         // better on the Blacksmith alone and is rejected: it costs the vampire
@@ -10590,7 +10643,7 @@ static bool PathBSimV2Solve(
         // fallbacks unchanged. Body-silhouette correlation, which is the metric
         // that actually tracks his complaint, drops 0.718 -> 0.702.
         int shadowRing =
-            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 1.0f));
+            (int)std::max(0.0f, EnvFloat("DRAPE_SHELL_SHADOW_RING", 0.0f));   // REVERTED, see below
 #if !defined(DRAPE_HARNESS_BUILD)
         if (DrapeFlagExists("shell_shadow_off.flag")) shadowRing = 0;
 #endif
