@@ -10460,6 +10460,13 @@ static bool PathBSimV2Solve(
     // per conform, measured as a top-2 cost by the 2026-07-17 review)
     const float kContactStepC =
         std::max(0.05f, EnvFloat("DRAPE_SHELL_CONTACT_STEP", 0.25f));
+    // Adaptive contact cap (see the projection in the solve loop). Off by
+    // default until it has been judged live.
+    const bool kContactAdaptive = EnvToggle("DRAPE_SHELL_CONTACT_ADAPTIVE", false);
+    const float kContactStableDot = ClampRange(
+        EnvFloat("DRAPE_SHELL_CONTACT_STABLE_DOT", 0.90f), 0.0f, 0.999f);
+    const float kContactStepMax = std::max(kContactStepC,
+        EnvFloat("DRAPE_SHELL_CONTACT_STEP_MAX", 4.0f));
     const float kFaceStepC =
         std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.25f));
     const float kFaceRelaxC =
@@ -10810,6 +10817,12 @@ static bool PathBSimV2Solve(
         std::vector<Vec3> stickyCp(n, Vec3{0.0f, 0.0f, 0.0f});
         std::vector<Vec3> stickyN(n, Vec3{0.0f, 0.0f, 0.0f});
         std::vector<uint8_t> stickyHas(n, 0);
+        // TRUST COUNTER for the adaptive contact step (see the cap below).
+        // Counts consecutive iterations in which this vertex's contact normal
+        // stayed put. It is the measurement the cap should have been keyed on
+        // all along.
+        std::vector<uint16_t> contactStable(n, 0);
+        std::vector<float> prevContactGap(n, -1.0e9f);
         int contactMoves = 0;
         int faceContactMoves = 0;
         int shadowMoves = 0;
@@ -10969,10 +10982,51 @@ static bool PathBSimV2Solve(
                 // between iterations and an uncapped snap (measured up to 14u)
                 // injects energy forever - the classic churn. Capped, deep
                 // verts escape gradually and coherently with their neighbours.
+                //
+                // ADAPTIVE CAP (2026-07-26). The reasoning above is right about
+                // WHY a cap is needed and wrong about WHO should pay it. The
+                // hazard is an UNSTABLE contact normal; a flat fixed cap charges
+                // every vertex for a risk only some of them carry, and the
+                // measured cost is severe. On BlackSmithTorso the contact never
+                // converges (worstContact stays ~3.9 at the last load step, at
+                // every cap value tried), the vertex stays inside, and the
+                // membrane stretches around it: worst edge 8.34 at the 0.25
+                // default versus 4.56 at 2.00 - the difference between the host
+                // rejecting the shape and publishing it. Penetrations fall the
+                // same way, 24 -> 13.
+                //
+                // Tuning the constant would be fitting the corpus. Instead key
+                // the cap on the thing the comment already identifies: let a
+                // vertex whose contact normal has held still earn a longer step,
+                // and keep the tight cap for first touches and for normals that
+                // just rotated - which is exactly the leg-gap flip case, already
+                // detected above via stickyN.
+                // Trust requires a steady normal AND actual progress. Steadiness
+                // alone is not enough: a vertex wedged in a crevice can hold a
+                // perfectly stable normal that points at the opposite wall, and
+                // rewarding that just drives it in harder - measured, it took
+                // BlackSmithTorso's worst penetration from 2.44 to 3.52. A
+                // vertex being pushed the wrong way is not getting shallower, so
+                // require the gap to have improved since the last iteration.
+                float stepCap = kContactStepC;
+                if (kContactAdaptive) {
+                    const bool steady = stickyHas[i] &&
+                        Dot(nrm, stickyN[i]) > kContactStableDot;
+                    const bool progressing = !stickyHas[i] ||
+                        gap > prevContactGap[i] + 1.0e-5f;
+                    if (steady && progressing) {
+                        if (contactStable[i] < 60u) ++contactStable[i];
+                    } else {
+                        contactStable[i] = 0;
+                    }
+                    stepCap = kContactStepC * (1.0f + (float)contactStable[i]);
+                    if (stepCap > kContactStepMax) stepCap = kContactStepMax;
+                }
+                prevContactGap[i] = gap;
                 Vec3 move = Sub(target, x[i]);
                 const float moveLen = Len(move);
-                if (moveLen > kContactStepC)
-                    move = Scale(move, kContactStepC / moveLen);
+                if (moveLen > stepCap)
+                    move = Scale(move, stepCap / moveLen);
                 worstContact = std::max(worstContact, moveLen);
                 x[i] = Add(x[i], move);
                 stickyCp[i] = cp;
