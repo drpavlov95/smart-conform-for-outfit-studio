@@ -12555,6 +12555,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // independent and no layer has to chase an already-deformed neighbour.
     std::vector<uint8_t> crossMeshSeamAnchor(n, 0);
     int crossMeshSeamAnchorCount = 0;
+    // Position the shared boundary must end at, kept alive past the
+    // material release so the tail cannot split an author-split seam.
+    std::vector<Vec3> crossMeshSeamTarget;
     // The legacy seam path temporarily pins endpoints to its vanilla target.
     // Preserve the pre-pin material fields so an accepted Path-B solve can
     // release them again; otherwise a cross-shape UV split becomes another
@@ -12606,6 +12609,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             anchorWeight[i] = 1.0f;
             invMass[i] = 0.0f;
             drapeEl[i] = 0.0f;
+        }
+        // Remember WHERE the seam was staged. The material staging above is
+        // released once the shell publishes (see the release below, which is
+        // right to hand the panel back to physics), but the seam POSITION has
+        // to survive the whole tail or the two halves of an author-split
+        // garment drift apart independently. See the re-assert at the
+        // publication boundary.
+        if (crossMeshSeamAnchorCount > 0) {
+            crossMeshSeamTarget.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+            for (size_t i = 0; i < n; ++i)
+                if (crossMeshSeamAnchor[i]) crossMeshSeamTarget[i] = finalVerts[i];
         }
         if (crossMeshSeamAnchorCount > 0)
             HLog("cross-mesh-seam: shape='%s' authored anchors=%d",
@@ -22770,6 +22784,38 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  repairSweeps, overStretched, clearance, insideBefore, insideAfter, worstBefore, worstAfter,
                  flipsBefore, countFlips(finalVerts));
         }
+    }
+
+    // CROSS-MESH SEAM RE-ASSERT (2026-07-26). When an author splits one garment
+    // across two shapes - Thalmor's ThalmorRobesF + LongSkirt, a skirt that is
+    // visually part of the robe above it - the two halves are conformed and
+    // solved INDEPENDENTLY, and nothing in either solve knows the other exists:
+    // exactSeamGroups is per-shape. The pre-shell staging does find the shared
+    // boundary (25 vertex pairs on that outfit) and pins it, but the release
+    // below hands those vertices back to physics before the tail runs, and the
+    // tail then moves each half on its own. Result: the robe and the skirt come
+    // apart at the waist, which is what the user reported.
+    //
+    // The release itself is right - a panel must not stay glued to the vanilla
+    // pose merely because its author split it. What was wrong was the SCOPE of
+    // what it gave up. Only the shared boundary needs to hold, 25 vertices out
+    // of 314 on that skirt; the rest of the panel stays free to drape. Holding
+    // a seam closed is precisely what a seam is. So the material release stands
+    // and the seam POSITION is restored here, at the publication boundary,
+    // where nothing downstream can undo it - the same rule the exact-seam weld
+    // already follows inside a single mesh, applied across meshes.
+    if (crossMeshSeamAnchorCount > 0 && crossMeshSeamTarget.size() == n &&
+        EnvToggle("DRAPE_CROSS_MESH_SEAM_REASSERT", true)) {
+        int restored = 0;
+        float worst = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            if (!crossMeshSeamAnchor[i]) continue;
+            worst = std::max(worst, Len(Sub(finalVerts[i], crossMeshSeamTarget[i])));
+            finalVerts[i] = crossMeshSeamTarget[i];
+            ++restored;
+        }
+        HLog("cross-mesh-seam: re-asserted shape='%s' verts=%d worstDrift=%.3fu",
+             shapeName.c_str(), restored, worst);
     }
 
     DrapeDumpStage(finalVerts, "09_final", shapeName);
