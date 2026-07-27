@@ -10467,6 +10467,25 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_CONTACT_STABLE_DOT", 0.90f), 0.0f, 0.999f);
     const float kContactStepMax = std::max(kContactStepC,
         EnvFloat("DRAPE_SHELL_CONTACT_STEP_MAX", 4.0f));
+    // Contact solved as an XPBD constraint with its own multiplier instead
+    // of a post-sweep projection. DEFAULT ON inside the shell path: the
+    // projection is measured converging to an infeasible equilibrium (see
+    // the constraint itself), and on the corpus XPBD beats it on nearly
+    // every axis and restores publication parity with production. The
+    // shell is itself opt-in, so this changes nothing unless the shell is
+    // already running. shell_contact_xpbd_off.flag reverts to projection.
+    bool contactXPBD = EnvToggle("DRAPE_SHELL_CONTACT_XPBD", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("shell_contact_xpbd_off.flag"))     contactXPBD = false;
+    else if (DrapeFlagExists("shell_contact_xpbd_on.flag")) contactXPBD = true;
+#endif
+    const bool kContactXPBD = contactXPBD;
+    // 1e-5 measured: 1e-6 is better on BlackSmithTorso but takes the
+    // vampire robe over the host ceiling, and an unpublished garment shows
+    // plain vanilla, which is worse than a published one with more shallow
+    // contacts (vampire depth -3.33 published vs -4.69 as vanilla).
+    const float kContactAlpha = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_CONTACT_COMPLIANCE", 1.0e-5f));
     const float kFaceStepC =
         std::max(0.02f, EnvFloat("DRAPE_SHELL_FACE_STEP", 0.25f));
     const float kFaceRelaxC =
@@ -10823,6 +10842,8 @@ static bool PathBSimV2Solve(
         // all along.
         std::vector<uint16_t> contactStable(n, 0);
         std::vector<float> prevContactGap(n, -1.0e9f);
+        // XPBD contact multiplier, per morph step like the others.
+        std::vector<float> contactLambda(n, 0.0f);
         int contactMoves = 0;
         int faceContactMoves = 0;
         int shadowMoves = 0;
@@ -11025,9 +11046,53 @@ static bool PathBSimV2Solve(
                 prevContactGap[i] = gap;
                 Vec3 move = Sub(target, x[i]);
                 const float moveLen = Len(move);
-                if (moveLen > stepCap)
-                    move = Scale(move, stepCap / moveLen);
                 worstContact = std::max(worstContact, moveLen);
+                if (kContactXPBD) {
+                    // CONTACT AS A REAL XPBD CONSTRAINT (2026-07-26), instead of
+                    // a projection applied after the constraint sweep.
+                    //
+                    // Why this and not another cap policy. The projection is
+                    // MEMORYLESS: every iteration it re-derives the push from the
+                    // current gap, the membrane pulls back, and the pair settles
+                    // wherever those two happen to balance. That balance is what
+                    // the whole corpus was measured sitting in - every garment
+                    // ends its last load step reporting worstContact of 1.6 to
+                    // 6.0 units while the loop exits on maxMove <= eps, because
+                    // maxMove is NET motion and push-then-pull nets to zero. The
+                    // solver is right that it is an equilibrium; it is simply an
+                    // infeasible one, with cloth left inside the body.
+                    //
+                    // With a Lagrange multiplier the residual stops depending on
+                    // that tug of war. At equilibrium C = -alpha * lambda, and
+                    // lambda is free to grow until the membrane is balanced, so
+                    // the leftover penetration is set by the COMPLIANCE alone.
+                    // The cost of getting out then shows up as stretch, which is
+                    // physically honest - the body really is stretching the
+                    // cloth - and, unlike a cap, it is negotiated in the same
+                    // sweep as the other constraints rather than fought over
+                    // after them.
+                    //
+                    // Unilateral: lambda is clamped at zero so contact can only
+                    // ever push out, never pull the cloth back onto the body.
+                    const float w = invMass[i];
+                    const float C = gap - floor;      // violated when negative
+                    const float denom = w + kContactAlpha;
+                    if (denom <= 1.0e-30f) continue;
+                    float dl = (-C - kContactAlpha * contactLambda[i]) / denom;
+                    const float projected = std::max(contactLambda[i] + dl, 0.0f);
+                    dl = projected - contactLambda[i];
+                    contactLambda[i] = projected;
+                    move = Scale(nrm, w * dl);
+                    // Corridor guard, kept: in a crevice the nearest feature can
+                    // face the opposite wall, so refuse a step that would leave
+                    // this vertex deeper than it already is.
+                    float candGap = 0.0f;
+                    if (BVHSignedGap(body, Add(x[i], move), candGap, nullptr) &&
+                        candGap < gap - 1.0e-4f)
+                        move = Scale(move, 0.5f);
+                } else if (moveLen > stepCap) {
+                    move = Scale(move, stepCap / moveLen);
+                }
                 x[i] = Add(x[i], move);
                 stickyCp[i] = cp;
                 stickyN[i] = nrm;
