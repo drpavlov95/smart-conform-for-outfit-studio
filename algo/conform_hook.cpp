@@ -10104,13 +10104,42 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_ATTACH_HI", 1.2f));
     const bool useSharedMask = sharedMask.size() == n &&
         EnvFloat("DRAPE_SHELL_SHARED_MASK", 1.0f) > 0.5f;
+    const float kFloorCap = std::max(0.1f,
+        EnvFloat("DRAPE_SHELL_FLOOR_CAP", 1.0e9f));
     std::vector<float> authoredGapArr(n, 0.0f);
     std::vector<float> contactFloor(n, clearance);
+    // MATERIAL ANCHOR (2026-07-27). Which PIECE of the body the artist placed
+    // this vertex against, as a triangle plus barycentric coordinates on the
+    // REFERENCE body. The reference and morphed bodies share topology, so the
+    // same coordinates name the same material point after the morph.
+    //
+    // Why this is needed: the radial floor asks for the authored standoff, but
+    // "the nearest point" is not a stable reference. Measured on the Blacksmith,
+    // 76% of free-cloth vertices have their nearest body feature CHANGE between
+    // the reference and the morphed body, and 13 of them jump more than 8u
+    // (worst 22.3u). For those the floor demanded a distance measured from one
+    // feature against a completely different one - which inflates cloth outward
+    // with nothing underneath, exactly the "mesh inflando atras da coxa mesmo
+    // sem tocar nada" the user reported. It is also the pinch-corridor
+    // infeasibility the 2026-07-17 review described: a nearest-point floor asks
+    // a panel between the thighs to stand off BOTH legs at once, while a
+    // material anchor asks it to stand off the one spot it was authored against.
+    std::vector<int> anchorTri(n, -1);
+    std::vector<Vec3> anchorBary(n, Vec3{0.0f, 0.0f, 0.0f});
     for (size_t i = 0; i < n; ++i) {
         float authoredGap = 0.0f;
         if (!BVHSignedGap(refBody, baseVerts[i], authoredGap, nullptr)) {
             failReason = "authored contact query failed";
             return false;
+        }
+        {
+            Vec3 acp{0.0f, 0.0f, 0.0f}, anr{0.0f, 0.0f, 1.0f};
+            float ad2 = 0.0f; int atri = -1; float au = 0, av = 0, aw = 0;
+            if (BVHClosestPointEx(refBody, baseVerts[i], acp, anr, ad2,
+                                  &atri, &au, &av, &aw)) {
+                anchorTri[i] = atri;
+                anchorBary[i] = Vec3{au, av, aw};
+            }
         }
         authoredGapArr[i] = authoredGap;
         // RADIAL RULE (user, 2026-07-16): cloth that was AUTHORED away from
@@ -10120,7 +10149,14 @@ static bool PathBSimV2Solve(
         // A distance floor also bridges body valleys automatically (a >=4u
         // offset surface cannot enter a narrow concavity), which is the
         // rule's other half. Worn cloth keeps its small authored floor.
-        contactFloor[i] = std::max(authoredGap, clearance);
+        // CAP ON THE ASKED-FOR STANDOFF. The floor restores what the artist
+        // asked for, but the reference is the nearest point, which can name a
+        // different body feature after the morph. Demanding a LARGE authored
+        // distance from a feature that was never the one measured is what
+        // inflates a panel outward with nothing under it. Capping bounds that
+        // error without giving up the rule: cloth still may not be sucked in,
+        // it just cannot be shoved out past the cap.
+        contactFloor[i] = std::max(std::min(authoredGap, kFloorCap), clearance);
     }
     // FEASIBILITY (review 2026-07-17): the radial floor against the nearest
     // point of the WHOLE body is provably infeasible in pinch corridors (a
@@ -10727,6 +10763,18 @@ static bool PathBSimV2Solve(
     // SELF-COLLISION (2026-07-27). Off by default until judged live. Thickness
     // is derived from the mesh's own mean edge below, not set here, so a dense
     // and a coarse garment get proportionate fabric thickness.
+    // Authored-standoff constraint against the material anchor. Default ON:
+    // it is the radial rule in the only reference frame where it is feasible.
+    const bool kAuthoredStandoff = EnvToggle("DRAPE_SHELL_STANDOFF", false);
+    const float kStandoffMin = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_STANDOFF_MIN", 1.0f));
+    // How far the current closest point may sit from the authored anchor and
+    // still count as the same feature. Scales with the standoff, because a
+    // vertex authored far out legitimately sees a wider patch of body.
+    const float kStandoffTolMin = std::max(0.1f,
+        EnvFloat("DRAPE_SHELL_STANDOFF_TOL_MIN", 2.0f));
+    const float kStandoffTolFrac = ClampRange(
+        EnvFloat("DRAPE_SHELL_STANDOFF_TOL_FRAC", 0.5f), 0.0f, 4.0f);
     const bool kSelfCollideReq = EnvToggle("DRAPE_SHELL_SELF_COLLIDE", false);
     const float kSelfThickFrac = ClampRange(
         EnvFloat("DRAPE_SHELL_SELF_THICK_FRAC", 0.35f), 0.02f, 2.0f);
@@ -10812,6 +10860,8 @@ static bool PathBSimV2Solve(
                  meanEdge, selfThickness, selfCollideEvery);
         }
     }
+    int standoffMoves = 0;
+    float worstStandoff = 0.0f;
     int totalIters = 0;
     // Last support field produced by the continuation.  Post-loop safety
     // passes must use this field, not rebuild `base + raw` and accidentally
@@ -11315,7 +11365,42 @@ static bool PathBSimV2Solve(
                 if (traceContact)
                     traceMinimumGap[traceOffset + i] =
                         std::min(traceMinimumGap[traceOffset + i], gap);
+                // AUTHORED STANDOFF, GATED BY FEATURE IDENTITY (2026-07-27).
+                // The radial rule asks for the artist's standoff, which is often
+                // several units - and at that magnitude "the nearest point" is
+                // not a safe reference. Measured on the Blacksmith, 76% of
+                // free-cloth vertices have their nearest body feature CHANGE
+                // between the reference and morphed bodies, 13 of them jumping
+                // more than 8u (worst 22.3). For those the floor demanded a
+                // distance measured from one feature against a different one,
+                // which inflates the panel outward with nothing underneath -
+                // the "mesh inflando atras da coxa mesmo sem tocar nada".
+                //
+                // Two repairs were tried. Measuring against the material anchor
+                // directly is WORSE (inflated 26 -> 44, sucked 93 -> 256):
+                // Dot(x - anchor, n) is height over a tangent plane, which
+                // underestimates true distance for a vertex displaced sideways
+                // and so over-pushes. The nearest point has the right DISTANCE
+                // and the wrong REFERENCE; the anchor has the right reference
+                // and the wrong distance.
+                //
+                // So keep the nearest-point distance and simply verify it is
+                // still the same piece of body: if the closest point has drifted
+                // far from where the authored anchor now sits, we do not know
+                // what standoff to ask for, and ask only for non-penetration.
                 float floor = vertHardFloor[i];
+                if (kAuthoredStandoff && anchorTri[i] >= 0 &&
+                    authoredGapArr[i] > kStandoffMin) {
+                    const Vec3 ap = TriPointBary(body, anchorTri[i],
+                                                 anchorBary[i].x, anchorBary[i].y,
+                                                 anchorBary[i].z);
+                    const float tol = std::max(kStandoffTolMin,
+                                               authoredGapArr[i] * kStandoffTolFrac);
+                    if (Len(Sub(cp, ap)) <= tol) {
+                        floor = std::max(floor, authoredGapArr[i]);
+                        ++standoffMoves;
+                    }
+                }
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
                 // corridor clamp: never push THROUGH the opposite body side
@@ -11681,6 +11766,10 @@ static bool PathBSimV2Solve(
              contactMoves, faceContactMoves, shadowMoves, worstContact,
              worstFaceContact);
     }
+    if (kAuthoredStandoff)
+        HLog("path-b-shell: authored-standoff moves=%d worst=%.3fu (anchor = material "
+             "point on the reference body, not the nearest point)",
+             standoffMoves, worstStandoff);
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
     // Drift probes at every post-loop stage, to name the culprit exactly.
