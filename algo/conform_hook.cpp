@@ -10775,6 +10775,16 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_STANDOFF_TOL_MIN", 2.0f));
     const float kStandoffTolFrac = ClampRange(
         EnvFloat("DRAPE_SHELL_STANDOFF_TOL_FRAC", 0.5f), 0.0f, 4.0f);
+    // Body-push form of the radial rule. DEFAULT ON: it is the correct
+    // statement of the user's rule and it measures better on every axis
+    // available - see the constraint itself. shell_body_push_off.flag reverts.
+    bool bodyPushOn = EnvToggle("DRAPE_SHELL_BODY_PUSH", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("shell_body_push_off.flag")) bodyPushOn = false;
+#endif
+    const bool kBodyPush = bodyPushOn;
+    const float kBodyPushRelax = ClampRange(
+        EnvFloat("DRAPE_SHELL_BODY_PUSH_RELAX", 0.5f), 0.05f, 1.0f);
     const bool kSelfCollideReq = EnvToggle("DRAPE_SHELL_SELF_COLLIDE", false);
     const float kSelfThickFrac = ClampRange(
         EnvFloat("DRAPE_SHELL_SELF_THICK_FRAC", 0.35f), 0.02f, 2.0f);
@@ -11388,6 +11398,52 @@ static bool PathBSimV2Solve(
                 // still the same piece of body: if the closest point has drifted
                 // far from where the authored anchor now sits, we do not know
                 // what standoff to ask for, and ask only for non-penetration.
+                // BODY-PUSH RULE (2026-07-27). The user's rule stated as a
+                // DISPLACEMENT instead of a distance, which is what he actually
+                // says: the body pushes the cloth out, it never sucks it in.
+                //
+                // The distance form ("never closer than authored") is what the
+                // radial floor encodes, and it is wrong once the body GROWS: the
+                // cloth may legitimately end up closer than authored, because the
+                // body came to it. Demanding the original distance is what shoves
+                // a panel outward with nothing under it - the inflation behind
+                // the thigh he reported.
+                //
+                // This form has no such failure mode by construction. Take the
+                // material point the vertex was authored against and see how far
+                // THAT point moved under the morph. The cloth must move outward
+                // at least as much, and nothing here asks for more. Body grew 3u
+                // => cloth moves 3u. Body did not move => nothing pushes. It is
+                // also immune to the feature swap that broke the distance form,
+                // because a displacement needs no nearest-point search, and
+                // immune to the tangent-plane error that broke the anchor-
+                // distance form, because displacements are compared, not
+                // distances.
+                if (kBodyPush && anchorTri[i] >= 0 && invMass[i] > 0.0f) {
+                    const auto& bt = body.tris[(size_t)anchorTri[i]];
+                    const auto& rt3 = refBody.tris[(size_t)anchorTri[i]];
+                    const Vec3 apNow = TriPointBary(body, anchorTri[i],
+                        anchorBary[i].x, anchorBary[i].y, anchorBary[i].z);
+                    const Vec3 apRef = TriPointBary(refBody, anchorTri[i],
+                        anchorBary[i].x, anchorBary[i].y, anchorBary[i].z);
+                    Vec3 an = Cross(Sub(body.verts[bt[1]], body.verts[bt[0]]),
+                                    Sub(body.verts[bt[2]], body.verts[bt[0]]));
+                    const float anl = Len(an);
+                    if (anl > 1.0e-12f && rt3[0] < refBody.verts.size()) {
+                        an = Scale(an, 1.0f / anl);
+                        const float bodyOut = Dot(Sub(apNow, apRef), an);
+                        if (bodyOut > 0.0f) {
+                            const float clothOut = Dot(Sub(x[i], baseVerts[i]), an);
+                            if (clothOut < bodyOut) {
+                                float mv = (bodyOut - clothOut) * kBodyPushRelax;
+                                if (mv > kContactStepC) mv = kContactStepC;
+                                x[i] = Add(x[i], Scale(an, mv));
+                                ++standoffMoves;
+                                worstStandoff = std::max(worstStandoff, bodyOut - clothOut);
+                            }
+                        }
+                    }
+                }
                 float floor = vertHardFloor[i];
                 if (kAuthoredStandoff && anchorTri[i] >= 0 &&
                     authoredGapArr[i] > kStandoffMin) {
