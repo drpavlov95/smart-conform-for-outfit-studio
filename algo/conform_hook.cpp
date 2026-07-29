@@ -10507,19 +10507,33 @@ static bool PathBSimV2Solve(
     // Clothes, mean pull 3.55 -> 0.96 and neighbour contrast 0.523 -> 0.158 as
     // alpha goes 1e-4 -> 1, while the Blacksmith's back bulge goes 0.79 -> 2.07.
     //
-    // 0.3 with the strain headroom below, which is the pair that wins - it beats
-    // the shipped build on every defect that is actually a defect:
-    //   BlackSmithTorso  8 verts at -0.47  ->  5 at -0.26
-    //   Fine Clothes Body 1 vert at -0.46  ->  0
-    //   yarl Clothes skirt, mean silhouette pull 2.99 -> 0.67, and neighbour
-    //   contrast (the one-vertex steps that ARE the crumple) 0.436 -> 0.136
-    // The one number that gets worse is the back-bulge scalar (0.85 -> 2.30),
-    // and that is the number that lies here: on the render the Blacksmith's back
-    // edge is still visibly straight, nothing like the bulge with the rule off,
-    // while the yarl skirt loses its gashes entirely. Judged on the render,
-    // which this project has had to learn twice.
+    // 1e-4, i.e. effectively rigid, and that is DELIBERATE - see the trade below
+    // before touching it.
+    //
+    // A softer value was shipped for one build and he caught it immediately:
+    // "continua ruim", with the yarl skirt ballooning into a lampshade. The
+    // renders had looked cleaner at 0.3, but they looked cleaner because the
+    // rule had stopped acting. Measured on the live yarl skirt, excess radius
+    // beyond the plumb line: authored -1.32, host's own conform 2.74, rule off
+    // 3.92, alpha=0.3 3.50, alpha=1e-4 2.27. Softening trades the crumple for
+    // the balloon, one for one, and the balloon is the one his eye rejects.
+    //
+    //   alpha   balloon (mean excess)   crumple (neighbour contrast)
+    //   1e-4    2.27                    0.386
+    //   0.03    3.25                    0.283
+    //   0.3     3.50                    0.136
+    //
+    // There is no setting that fixes both, because they are one knob - the same
+    // thing the contact floor found out ("inflation and hugging are the same
+    // button"). 1e-4 is the end that does not regress: it holds the silhouette
+    // the previous build had (2.27 against 2.13) while the continuous strain
+    // headroom below takes the crumple from 0.436 to 0.386 (p95 1.45 -> 1.23)
+    // for free.
+    //
+    // Getting BOTH needs the excess gone before this rule ever sees it, not a
+    // better value here.
     const float kPlumbAlpha = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_PLUMB_COMPLIANCE", 0.3f));
+        EnvFloat("DRAPE_SHELL_PLUMB_COMPLIANCE", 1.0e-4f));
     // Strain at which the bound has spent all its headroom. Same number the old
     // binary gate used, now the far end of a continuous scale instead of a
     // cliff, and no longer something to fit: at 1.3 the correction may spend up
