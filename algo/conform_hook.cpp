@@ -8432,6 +8432,140 @@ struct PathBShellHinge {
     float restAngle = 0.0f;
 };
 
+// ── Plumb ceiling on the authored-standoff floor ────────────────────────────
+// The radial floor (contactFloor = max(authoredGap, clearance)) states the
+// user's rule correctly but measures it against the NEAREST point of the
+// morphed body, and that reference collapses exactly where the body recedes.
+// Measured on his live Blacksmith: the back of the skirt is held 2.85u BEYOND
+// the vertical dropped from the butt, at mid-thigh, because the floor demands
+// the authored 6u standoff from a thigh that moved away. Nothing above holds
+// that width, so it reads as the mesh inflating behind the leg - the defect he
+// reported three times.
+//
+// Turning the floor off is not an option: measured across his six live scenes
+// it costs vampire_robes_alt 3 -> 285 body penetrations and ThalmorRobesF
+// 0 -> 56. The floor does real work on those; it just must not be able to push
+// past what gravity can support.
+//
+// So bound it instead. Per azimuth sector, take the body's radius profile and
+// sweep DOWNWARD keeping a running maximum: that is the vertical dropped from
+// the widest body point above, which is the farthest out hanging cloth can be
+// without something holding it. The floor may ask for any standoff up to that
+// line and no more.
+//
+// This is a CEILING on an outward force, never a force of its own. It cannot
+// invent the bell hem or the tent between the legs that the gravity shadow
+// produced, because it can only ever reduce a push, never add one.
+struct PathBPlumbEnv {
+    bool valid = false;
+    int sectors = 64;
+    int slabs = 0;
+    float zMin = 0.0f;
+    float cx = 0.0f, cy = 0.0f;
+    std::vector<float> bodyR;   // local body radius per (sector, slab)
+    std::vector<float> envR;    // same, swept downward: the plumb line
+
+    inline int sectorOf(float x, float y) const {
+        const float a = std::atan2(y - cy, x - cx);
+        int s = (int)std::floor((a + 3.14159265f) / (2.0f * 3.14159265f) * sectors);
+        return s < 0 ? 0 : (s >= sectors ? sectors - 1 : s);
+    }
+    inline int slabOf(float z) const { return (int)std::floor(z - zMin); }
+    // The plumb radius itself: the farthest out cloth can hang here. This is a
+    // bound on the SILHOUETTE, not on the contact floor. Capping the floor was
+    // tried first and measured inert - it fired 55342 times and moved the back
+    // profile by 0.00, because the cloth ends up past the floor anyway (floor
+    // implied 19.3, cloth sat at 21.9). The floor is not what places free
+    // cloth; the position is, so the bound belongs on the position.
+    inline float envAt(float x, float y, float z) const {
+        if (!valid) return -1.0f;
+        const int sl = slabOf(z);
+        if (sl < 0 || sl >= slabs) return -1.0f;
+        return envR[(size_t)sectorOf(x, y) * slabs + sl];
+    }
+};
+
+// `ceiling` is the top of the garment's hanging region, and it is not optional.
+// Without it the downward sweep starts at the crown of the head, so the
+// SHOULDERS and ARMS - by far the widest thing on the body - set the plumb line
+// for the whole skirt and the cap never binds. Measured: it fired 38721 times
+// and moved the silhouette by 0.00. Body above the support is not holding this
+// cloth up, so it must not define what holds it out either.
+static bool PathBBuildPlumbEnv(const std::vector<Vec3>& bodyVerts,
+                               float ceiling,
+                               PathBPlumbEnv& out) {
+    out = PathBPlumbEnv{};
+    if (bodyVerts.size() < 16) return false;
+    double sx = 0.0, sy = 0.0;
+    for (const Vec3& v : bodyVerts) { sx += v.x; sy += v.y; }
+    out.cx = (float)(sx / bodyVerts.size());
+    out.cy = (float)(sy / bodyVerts.size());
+
+    float zLo = 1.0e30f, zHi = -1.0e30f;
+    for (const Vec3& v : bodyVerts) {
+        zLo = std::min(zLo, v.z);
+        zHi = std::max(zHi, v.z);
+    }
+    out.zMin = std::floor(zLo) - 1.0f;
+    out.slabs = (int)std::ceil(zHi - out.zMin) + 2;
+    if (out.slabs <= 2 || out.slabs > 1024) return false;
+
+    const int NS = out.sectors, NZ = out.slabs;
+    out.bodyR.assign((size_t)NS * NZ, -1.0f);
+    // MAX radius per bin, not min: the plumb line is dropped from the widest
+    // point, so an under-estimate here would let the cap clamp legitimate
+    // standoff and pull cloth back onto the body.
+    for (const Vec3& v : bodyVerts) {
+        if (v.z > ceiling) continue;
+        const int sl = out.slabOf(v.z);
+        if (sl < 0 || sl >= NZ) continue;
+        const float r = std::hypot(v.x - out.cx, v.y - out.cy);
+        float& b = out.bodyR[(size_t)out.sectorOf(v.x, v.y) * NZ + sl];
+        if (r > b) b = r;
+    }
+    // Fill empty bins from the nearest populated slab above, so a sparse row
+    // does not read as "no body" and disable the cap there.
+    for (int s = 0; s < NS; ++s) {
+        float last = -1.0f;
+        for (int z = NZ - 1; z >= 0; --z) {
+            float& b = out.bodyR[(size_t)s * NZ + z];
+            if (b >= 0.0f) last = b;
+            else b = last;
+        }
+    }
+    // Azimuthal smoothing: the bins are coarse and an unsmoothed profile puts a
+    // step every 5.6 degrees, which the cap would print into the silhouette.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<float> sm = out.bodyR;
+        for (int s = 0; s < NS; ++s) {
+            const int l = (s + NS - 1) % NS, r = (s + 1) % NS;
+            for (int z = 0; z < NZ; ++z) {
+                const float c = out.bodyR[(size_t)s * NZ + z];
+                if (c < 0.0f) continue;
+                float acc = 2.0f * c, w = 2.0f;
+                const float a = out.bodyR[(size_t)l * NZ + z];
+                const float b = out.bodyR[(size_t)r * NZ + z];
+                if (a >= 0.0f) { acc += a; w += 1.0f; }
+                if (b >= 0.0f) { acc += b; w += 1.0f; }
+                sm[(size_t)s * NZ + z] = acc / w;
+            }
+        }
+        out.bodyR.swap(sm);
+    }
+    // The plumb line itself: running maximum sweeping downward.
+    out.envR.assign((size_t)NS * NZ, -1.0f);
+    for (int s = 0; s < NS; ++s) {
+        float run = -1.0f;
+        for (int z = NZ - 1; z >= 0; --z) {
+            const size_t k = (size_t)s * NZ + z;
+            if (out.bodyR[k] > run) run = out.bodyR[k];
+            out.envR[k] = run;
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
 struct PathBShellIntegrity {
     int flips = 0;
     int collapsed = 0;
@@ -10204,6 +10338,39 @@ static bool PathBSimV2Solve(
     if (DrapeFlagExists("shell_radial_off.flag")) radialFloors = false;
 #endif
     const bool kRadialFloors = radialFloors;
+    // Plumb ceiling on that floor. Default ON: the floor's outward push past
+    // the body's own plumb line is the inflation behind the thigh, and it is
+    // never physical - see PathBPlumbEnv. shell_plumb_cap_off.flag reverts.
+    bool plumbCapOn = EnvToggle("DRAPE_SHELL_PLUMB_CAP", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("shell_plumb_cap_off.flag")) plumbCapOn = false;
+#endif
+    const bool kPlumbCapOn = plumbCapOn;
+    // How far outside the plumb line fabric may still sit: thickness plus the
+    // folds a real hem carries. Not a fitted constant - anything from 0 to ~1
+    // reads the same on the silhouette; it exists so the cap is not a razor.
+    const float kPlumbSlack = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_PLUMB_SLACK", 0.35f));
+    // Per-iteration pull, unbounded by default. This is a hard geometric bound,
+    // not a force, and stepping it makes it lose: contact re-pushes every
+    // iteration, so a 0.25 step settles at a draw. Measured back bulge on the
+    // live Blacksmith - step 0.25: 1.84, step 1.0: 1.01, unbounded: 0.47,
+    // against 2.85 with no clamp and 0.35 for the vanilla conform.
+    // Stepped like every other correction: the target bound inside contact does
+    // the work now, and this only walks cloth that is ALREADY outside the line
+    // back in, slowly enough for tension to follow it.
+    const float kPlumbStep = std::max(0.01f,
+        EnvFloat("DRAPE_SHELL_PLUMB_STEP", 0.25f));
+    // Body gap under which the clamp keeps its hands off (contact's field), and
+    // the clearance it must leave behind after pulling.
+    const float kPlumbNear = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_PLUMB_NEAR", 1.0f));
+    const float kPlumbKeep = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_PLUMB_KEEP", 0.30f));
+    const bool kPlumbTarget = EnvToggle("DRAPE_SHELL_PLUMB_TARGET", false);
+    const bool kPlumbInSolve = EnvToggle("DRAPE_SHELL_PLUMB_INSOLVE", false);
+    int plumbCapped = 0;
+    float worstPlumbCap = 0.0f;
     std::vector<float> vertHardFloor(n, clearance);
     {
         const float kVertHardF =
@@ -10980,6 +11147,60 @@ static bool PathBSimV2Solve(
         const bool hullOn = EnvFloat("DRAPE_SHELL_HULL", 0.0f) > 0.5f &&
             PathBBuildDrapeHull(bodyVerts, refBody.verts, baseVerts,
                                 authoredGapArr, fixed, clearance, stepHull);
+        // Plumb ceiling for the authored-standoff floor (see PathBPlumbEnv).
+        PathBPlumbEnv plumbEnv;
+        if (kRadialFloors && kPlumbCapOn && shadowCeiling > -1.0e29f)
+            PathBBuildPlumbEnv(bodyVerts, shadowCeiling, plumbEnv);
+        // One-sided silhouette clamp: a free vertex may hang anywhere between
+        // the body and the plumb line, and is pulled radially IN if it is
+        // outside it. It never pushes, so unlike the gravity shadow it cannot
+        // bell the hem or tent between the legs - the failure mode that got the
+        // shadow reverted. Stepped like every other correction here so it
+        // negotiates with tension instead of snapping.
+        auto plumbClamp = [&](std::vector<Vec3>& xs) {
+            if (!plumbEnv.valid) return;
+            for (size_t i = 0; i < n; ++i) {
+                if (invMass[i] <= 0.0f || authoredGapArr[i] < -0.1f) continue;
+                const float env = plumbEnv.envAt(xs[i].x, xs[i].y, xs[i].z);
+                if (env < 0.0f) continue;
+                const float dx = xs[i].x - plumbEnv.cx;
+                const float dy = xs[i].y - plumbEnv.cy;
+                const float r = std::hypot(dx, dy);
+                // A flared skirt is authored wider than the body's plumb line,
+                // and that flare is design, not inflation - Fine Clothes has a
+                // coat panel authored 10.8u off the body. So the bound is the
+                // WIDER of the plumb line and what the artist drew. Without
+                // this the clamp would iron every flared garment onto the body.
+                const float authR = std::hypot(baseVerts[i].x - plumbEnv.cx,
+                                               baseVerts[i].y - plumbEnv.cy);
+                const float lim = std::max(env + kPlumbSlack, authR);
+                if (r <= lim + 1.0e-4f || r < 1.0e-4f) continue;
+                // CONTACT OWNS THE NEAR FIELD. Without this the clamp took the
+                // vampire robe from 3 body penetrations to 285 (-6.66 deep): it
+                // is a silhouette rule, and pulling on cloth that is already
+                // against the body just fights contact and loses control of it.
+                // Only cloth hanging clear is the silhouette's business.
+                float gNow = 0.0f;
+                if (!BVHSignedGap(body, xs[i], gNow, nullptr) ||
+                    gNow < kPlumbNear)
+                    continue;
+                const float pull = std::min(r - lim, kPlumbStep);
+                const float inv = 1.0f / r;
+                Vec3 cand = xs[i];
+                cand.x -= dx * inv * pull;
+                cand.y -= dy * inv * pull;
+                // ...and it may never spend body clearance to straighten the
+                // silhouette. A bound that can push cloth into flesh is not a
+                // bound, it is a new defect.
+                float gCand = 0.0f;
+                if (!BVHSignedGap(body, cand, gCand, nullptr) ||
+                    gCand < kPlumbKeep)
+                    continue;
+                xs[i] = cand;
+                ++plumbCapped;
+                worstPlumbCap = std::max(worstPlumbCap, r - lim);
+            }
+        };
 
         // Only validated supports own a body-following target.  A free vertex
         // deliberately keeps its authored position here; its motion may come
@@ -11445,6 +11666,34 @@ static bool PathBSimV2Solve(
                     }
                 }
                 float floor = vertHardFloor[i];
+                // Do not ASK for a standoff that puts the cloth outside the
+                // plumb line. The silhouette clamp below alone only fights this
+                // to a draw (2.85 -> 2.21 measured) because contact re-pushes
+                // every iteration; the two together settle at the line. Convert
+                // the radius bound into a standoff along THIS normal via its
+                // radial component - the same bound, expressed in the units the
+                // constraint actually speaks.
+                if (kPlumbInSolve && plumbEnv.valid &&
+                    authoredGapArr[i] >= -0.1f && floor > clearance) {
+                    const float env = plumbEnv.envAt(cp.x, cp.y, cp.z);
+                    const float rdx = cp.x - plumbEnv.cx;
+                    const float rdy = cp.y - plumbEnv.cy;
+                    const float rcp = std::hypot(rdx, rdy);
+                    if (env >= 0.0f && rcp > 1.0e-4f) {
+                        const float nr = (nrm.x * rdx + nrm.y * rdy) / rcp;
+                        if (nr > 0.05f) {
+                            const float allow =
+                                (env + kPlumbSlack - rcp) / nr;
+                            const float capped = std::max(clearance, allow);
+                            if (capped < floor) {
+                                worstPlumbCap =
+                                    std::max(worstPlumbCap, floor - capped);
+                                floor = capped;
+                                ++plumbCapped;
+                            }
+                        }
+                    }
+                }
                 if (kAuthoredStandoff && anchorTri[i] >= 0 &&
                     authoredGapArr[i] > kStandoffMin) {
                     const Vec3 ap = TriPointBary(body, anchorTri[i],
@@ -11459,6 +11708,46 @@ static bool PathBSimV2Solve(
                 }
                 if (gap >= floor) continue;
                 Vec3 target = Add(cp, Scale(nrm, floor));
+                // Bound the contact TARGET by the plumb line, right here, so the
+                // constraint never asks for a position outside it. The bound was
+                // first written as a separate pass pulling cloth back in, and
+                // that fights contact: stepped it settles at a draw (1.84 of
+                // 2.85 left), unstepped it tears the vampire robe to 28x rest
+                // and the host discards the whole garment. One mechanism,
+                // negotiated inside the same projection, does not fight itself.
+                // Same locality rule the pull pass uses: cloth in real contact
+                // belongs to contact. Bounding the target for hugging cloth too
+                // took the vampire robe to 26.9x rest and cost it publication,
+                // while bounding only free-hanging cloth leaves it at its 7.5x
+                // baseline. The step cap keeps a single bound from yanking a
+                // vertex away from its neighbours in one iteration.
+                // DEFAULT OFF: measured, this tears the vampire robe to 21.9x
+                // rest (publication lost, the user gets plain vanilla) at every
+                // strength tried, including locality-guarded and step-capped,
+                // while contributing almost nothing on the Blacksmith the pull
+                // pass does not already get (1.80 vs 1.84). Kept behind a flag
+                // because the mechanism is right and only its delivery is wrong.
+                if (kPlumbTarget && plumbEnv.valid &&
+                    authoredGapArr[i] >= -0.1f && gap >= kPlumbNear) {
+                    const float env = plumbEnv.envAt(target.x, target.y, target.z);
+                    if (env >= 0.0f) {
+                        const float tdx = target.x - plumbEnv.cx;
+                        const float tdy = target.y - plumbEnv.cy;
+                        const float tr = std::hypot(tdx, tdy);
+                        const float authR =
+                            std::hypot(baseVerts[i].x - plumbEnv.cx,
+                                       baseVerts[i].y - plumbEnv.cy);
+                        const float lim = std::max(env + kPlumbSlack, authR);
+                        if (tr > lim + 1.0e-4f && tr > 1.0e-4f) {
+                            const float back = std::min(tr - lim, kContactStepC);
+                            const float s = (tr - back) / tr;
+                            target.x = plumbEnv.cx + tdx * s;
+                            target.y = plumbEnv.cy + tdy * s;
+                            ++plumbCapped;
+                            worstPlumbCap = std::max(worstPlumbCap, tr - lim);
+                        }
+                    }
+                }
                 // corridor clamp: never push THROUGH the opposite body side
                 // (the old infeasibility). If the full target is inside the
                 // body, bisect toward the current position; if even half-way
@@ -11707,6 +11996,16 @@ static bool PathBSimV2Solve(
                 }
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
+            // DEFAULT OFF. Pulling inside the loop tears the vampire robe to
+            // 21.9x rest at every step size tried (0.25, 0.6, 1.5) and costs it
+            // publication entirely - it enters at 7.5x, so there is no strain
+            // budget here to spend. The same correction is applied after the
+            // solve as a guarded transaction instead, where it can be rejected
+            // rather than shipped broken.
+            if (kPlumbInSolve && plumbEnv.valid) {
+                plumbClamp(x);
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
             // FACE CONTACT IN THE BALANCE (deploy-gate lesson: facePen is the
             // user-visible leak class; the timid post-loop reconciliation let
             // the body poke through triangle interiors in all three shipped
@@ -11826,6 +12125,10 @@ static bool PathBSimV2Solve(
         HLog("path-b-shell: authored-standoff moves=%d worst=%.3fu (anchor = material "
              "point on the reference body, not the nearest point)",
              standoffMoves, worstStandoff);
+    if (kRadialFloors && kPlumbCapOn)
+        HLog("path-b-shell: plumb-cap clamped=%d worst=%.3fu slack=%.2f "
+             "(floor may not push past the vertical from the widest body point above)",
+             plumbCapped, worstPlumbCap, kPlumbSlack);
     HLog("path-b-shell: total iterations=%d (cap %d/step, eps=%.4f)",
          totalIters, kMaxIters, kEps);
     // Drift probes at every post-loop stage, to name the culprit exactly.
@@ -23268,11 +23571,67 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         giveBack(e.b);
                     }
                     if (offenders == 0) break;
+                    // FROZEN-AWARE WELD. The plain average weld is why this
+                    // sweep sometimes failed to converge: giveBack() returns a
+                    // twin to the pre-round pose, then the average drags it
+                    // straight back out, and the next sweep flips the same face
+                    // again. A seam is one material point, so hand the whole
+                    // group back as a unit and freeze it. The frozen set then
+                    // only grows, which makes the sweep monotone and bounded.
+                    // DEFAULT OFF with the rest of this experiment: it converges
+                    // as intended and still ends with more cloth inside the body
+                    // (7 at 1.59 against 5 at 1.24), so it is not free.
+                    if (EnvToggle("DRAPE_SHELL_EVICT_PERSIST", false))
+                    for (const auto& grp : exactSeamGroups) {
+                        if (grp.size() < 2) continue;
+                        bool anyFrozen = false;
+                        for (uint32_t vi : grp)
+                            if (vi < n && frozen[vi]) { anyFrozen = true; break; }
+                        if (!anyFrozen) continue;
+                        for (uint32_t vi : grp) {
+                            if (vi >= n) continue;
+                            if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
+                            next[vi] = finalVerts[vi];
+                        }
+                    }
                     weldSeams(next);
                     ++repairSweeps;
                 }
 
-                if (countFlips(next) > flipsBefore) { ++abandoned; break; }
+                if (countFlips(next) > flipsBefore) {
+                    ++abandoned;
+                    // DEFAULT OFF: persisting through a bad round uses all 16
+                    // rounds and freezes a different set, and measured on the
+                    // live Blacksmith it ends WORSE - 7 vertices left inside at
+                    // 1.59 deep against 5 at 1.24 for stopping early. The extra
+                    // rounds evict cloth that the early stop left alone, and
+                    // pay for it elsewhere. Kept behind a flag: the reasoning
+                    // (one stubborn neighbourhood should not cost every other
+                    // vertex its eviction) still looks right, the delivery does
+                    // not, and the difference is only visible by measuring.
+                    if (!EnvToggle("DRAPE_SHELL_EVICT_PERSIST", false)) break;
+                    // Do NOT give up on the whole garment. Breaking here left
+                    // 13 of 107 vertices buried inside the body on the live
+                    // Blacksmith while the remaining rounds sat unused. Freeze
+                    // the neighbourhood that would not repair and spend a round
+                    // retrying; the frozen set only grows, so this terminates
+                    // and every other vertex still gets evicted.
+                    bool froze = false;
+                    for (const auto& t : *tris) {
+                        if (!faceFlipped(next, t) || faceFlipped(finalVerts, t))
+                            continue;
+                        for (int k = 0; k < 3; ++k) {
+                            const uint16_t vi = t[(size_t)k];
+                            if (vi < n && !frozen[vi]) {
+                                frozen[vi] = 1;
+                                ++frozenCount;
+                                froze = true;
+                            }
+                        }
+                    }
+                    if (!froze) break;   // nothing new to freeze: genuinely stuck
+                    continue;
+                }
                 finalVerts.swap(next);
             }
 
@@ -23291,6 +23650,153 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  shapeName.c_str(), roundsRun, rounds, frozenCount, abandoned,
                  repairSweeps, overStretched, clearance, insideBefore, insideAfter, worstBefore, worstAfter,
                  flipsBefore, countFlips(finalVerts));
+        }
+    }
+
+    // PLUMB SILHOUETTE TRANSACTION (2026-07-28) - the user's #1 and #4.
+    //
+    // He reported the same thing three times: the mesh inflates behind the leg
+    // below mid-thigh, with nothing touching it. Measured on his own live
+    // capture, the back of the skirt sits 2.85u OUTSIDE the vertical dropped
+    // from the butt - the widest thing above it - while the vanilla conform
+    // sits at 0.35. Nothing up there is holding that width.
+    //
+    // Cause: the authored-standoff floor measures the standoff to the NEAREST
+    // point of the morphed body, and behind the thigh that point is the thigh,
+    // which receded. So the floor demands the authored 6u from a feature that
+    // moved away and shoves the panel out past the plumb line.
+    //
+    // Delivery matters as much as the rule. Applying it inside the solve was
+    // tried four ways and all four failed: capping the contact floor moved the
+    // silhouette 0.00 while firing 55342 times (cloth overshoots the floor
+    // anyway); sweeping the plumb from the top of the BODY let the shoulders
+    // define it so it never bound; pulling in-loop tore the vampire robe to
+    // 21.9x rest at every step size, and bounding the contact target tore it to
+    // 26.9x - that garment enters at 7.5x against a host ceiling of 8.0, so
+    // there is no strain budget to spend there at all, and a torn garment is
+    // published as plain vanilla.
+    //
+    // So it runs here, once, as a transaction: build the field, hand it to the
+    // guard, and let it be REJECTED if it cannot be paid for. A silhouette
+    // correction is worth having only when the material can afford it.
+    if (pathBShellAccepted && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
+        !useEdges.empty() && n > 0 && baseVerts.size() == n &&
+        EnvToggle("DRAPE_SHELL_PLUMB_CAP", true)) {
+        float ceiling = -1.0e30f;
+        for (size_t i = 0; i < n && i < drapeMask.size(); ++i)
+            if (drapeMask[i] == DRAPE_CLASS_FREE ||
+                drapeMask[i] == DRAPE_CLASS_TRANSITION)
+                ceiling = std::max(ceiling, baseVerts[i].z);
+        PathBPlumbEnv env;
+        if (ceiling > -1.0e29f &&
+            PathBBuildPlumbEnv(bodyBVH->verts, ceiling, env)) {
+            const float slack = std::max(0.0f,
+                EnvFloat("DRAPE_SHELL_PLUMB_SLACK", 0.35f));
+            // Not `near`: windows.h defines that as a macro.
+            const float nearGap = std::max(0.0f,
+                EnvFloat("DRAPE_SHELL_PLUMB_NEAR", 1.0f));
+            const float keep = std::max(0.0f,
+                EnvFloat("DRAPE_SHELL_PLUMB_KEEP", 0.30f));
+            const float maxMove = std::max(0.05f,
+                EnvFloat("DRAPE_SHELL_PLUMB_MAX_MOVE", 3.0f));
+
+            std::vector<Vec3> field(n, Vec3{0.0f, 0.0f, 0.0f});
+            int seeds = 0;
+            float worst = 0.0f;
+            for (size_t i = 0; i < n; ++i) {
+                if (i >= drapeMask.size() ||
+                    (drapeMask[i] != DRAPE_CLASS_FREE &&
+                     drapeMask[i] != DRAPE_CLASS_TRANSITION))
+                    continue;
+                const float e = env.envAt(finalVerts[i].x, finalVerts[i].y,
+                                          finalVerts[i].z);
+                if (e < 0.0f) continue;
+                const float dx = finalVerts[i].x - env.cx;
+                const float dy = finalVerts[i].y - env.cy;
+                const float r = std::hypot(dx, dy);
+                if (r < 1.0e-4f) continue;
+                // A flared skirt is authored wider than the body's plumb, and
+                // that flare is design: Fine Clothes has a panel authored 10.8u
+                // out. The bound is the WIDER of the plumb and the authored
+                // radius, or this iterates every flared garment flat.
+                const float authR = std::hypot(baseVerts[i].x - env.cx,
+                                               baseVerts[i].y - env.cy);
+                const float lim = std::max(e + slack, authR);
+                if (r <= lim) continue;
+                // Cloth in real contact belongs to contact, not to a silhouette
+                // rule, and the correction may never spend body clearance.
+                float gNow = 0.0f, gCand = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], gNow, nullptr) ||
+                    gNow < nearGap)
+                    continue;
+                const float pull = std::min(r - lim, maxMove);
+                const float inv = 1.0f / r;
+                Vec3 cand = finalVerts[i];
+                cand.x -= dx * inv * pull;
+                cand.y -= dy * inv * pull;
+                if (!BVHSignedGap(*bodyBVH, cand, gCand, nullptr) || gCand < keep)
+                    continue;
+                field[i] = Sub(cand, finalVerts[i]);
+                ++seeds;
+                worst = std::max(worst, r - lim);
+            }
+
+            // Smooth the field over the one-ring before handing it over. A
+            // sparse per-vertex pull distorts the faces around each seed, so
+            // the guard throttles it to alpha 0.25 and the correction arrives
+            // at a quarter strength; a coherent field moves the panel instead
+            // of poking it, and the guard can accept more of it. Same reason
+            // the body eviction smooths its correction.
+            {
+                std::vector<std::vector<uint32_t>> ring(n);
+                for (const EdgeConstraint& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    ring[e.a].push_back(e.b);
+                    ring[e.b].push_back(e.a);
+                }
+                const int rounds = (int)ClampRange(
+                    EnvFloat("DRAPE_SHELL_PLUMB_SMOOTH", 3.0f), 0.0f, 12.0f);
+                for (int rd = 0; rd < rounds; ++rd) {
+                    std::vector<Vec3> next = field;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (ring[i].empty()) continue;
+                        // Only spread ONTO cloth that is itself free and clear;
+                        // a seed must never drag a worn or contacting vertex.
+                        if (i >= drapeMask.size() ||
+                            (drapeMask[i] != DRAPE_CLASS_FREE &&
+                             drapeMask[i] != DRAPE_CLASS_TRANSITION))
+                            continue;
+                        Vec3 acc = Scale(field[i], 2.0f);
+                        float w = 2.0f;
+                        for (uint32_t j : ring[i]) {
+                            acc = Add(acc, field[j]);
+                            w += 1.0f;
+                        }
+                        next[i] = Scale(acc, 1.0f / w);
+                    }
+                    field.swap(next);
+                }
+                // Smoothing can hand a pull to a vertex that would pay for it
+                // in body clearance. Re-check every one of them.
+                for (size_t i = 0; i < n; ++i) {
+                    if (Len2(field[i]) <= 1.0e-12f) continue;
+                    float g = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, Add(finalVerts[i], field[i]),
+                                      g, nullptr) || g < keep)
+                        field[i] = Vec3{0.0f, 0.0f, 0.0f};
+                }
+            }
+
+            GuardedFieldStats gs;
+            const bool accepted = seeds > 0 && ApplyGuardedDisplacementField(
+                finalVerts, baseVerts, useEdges, *tris, exactSeamGroups,
+                field, maxMove, gs, /*allowClothRelaxation=*/true);
+            HLog("path-b-shell: plumb-transaction seeds=%d accepted=%d moved=%d "
+                 "alpha=%.3f max=%.3f worstOutside=%.3f reject(face/edge/cross)=%d/%d/%d",
+                 seeds, accepted ? 1 : 0, accepted ? gs.movedVerts : 0,
+                 accepted ? gs.acceptedAlpha : 0.0f,
+                 accepted ? gs.maxMove : 0.0f, worst,
+                 gs.rejectedFace, gs.rejectedEdge, gs.rejectedCross);
         }
     }
 
