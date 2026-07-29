@@ -10164,6 +10164,15 @@ static void PathBSelfCollide(std::vector<Vec3>& x,
     }
 }
 
+// Set by the caller around a retry. The silhouette clamp is the one rule a
+// garment may not be able to afford, and whether it can is only known after the
+// whole pipeline has run: Thalmor LongSkirt leaves the solve at 2.12x authored
+// rest with the clamp (BETTER than 2.19x without it) and the tail turns that
+// into 8.35x, past the host's 8.0 ceiling, where the garment is discarded and
+// the user sees plain vanilla. So the verdict has to be taken where the verdict
+// exists - after validation - and the retry re-runs the pass without the rule.
+static thread_local bool g_allowPlumbClamp = true;
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -10173,6 +10182,11 @@ static bool PathBSimV2Solve(
     const BodyBVH& morphedBody,
     const std::vector<std::vector<uint32_t>>& exactSeamGroups,
     const std::vector<uint8_t>& sharedMask,
+    // The silhouette clamp is the one rule here the material may not be able to
+    // afford. The caller solves once with it and, if the result would be thrown
+    // out by the host, solves again without it - falling back to the previous
+    // behaviour rather than all the way to the vanilla conform.
+    bool allowPlumbClamp,
     std::vector<Vec3>& out,
     std::string& failReason)
 {
@@ -10356,11 +10370,12 @@ static bool PathBSimV2Solve(
     // iteration, so a 0.25 step settles at a draw. Measured back bulge on the
     // live Blacksmith - step 0.25: 1.84, step 1.0: 1.01, unbounded: 0.47,
     // against 2.85 with no clamp and 0.35 for the vanilla conform.
-    // Stepped like every other correction: the target bound inside contact does
-    // the work now, and this only walks cloth that is ALREADY outside the line
-    // back in, slowly enough for tension to follow it.
+    // Unbounded, because the strain gate below is what makes it safe rather
+    // than a small step. Stepping it makes it lose - contact re-pushes every
+    // iteration, so 0.25 settles at a draw (1.84 of the 2.85 bulge left) while
+    // unbounded reaches 0.44 against the vanilla conform's 0.35.
     const float kPlumbStep = std::max(0.01f,
-        EnvFloat("DRAPE_SHELL_PLUMB_STEP", 0.25f));
+        EnvFloat("DRAPE_SHELL_PLUMB_STEP", 1000.0f));
     // Body gap under which the clamp keeps its hands off (contact's field), and
     // the clearance it must leave behind after pulling.
     const float kPlumbNear = std::max(0.0f,
@@ -10368,7 +10383,31 @@ static bool PathBSimV2Solve(
     const float kPlumbKeep = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_PLUMB_KEEP", 0.30f));
     const bool kPlumbTarget = EnvToggle("DRAPE_SHELL_PLUMB_TARGET", false);
-    const bool kPlumbInSolve = EnvToggle("DRAPE_SHELL_PLUMB_INSOLVE", false);
+    // The silhouette bound has to act INSIDE the solve, where the material can
+    // still redistribute. Applied afterwards it is nearly inert: pulling a
+    // skirt's back inward shortens its circumference, the fabric is already
+    // there, and the guard correctly refuses to compress it - measured 2.85 ->
+    // 2.59 as a post-solve transaction against 2.85 -> 0.44 here.
+    bool plumbInSolve = EnvToggle("DRAPE_SHELL_PLUMB_INSOLVE", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("shell_plumb_insolve_off.flag")) plumbInSolve = false;
+#endif
+    const bool kPlumbInSolve =
+        plumbInSolve && allowPlumbClamp && g_allowPlumbClamp;
+    // Strain the silhouette correction is allowed to reach. Not a fitted
+    // constant: it is the same order as the solve's own tension limit, and its
+    // job is to be BELOW what a garment like the vampire robe already carries
+    // so the rule declines there instead of tearing it.
+    // 1.3, i.e. the correction may spend up to 30% stretch and no more. NOT
+    // fitted: 2.0 removes more of the bulge (0.44 vs 0.85) but costs the
+    // vampire robe 3 -> 11 penetrating vertices, and the values between behave
+    // erratically (1.5 and 1.7 lose its publication outright while 1.3 and 2.0
+    // keep it) because that garment enters at 7.49x against the host's 8.0
+    // ceiling - anything nudges it over. Picking by which value happens to
+    // clear that cliff would be fitting to noise, so take the conservative one
+    // and treat the cliff itself as the next thing to fix.
+    const float kPlumbStrain = std::max(1.0f,
+        EnvFloat("DRAPE_SHELL_PLUMB_STRAIN", 1.3f));
     int plumbCapped = 0;
     float worstPlumbCap = 0.0f;
     std::vector<float> vertHardFloor(n, clearance);
@@ -10913,6 +10952,16 @@ static bool PathBSimV2Solve(
             vertNeighbors[e.b].push_back(e.a);
         }
     }
+    // Incident EDGE indices, for the strain gate on the silhouette clamp. The
+    // neighbour list above is not enough: the gate needs each edge's rest
+    // length, and that changes per morph step under the graded metric.
+    std::vector<std::vector<uint32_t>> vertEdges(n);
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        if (e.a >= n || e.b >= n) continue;
+        vertEdges[e.a].push_back((uint32_t)ei);
+        vertEdges[e.b].push_back((uint32_t)ei);
+    }
     static constexpr int kMorphSteps = 6;
     const int kMaxIters = (int)EnvFloat("DRAPE_SHELL_MAX_ITERS", 600.0f);
     const float kEps = std::max(1.0e-4f, EnvFloat("DRAPE_SHELL_EPS", 0.01f));
@@ -11184,11 +11233,50 @@ static bool PathBSimV2Solve(
                 if (!BVHSignedGap(body, xs[i], gNow, nullptr) ||
                     gNow < kPlumbNear)
                     continue;
-                const float pull = std::min(r - lim, kPlumbStep);
                 const float inv = 1.0f / r;
+                // STRAIN GATE. This is what the whole silhouette correction was
+                // missing, and why the unstepped version fixed the Blacksmith
+                // (2.85 -> 0.47) while tearing the vampire robe to 28x rest.
+                // Pulling a vertex in stretches every edge to a neighbour that
+                // stayed put, and the vampire enters the solve at 7.5x against
+                // the host's 8.0 discard ceiling: it has no strain left to
+                // spend, so the correction must decline there. Take the largest
+                // pull whose incident edges all stay inside the ceiling - and
+                // an edge already over it may not get worse, which is how a
+                // garment with no budget ends up declining every time.
+                float pull = std::min(r - lim, kPlumbStep);
                 Vec3 cand = xs[i];
-                cand.x -= dx * inv * pull;
-                cand.y -= dy * inv * pull;
+                bool ok = false;
+                for (int attempt = 0; attempt < 5 && pull > 1.0e-3f; ++attempt) {
+                    cand = xs[i];
+                    cand.x -= dx * inv * pull;
+                    cand.y -= dy * inv * pull;
+                    ok = true;
+                    for (uint32_t ei : vertEdges[i]) {
+                        const auto& e = edges[ei];
+                        const uint32_t j = (e.a == i) ? e.b : e.a;
+                        // Measure against the AUTHORED rest, not the live one.
+                        // e.rest moves per morph step (graded metric, and for a
+                        // fixed-fixed edge it becomes the distance between the
+                        // anchors), so gating on it means gating on a different
+                        // number than the host uses to discard the garment.
+                        // Thalmor LongSkirt went from publishing at 5.25 to
+                        // being thrown out at 8.35 exactly this way.
+                        const float rest = (ei < baseEdgeRest.size() &&
+                                            baseEdgeRest[ei] > 1.0e-6f)
+                            ? baseEdgeRest[ei] : e.rest;
+                        if (j >= n || rest <= 1.0e-6f) continue;
+                        const float was = Len(Sub(xs[i], xs[j])) / rest;
+                        const float now = Len(Sub(cand, xs[j])) / rest;
+                        if (now > kPlumbStrain && now > was + 1.0e-4f) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) break;
+                    pull *= 0.5f;
+                }
+                if (!ok) continue;
                 // ...and it may never spend body clearance to straighten the
                 // silhouette. A bound that can push cloth into flesh is not a
                 // bound, it is a new defect.
@@ -14311,9 +14399,60 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (baseVerts.size() != n || !tris || tris->empty() ||
             !bodyBVH || !bodyBVH->valid || !g_refBodyBVH.valid) {
             failReason = "missing live topology/body input";
-        } else if (PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
-                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
-                                  drapeMask, shellCandidate, failReason)) {
+        } else if ([&] {
+            // DEGRADATION LADDER FOR THE SILHOUETTE CLAMP. It removes the
+            // inflation the user reported (back bulge 2.85u -> 0.85u on his
+            // Blacksmith) and two of his garments cannot pay for it: the
+            // vampire robe enters at 7.5x authored rest and Thalmor LongSkirt
+            // at 5.3x, against the host's 8.0 discard ceiling. Measured, there
+            // is no clamp strength that satisfies both - 0.5 saves LongSkirt
+            // and destroys the vampire, unbounded does the reverse.
+            //
+            // So do not pick. Solve with the rule; if the result would be
+            // discarded, solve again without it. The fallback is the previous
+            // shipped behaviour, not the vanilla conform, so the worst case is
+            // exactly what he has today and the best case is the fix.
+            if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
+                                 g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                                 drapeMask, /*allowPlumbClamp=*/true,
+                                 shellCandidate, failReason))
+                return false;
+            // OFF by default: the verdict that matters is taken after the whole
+            // pipeline (see g_allowPlumbClamp), and this inner retry only costs
+            // a second full solve to reach the same answer - on the Blacksmith
+            // it fired at 7.37 and kept the clamp anyway. Kept as a knob.
+            const float ceiling = EnvFloat("DRAPE_SHELL_PLUMB_RETRY", 1.0e9f);
+            float worst = 0.0f;
+            for (const auto& e : useEdges) {
+                if (e.a >= shellCandidate.size() || e.b >= shellCandidate.size() ||
+                    e.restLength <= 1.0e-6f)
+                    continue;
+                worst = std::max(worst,
+                    Len(Sub(shellCandidate[e.a], shellCandidate[e.b])) / e.restLength);
+            }
+            if (worst <= ceiling) return true;
+            std::vector<Vec3> retry;
+            std::string retryReason;
+            if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
+                                 g_refBodyBVH, *bodyBVH, exactSeamGroups,
+                                 drapeMask, /*allowPlumbClamp=*/false,
+                                 retry, retryReason))
+                return true;   // keep the first candidate; the gates judge it
+            float retryWorst = 0.0f;
+            for (const auto& e : useEdges) {
+                if (e.a >= retry.size() || e.b >= retry.size() ||
+                    e.restLength <= 1.0e-6f)
+                    continue;
+                retryWorst = std::max(retryWorst,
+                    Len(Sub(retry[e.a], retry[e.b])) / e.restLength);
+            }
+            HLog("path-b-shell: plumb-ladder shape='%s' worstStretch=%.2f > %.2f "
+                 "-> re-solved without the silhouette clamp, worst=%.2f, %s",
+                 shapeName.c_str(), worst, ceiling, retryWorst,
+                 retryWorst < worst ? "kept the retry" : "kept the clamp");
+            if (retryWorst < worst) shellCandidate.swap(retry);
+            return true;
+        }()) {
             candidateFinite = shellCandidate.size() == productionEntry.size();
             for (const Vec3& p : shellCandidate) {
                 if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
@@ -23494,6 +23633,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // repair: repair the neighbourhood that failed, never roll back the
             // garment.
             std::vector<uint8_t> frozen(n, 0);
+            // Persisting through a bad round measured WORSE on its own (7
+            // vertices left inside at 1.59 against 5 at 1.24) and is what pays
+            // for the silhouette clamp: the clamp pulls cloth toward the body,
+            // and only an eviction that spends all its rounds gets it back out
+            // (6 at 0.47 together). Neither is worth shipping alone; the pair
+            // is. shell_evict_persist_off.flag reverts.
+            bool evictPersist = EnvToggle("DRAPE_SHELL_EVICT_PERSIST", true);
+#if !defined(DRAPE_HARNESS_BUILD)
+            if (DrapeFlagExists("shell_evict_persist_off.flag"))
+                evictPersist = false;
+#endif
             int roundsRun = 0, frozenCount = 0, abandoned = 0, repairSweeps = 0,
                 overStretched = 0;
 
@@ -23581,7 +23731,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // DEFAULT OFF with the rest of this experiment: it converges
                     // as intended and still ends with more cloth inside the body
                     // (7 at 1.59 against 5 at 1.24), so it is not free.
-                    if (EnvToggle("DRAPE_SHELL_EVICT_PERSIST", false))
+                    if (evictPersist)
                     for (const auto& grp : exactSeamGroups) {
                         if (grp.size() < 2) continue;
                         bool anyFrozen = false;
@@ -23609,7 +23759,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // (one stubborn neighbourhood should not cost every other
                     // vertex its eviction) still looks right, the delivery does
                     // not, and the difference is only visible by measuring.
-                    if (!EnvToggle("DRAPE_SHELL_EVICT_PERSIST", false)) break;
+                    if (!evictPersist) break;
                     // Do NOT give up on the whole garment. Breaking here left
                     // 13 of 107 vertices buried inside the body on the live
                     // Blacksmith while the remaining rounds sat unused. Freeze
@@ -24732,9 +24882,47 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
     // a rejection shows up in the corpus instead of in his session. Report only -
     // the legacy candidate-only replay behaviour is unchanged, so goldens hold.
     {
-        const SolveValidation v = ValidateSolveOutput(
+        SolveValidation v = ValidateSolveOutput(
             cap.baseVerts, out.solvedVerts,
             cap.edges.empty() ? nullptr : &cap.edges);
+        // Silhouette-clamp ladder: losing publication means the user sees the
+        // plain vanilla conform, which is strictly worse than this rule not
+        // running. Re-solve without it and keep whichever result survives.
+        if (out.passOk && !v.ok && g_allowPlumbClamp &&
+            EnvToggle("DRAPE_SHELL_PLUMB_LADDER", true)) {
+            g_allowPlumbClamp = false;
+            StaticSolveStats retryStats;
+            std::vector<Vec3> retryVerts, retryCollider;
+            TargetDataDiffs retryDiff;
+            const bool retryOk = ApplyStaticClothPass(
+                cap.shapeName, cap.sliderName, replayPreset, cap.baseVerts,
+                cap.profiles.empty() ? nullptr : &cap.profiles,
+                cap.edges.empty() ? nullptr : &cap.edges,
+                cap.tris.empty() ? nullptr : &cap.tris,
+                cap.hasBodyShell ? &cap.bodyShell : nullptr,
+                bodyBVH.valid ? &bodyBVH : nullptr, cap.presetMask, cap.rawDiff,
+                cap.outerColliders.empty() ? nullptr : &cap.outerColliders,
+                cap.innerColliders.empty() ? nullptr : &cap.innerColliders,
+                &retryVerts, &retryCollider, retryDiff, retryStats);
+            g_allowPlumbClamp = true;
+            if (retryVerts.empty() && retryOk)
+                retryVerts = SolvedVertsFromDiff(cap.baseVerts, retryDiff);
+            const SolveValidation rv = ValidateSolveOutput(
+                cap.baseVerts, retryVerts,
+                cap.edges.empty() ? nullptr : &cap.edges);
+            HLog("path-b-shell: plumb-ladder shape='%s' clamp rejected (%s, %.2f) "
+                 "-> without it %s (%.2f)", cap.shapeName.c_str(), v.reason,
+                 v.worstStretch, rv.ok ? "PUBLISHES" : "still rejected",
+                 rv.worstStretch);
+            if (retryOk && rv.ok) {
+                out.passOk = retryOk;
+                out.solvedVerts.swap(retryVerts);
+                out.colliderVerts.swap(retryCollider);
+                out.solvedDiff.swap(retryDiff);
+                stats = retryStats;
+                v = rv;
+            }
+        }
         out.wouldPublish = out.passOk && v.ok;
         out.validationStretch = v.worstStretch;
         out.validationReason = v.ok ? (out.passOk ? "ok" : "solve failed") : v.reason;
@@ -26050,6 +26238,44 @@ static void Detour_GenResult(
             // simply don't call HostSetResultDiff below - vanilla stays untouched.
             if (passOk) {
                 SolveValidation validation = ValidateSolveOutput(vertsIt->second, solvedVerts, edges);
+                // Before giving the garment up to vanilla, drop the one rule it
+                // might not be able to afford and try again. Measured live on
+                // Thalmor LongSkirt: with the silhouette clamp it validates at
+                // 8.35 and is discarded; without it, 5.25 and it publishes.
+                // Falling back to the previous behaviour beats falling back to
+                // no Smart Conform at all.
+                if (!validation.ok && g_allowPlumbClamp &&
+                    EnvToggle("DRAPE_SHELL_PLUMB_LADDER", true)) {
+                    g_allowPlumbClamp = false;
+                    StaticSolveStats retryStats;
+                    std::vector<Vec3> retryVerts, retryCollider;
+                    TargetDataDiffs retryDiff;
+                    const bool retryOk = ApplyStaticClothPass(
+                        *shapeName, *sliderName, preset, vertsIt->second,
+                        profiles, edges, tris, bodyShell, bodyBVH, presetMask,
+                        rawDiff,
+                        outerColliders.empty() ? nullptr : &outerColliders,
+                        innerColliders.empty() ? nullptr : &innerColliders,
+                        &retryVerts, &retryCollider, retryDiff, retryStats);
+                    g_allowPlumbClamp = true;
+                    SolveValidation retryValidation = retryOk
+                        ? ValidateSolveOutput(vertsIt->second, retryVerts, edges)
+                        : SolveValidation{};
+                    HLog("path-b-shell: plumb-ladder shape='%s' clamp rejected "
+                         "(%s, %.2f) -> without it %s (%.2f)",
+                         shapeName->c_str(), validation.reason,
+                         validation.worstStretch,
+                         (retryOk && retryValidation.ok) ? "PUBLISHES"
+                                                         : "still rejected",
+                         retryValidation.worstStretch);
+                    if (retryOk && retryValidation.ok) {
+                        solvedVerts.swap(retryVerts);
+                        colliderVerts.swap(retryCollider);
+                        solvedDiff.swap(retryDiff);
+                        stats = retryStats;
+                        validation = retryValidation;
+                    }
+                }
                 if (!validation.ok) {
                     HLog("SOLVE REJECTED: shape='%s' slider='%s' preset='%s' reason='%s' "
                          "nanCount=%d worstStretch=%.2f maxDisplacement=%.2f - "
