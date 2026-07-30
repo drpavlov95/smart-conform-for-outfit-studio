@@ -12693,9 +12693,28 @@ static void PathBDumpLiveFinal(const std::vector<Vec3>& verts,
 // plumb 6.63 - matching the user's hand-sculpt at 6.73 - while the published
 // result is 7.62 (production 7.90), with the tail moving the cloak 3.25u on
 // average. So the physics works and something downstream undoes it.
+// The dump alone is not enough to find the pass that puts cloth INSIDE the body,
+// because reading the .obj back needs a distance-to-body of its own, and an
+// offline nearest-VERTEX approximation is not the same measurement the gate uses:
+// it misses face-interior penetration entirely. Measured 2026-07-29, the offline
+// approximation called a configuration 32 verts at -0.50 that the harness's BVH
+// scored -2.19 - so a whole afternoon of stage analysis can point at the wrong
+// pass. When the BVH is available, the exact number is logged here instead.
 static void DrapeDumpStage(const std::vector<Vec3>& verts, const char* stage,
-                           const std::string& shape) {
+                           const std::string& shape,
+                           const BodyBVH* body = nullptr) {
     if (EnvFloat("DRAPE_STAGE_DUMP", 0.0f) <= 0.5f) return;
+    if (body && body->valid) {
+        int pen = 0;
+        float worst = 0.0f;
+        for (const Vec3& v : verts) {
+            float g = 0.0f;
+            if (!BVHSignedGap(*body, v, g, nullptr)) continue;
+            if (g < 0.0f) { ++pen; worst = std::min(worst, g); }
+        }
+        HLog("detour: stage-pen shape='%s' stage='%s' pen=%d worst=%.3f",
+             shape.c_str(), stage, pen, worst);
+    }
     const char* t = getenv("TEMP");
     if (!t) return;
     std::string path = std::string(t) + "/drape_stage_" + stage + "__" +
@@ -19082,7 +19101,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (totalMoved > 0)
             HLog("detour: final-selfcollision-tuck shape='%s' stage='%s' moved=%d",
                  shapeName.c_str(), stageLabel ? stageLabel : "", totalMoved);
-            DrapeDumpStage(finalVerts, "06_selfcol_tuck", shapeName);
+            DrapeDumpStage(finalVerts, "06_selfcol_tuck", shapeName, bodyBVH);
         return totalMoved;
     };
 
@@ -19104,7 +19123,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // and tubular meshes. Cap against the vanilla-conformed support lengths so body
     // morph expansion is allowed, while solver-created tears are not.
     applyFinalSupportCap(64, "final-stretch-cap");
-    DrapeDumpStage(finalVerts, "04_stretch_cap", shapeName);
+    DrapeDumpStage(finalVerts, "04_stretch_cap", shapeName, bodyBVH);
     // Final body clearance runs after the support cap because the cap can pull
     // a vertex slightly back into the body. Keep it deliberately limited: this
     // is a last-line penetration nudge, not another body-shaping pass.
@@ -19125,7 +19144,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (finalBodyAdjusted > 0)
             HLog("detour: final-body-clearance shape='%s' adjusted=%d",
                  shapeName.c_str(), finalBodyAdjusted);
-            DrapeDumpStage(finalVerts, "05_body_clearance", shapeName);
+            DrapeDumpStage(finalVerts, "05_body_clearance", shapeName, bodyBVH);
     }
     tracePathBTail("12-cap-clear");
     if (finalInnerLayerClearance)
@@ -19134,9 +19153,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
     logProxSeamState("before-final-prox-cap");
     applyFinalProxSeamCap(24, "final-prox-seam-cap");
-    DrapeDumpStage(finalVerts, "06b_prox_seam_cap", shapeName);
+    DrapeDumpStage(finalVerts, "06b_prox_seam_cap", shapeName, bodyBVH);
     applyFinalSupportCap(12, "post-prox-stretch-cap");
-    DrapeDumpStage(finalVerts, "07_post_prox_cap", shapeName);
+    DrapeDumpStage(finalVerts, "07_post_prox_cap", shapeName, bodyBVH);
     applyFinalSeamVectorPairs(8, "post-prox-boundary-seam-vector");
     applyFinalProxSeamCap(10, "final-prox-seam-polish");
     int finalExactMoved = applyFinalExactSeamWeld("final-exact-seam-weld");
@@ -20559,7 +20578,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 applyFinalProxSeamCap(6, "post-pit-prox-cap");
             HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu chords=%zu seamGroups=%zu gapMin=%.2f iters=%d",
                  shapeName.c_str(), nElig, n, nPit, nChord, seamGroups.size(), gapMin, effIters);
-            DrapeDumpStage(finalVerts, "01_panel_flatten", shapeName);
+            DrapeDumpStage(finalVerts, "01_panel_flatten", shapeName, bodyBVH);
         }
     }
 
@@ -21099,7 +21118,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (hemMoved > 0)
                     HLog("detour: hem-smooth shape='%s' hangVerts=%d moved=%d iters=%d cap=%.2f",
                          shapeName.c_str(), nHang, hemMoved, kHemIters, kHemCap);
-            DrapeDumpStage(finalVerts, "02_hem_smooth", shapeName);
+            DrapeDumpStage(finalVerts, "02_hem_smooth", shapeName, bodyBVH);
             }
         }
     }
@@ -22343,7 +22362,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("detour: anti-clip-safe-floor shape='%s' clr=%.2f first=%d units=%d verts=%d rejectFace=%d rejectEdge=%d rejectCross=%d step=%.2f",
                  shapeName.c_str(), kFinalFloorClear, floored, acceptedUnits,
                  acceptedVerts, rejectedFace, rejectedEdge, rejectedCross, maxStep);
-            DrapeDumpStage(finalVerts, "03_anticlip", shapeName);
+            DrapeDumpStage(finalVerts, "03_anticlip", shapeName, bodyBVH);
         }
     }
     };
@@ -23792,7 +23811,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
                 if (g < 0.0f) { ++insideAfter; worstAfter = std::max(worstAfter, -g); }
             }
-            DrapeDumpStage(finalVerts, "08_body_evict", shapeName);
+            DrapeDumpStage(finalVerts, "08_body_evict", shapeName, bodyBVH);
             HLog("path-b-shell: body-evict shape='%s' rounds=%d/%d frozen=%d "
                  "abandoned=%d repairs=%d overStretch=%d clearance=%.3f inside %d->%d "
                  "worst %.3f->%.3f "
@@ -23982,7 +24001,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              shapeName.c_str(), restored, worst);
     }
 
-    DrapeDumpStage(finalVerts, "09_final", shapeName);
+    DrapeDumpStage(finalVerts, "09_final", shapeName, bodyBVH);
 
     // ONE REPORT PER SHAPE (2026-07-24). The user's verdict on the universal
     // build was "terrible and extremely inconsistent - some outfits acceptable,
