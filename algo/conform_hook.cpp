@@ -8464,6 +8464,7 @@ struct PathBPlumbEnv {
     float cx = 0.0f, cy = 0.0f;
     std::vector<float> bodyR;   // local body radius per (sector, slab)
     std::vector<float> envR;    // same, swept downward: the plumb line
+
     inline int sectorOf(float x, float y) const {
         const float a = std::atan2(y - cy, x - cx);
         int s = (int)std::floor((a + 3.14159265f) / (2.0f * 3.14159265f) * sectors);
@@ -8482,103 +8483,7 @@ struct PathBPlumbEnv {
         if (sl < 0 || sl >= slabs) return -1.0f;
         return envR[(size_t)sectorOf(x, y) * slabs + sl];
     }
-    // The plumb line of the body the garment was AUTHORED against. Subtracting
-    // this from an authored radius is what turns a width that belongs to one
-    // body into a design allowance that survives any morph.
-    inline float refEnvAt(float x, float y, float z) const {
-        if (!valid || refEnvR.empty()) return -1.0f;
-        const int sl = slabOf(z);
-        if (sl < 0 || sl >= slabs) return -1.0f;
-        return refEnvR[(size_t)sectorOf(x, y) * slabs + sl];
-    }
-    std::vector<float> refEnvR;   // plumb line of the body it was authored on
 };
-
-// One body's radial profile on a fixed grid: bin max, gap fill, azimuthal
-// smoothing, then the downward running maximum that IS the plumb line, then
-// z-smoothing with the local body restored as a floor.
-//
-// A BOUND MUST BE AT LEAST AS SMOOTH AS THE CLOTH IT BOUNDS. The slabs are one
-// unit tall and each takes the MAX of whatever vertices land in it, so the raw
-// profile carries sampling steps that have nothing to do with the body's shape -
-// and a step in the bound gets printed into the silhouette.
-static void PathBPlumbProfile(const std::vector<Vec3>& verts, float ceiling,
-                              float cx, float cy, float zMin, int NS, int NZ,
-                              std::vector<float>& bodyR,
-                              std::vector<float>& envR) {
-    const float kPi = 3.14159265f;
-    auto sectorOf = [&](float x, float y) {
-        const float a = std::atan2(y - cy, x - cx);
-        int s = (int)std::floor((a + kPi) / (2.0f * kPi) * NS);
-        return s < 0 ? 0 : (s >= NS ? NS - 1 : s);
-    };
-    bodyR.assign((size_t)NS * NZ, -1.0f);
-    // MAX radius per bin, not min: the plumb line is dropped from the widest
-    // point, so an under-estimate here would let the bound clamp legitimate
-    // standoff and pull cloth back onto the body.
-    for (const Vec3& v : verts) {
-        if (v.z > ceiling) continue;
-        const int sl = (int)std::floor(v.z - zMin);
-        if (sl < 0 || sl >= NZ) continue;
-        const float r = std::hypot(v.x - cx, v.y - cy);
-        float& b = bodyR[(size_t)sectorOf(v.x, v.y) * NZ + sl];
-        if (r > b) b = r;
-    }
-    // Fill empty bins from the nearest populated slab above, so a sparse row
-    // does not read as "no body" and disable the bound there.
-    for (int s = 0; s < NS; ++s) {
-        float last = -1.0f;
-        for (int z = NZ - 1; z >= 0; --z) {
-            float& b = bodyR[(size_t)s * NZ + z];
-            if (b >= 0.0f) last = b; else b = last;
-        }
-    }
-    // Azimuthal smoothing: the bins are coarse and an unsmoothed profile puts a
-    // step every 5.6 degrees, which the bound would print into the silhouette.
-    for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> sm = bodyR;
-        for (int s = 0; s < NS; ++s) {
-            const int l = (s + NS - 1) % NS, r = (s + 1) % NS;
-            for (int z = 0; z < NZ; ++z) {
-                const float c = bodyR[(size_t)s * NZ + z];
-                if (c < 0.0f) continue;
-                float acc = 2.0f * c, w = 2.0f;
-                const float a = bodyR[(size_t)l * NZ + z];
-                const float b = bodyR[(size_t)r * NZ + z];
-                if (a >= 0.0f) { acc += a; w += 1.0f; }
-                if (b >= 0.0f) { acc += b; w += 1.0f; }
-                sm[(size_t)s * NZ + z] = acc / w;
-            }
-        }
-        bodyR.swap(sm);
-    }
-    // The plumb line itself: running maximum sweeping downward.
-    envR.assign((size_t)NS * NZ, -1.0f);
-    for (int s = 0; s < NS; ++s) {
-        float run = -1.0f;
-        for (int z = NZ - 1; z >= 0; --z) {
-            const size_t k = (size_t)s * NZ + z;
-            if (bodyR[k] > run) run = bodyR[k];
-            envR[k] = run;
-        }
-    }
-    for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> sm = envR;
-        for (int s = 0; s < NS; ++s) {
-            for (int z = 1; z < NZ - 1; ++z) {
-                const size_t k = (size_t)s * NZ + z;
-                const float a = envR[k - 1], c = envR[k], b = envR[k + 1];
-                if (a < 0.0f || b < 0.0f || c < 0.0f) continue;
-                sm[k] = 0.25f * a + 0.5f * c + 0.25f * b;
-            }
-        }
-        envR.swap(sm);
-    }
-    // The result may never sit inside the local body radius, or the bound would
-    // be pulling cloth into flesh.
-    for (size_t k = 0; k < envR.size(); ++k)
-        if (bodyR[k] > envR[k]) envR[k] = bodyR[k];
-}
 
 // `ceiling` is the top of the garment's hanging region, and it is not optional.
 // Without it the downward sweep starts at the crown of the head, so the
@@ -8586,13 +8491,9 @@ static void PathBPlumbProfile(const std::vector<Vec3>& verts, float ceiling,
 // for the whole skirt and the cap never binds. Measured: it fired 38721 times
 // and moved the silhouette by 0.00. Body above the support is not holding this
 // cloth up, so it must not define what holds it out either.
-//
-// `refBodyVerts` is the body the garment was AUTHORED against, and it is what
-// makes any authored width usable after a morph - see refEnvAt.
 static bool PathBBuildPlumbEnv(const std::vector<Vec3>& bodyVerts,
                                float ceiling,
-                               PathBPlumbEnv& out,
-                               const std::vector<Vec3>* refBodyVerts = nullptr) {
+                               PathBPlumbEnv& out) {
     out = PathBPlumbEnv{};
     if (bodyVerts.size() < 16) return false;
     double sx = 0.0, sy = 0.0;
@@ -8610,35 +8511,57 @@ static bool PathBBuildPlumbEnv(const std::vector<Vec3>& bodyVerts,
     if (out.slabs <= 2 || out.slabs > 1024) return false;
 
     const int NS = out.sectors, NZ = out.slabs;
-    PathBPlumbProfile(bodyVerts, ceiling, out.cx, out.cy, out.zMin, NS, NZ,
-                      out.bodyR, out.envR);
-
-    // THE AUTHORED WIDTH IS A DIFFERENCE, NOT A RADIUS (2026-07-29). This is the
-    // same conceptual error the contact floor made and that DRAPE_SHELL_BODY_PUSH
-    // already fixed once, mirrored. "Never wider than the artist drew it" is
-    // only true with the body STANDING STILL: when the hips grow three units, a
-    // skirt hanging off those hips is legitimately three units wider at every
-    // height below them, and none of that is inflation.
-    //
-    // Stated in absolute authored radius the bound demanded that every garment
-    // return to the width it had on a body that no longer exists. Measured on
-    // his live yarl Clothes: 98% of the skirt's vertices pulled, mean 2.99u,
-    // worst 8.70u - the bound was not correcting a silhouette, it was relocating
-    // the whole skirt, and the per-vertex scatter around that 3u is what he saw
-    // as "jagged/amarrotado".
-    //
-    // So the reference body's own plumb line is kept, and the design is read as
-    // the DIFFERENCE between the two (see extraAt). Body stands still -> the
-    // allowance is the authored flare and nothing more. Body grows -> the flare
-    // rides outward on the morphed plumb it is added to, with no separate growth
-    // term to get wrong. Grid-based, so unlike a nearest-point measurement it
-    // cannot swap features under the garment.
-    if (refBodyVerts && refBodyVerts->size() >= 16) {
-        std::vector<float> refBody;
-        PathBPlumbProfile(*refBodyVerts, ceiling, out.cx, out.cy, out.zMin,
-                          NS, NZ, refBody, out.refEnvR);
+    out.bodyR.assign((size_t)NS * NZ, -1.0f);
+    // MAX radius per bin, not min: the plumb line is dropped from the widest
+    // point, so an under-estimate here would let the cap clamp legitimate
+    // standoff and pull cloth back onto the body.
+    for (const Vec3& v : bodyVerts) {
+        if (v.z > ceiling) continue;
+        const int sl = out.slabOf(v.z);
+        if (sl < 0 || sl >= NZ) continue;
+        const float r = std::hypot(v.x - out.cx, v.y - out.cy);
+        float& b = out.bodyR[(size_t)out.sectorOf(v.x, v.y) * NZ + sl];
+        if (r > b) b = r;
     }
-
+    // Fill empty bins from the nearest populated slab above, so a sparse row
+    // does not read as "no body" and disable the cap there.
+    for (int s = 0; s < NS; ++s) {
+        float last = -1.0f;
+        for (int z = NZ - 1; z >= 0; --z) {
+            float& b = out.bodyR[(size_t)s * NZ + z];
+            if (b >= 0.0f) last = b;
+            else b = last;
+        }
+    }
+    // Azimuthal smoothing: the bins are coarse and an unsmoothed profile puts a
+    // step every 5.6 degrees, which the cap would print into the silhouette.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<float> sm = out.bodyR;
+        for (int s = 0; s < NS; ++s) {
+            const int l = (s + NS - 1) % NS, r = (s + 1) % NS;
+            for (int z = 0; z < NZ; ++z) {
+                const float c = out.bodyR[(size_t)s * NZ + z];
+                if (c < 0.0f) continue;
+                float acc = 2.0f * c, w = 2.0f;
+                const float a = out.bodyR[(size_t)l * NZ + z];
+                const float b = out.bodyR[(size_t)r * NZ + z];
+                if (a >= 0.0f) { acc += a; w += 1.0f; }
+                if (b >= 0.0f) { acc += b; w += 1.0f; }
+                sm[(size_t)s * NZ + z] = acc / w;
+            }
+        }
+        out.bodyR.swap(sm);
+    }
+    // The plumb line itself: running maximum sweeping downward.
+    out.envR.assign((size_t)NS * NZ, -1.0f);
+    for (int s = 0; s < NS; ++s) {
+        float run = -1.0f;
+        for (int z = NZ - 1; z >= 0; --z) {
+            const size_t k = (size_t)s * NZ + z;
+            if (out.bodyR[k] > run) run = out.bodyR[k];
+            out.envR[k] = run;
+        }
+    }
     out.valid = true;
     return true;
 }
@@ -10459,16 +10382,6 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_PLUMB_NEAR", 1.0f));
     const float kPlumbKeep = std::max(0.0f,
         EnvFloat("DRAPE_SHELL_PLUMB_KEEP", 0.30f));
-    // Distance ABOVE kPlumbNear over which the bound would take up its authority
-    // gradually, so that two neighbours either side of the threshold are not
-    // treated completely differently. DEFAULT 0 (no ramp): it reads like the
-    // gentler handover and measures worse - the live Blacksmith goes from -0.80
-    // to -2.19 of worst penetration depth with it on, at every compliance from
-    // 0.03 to 3. Weakening the bound just outside the contact field leaves that
-    // cloth behind while the cloth further out is still pulled, and the shear
-    // between them drags near-body vertices in. Kept as an axis, off.
-    const float kPlumbBand = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_PLUMB_BAND", 0.0f));
     const bool kPlumbTarget = EnvToggle("DRAPE_SHELL_PLUMB_TARGET", false);
     // The silhouette bound has to act INSIDE the solve, where the material can
     // still redistribute. Applied afterwards it is nearly inert: pulling a
@@ -10481,76 +10394,20 @@ static bool PathBSimV2Solve(
 #endif
     const bool kPlumbInSolve =
         plumbInSolve && allowPlumbClamp && g_allowPlumbClamp;
-    // COMPLIANCE OF THE SILHOUETTE RULE. One number that says what the plumb
-    // line is worth when it disagrees with tension and bending, and it replaces
-    // the binary strain gate this correction used to carry.
-    //
-    // The gate was 1.3x authored rest, and picking its value was already an
-    // admission that something was wrong: 2.0 removed more bulge but cost the
-    // vampire robe 3 -> 11 penetrating vertices, while 1.5 and 1.7 lost its
-    // publication outright and 1.3 and 2.0 kept it. A knob whose neighbours
-    // behave that differently is not measuring anything - it was fitting to
-    // which side of the host's 8.0 discard ceiling that garment happened to
-    // land on. Compliance has no cliff: a garment with no strain budget now
-    // declines by degrees, in the same sweep as every other constraint, instead
-    // of by verdict.
-    //
-    // 1.0, i.e. the SAME ORDER AS THE VERTEX MASS, which is the only scale at
-    // which this knob does anything. Swept 1e-6..1e-3 first and it was inert to
-    // four decimal places, for the obvious reason: the XPBD step is
-    // -C/(w + alpha) with w around 1, so any alpha far below 1 leaves a rigid
-    // projection wearing a Lagrange multiplier.
-    //
-    // At the real scale it is a clean monotone trade and the only one there is -
-    // crumple and back-bulge are one knob, which the contact floor already found
-    // out once ("inflation and hugging are the same button"). On the live yarl
-    // Clothes, mean pull 3.55 -> 0.96 and neighbour contrast 0.523 -> 0.158 as
-    // alpha goes 1e-4 -> 1, while the Blacksmith's back bulge goes 0.79 -> 2.07.
-    //
-    // 1e-4, i.e. effectively rigid, and that is DELIBERATE - see the trade below
-    // before touching it.
-    //
-    // A softer value was shipped for one build and he caught it immediately:
-    // "continua ruim", with the yarl skirt ballooning into a lampshade. The
-    // renders had looked cleaner at 0.3, but they looked cleaner because the
-    // rule had stopped acting. Measured on the live yarl skirt, excess radius
-    // beyond the plumb line: authored -1.32, host's own conform 2.74, rule off
-    // 3.92, alpha=0.3 3.50, alpha=1e-4 2.27. Softening trades the crumple for
-    // the balloon, one for one, and the balloon is the one his eye rejects.
-    //
-    //   alpha   balloon (mean excess)   crumple (neighbour contrast)
-    //   1e-4    2.27                    0.386
-    //   0.03    3.25                    0.283
-    //   0.3     3.50                    0.136
-    //
-    // There is no setting that fixes both, because they are one knob - the same
-    // thing the contact floor found out ("inflation and hugging are the same
-    // button"). 1e-4 is the end that does not regress: it holds the silhouette
-    // the previous build had (2.27 against 2.13) while the continuous strain
-    // headroom below takes the crumple from 0.436 to 0.386 (p95 1.45 -> 1.23)
-    // for free.
-    //
-    // Getting BOTH needs the excess gone before this rule ever sees it, not a
-    // better value here.
-    const float kPlumbAlpha = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_PLUMB_COMPLIANCE", 1.0e-4f));
-    // Strain at which the bound has spent all its headroom. Same number the old
-    // binary gate used, now the far end of a continuous scale instead of a
-    // cliff, and no longer something to fit: at 1.3 the correction may spend up
-    // to 30% stretch, tapering to nothing as the fabric approaches it.
+    // Strain the silhouette correction is allowed to reach. Not a fitted
+    // constant: it is the same order as the solve's own tension limit, and its
+    // job is to be BELOW what a garment like the vampire robe already carries
+    // so the rule declines there instead of tearing it.
+    // 1.3, i.e. the correction may spend up to 30% stretch and no more. NOT
+    // fitted: 2.0 removes more of the bulge (0.44 vs 0.85) but costs the
+    // vampire robe 3 -> 11 penetrating vertices, and the values between behave
+    // erratically (1.5 and 1.7 lose its publication outright while 1.3 and 2.0
+    // keep it) because that garment enters at 7.49x against the host's 8.0
+    // ceiling - anything nudges it over. Picking by which value happens to
+    // clear that cliff would be fitting to noise, so take the conservative one
+    // and treat the cliff itself as the next thing to fix.
     const float kPlumbStrain = std::max(1.0f,
         EnvFloat("DRAPE_SHELL_PLUMB_STRAIN", 1.3f));
-    // Spreading the authored radius over the mesh, in one-rings. DEFAULT 0:
-    // measured, it loosens the bound unpredictably rather than just de-jagging
-    // it, and cost the live Blacksmith -0.80 -> -2.19 of worst penetration
-    // depth. Kept as an axis because the reasoning behind it is still sound and
-    // the operator may be the right one on a denser mesh.
-    const int kPlumbSpread = (int)ClampRange(
-        EnvFloat("DRAPE_SHELL_PLUMB_SPREAD", 0.0f), 0.0f, 8.0f);
-    // Scale on the authored width. Ablation axis: at 0 the rule runs at full
-    // strength everywhere and ignores the artist's flare entirely.
-    const float kPlumbAllow = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_PLUMB_ALLOW", 1.0f));
     int plumbCapped = 0;
     float worstPlumbCap = 0.0f;
     std::vector<float> vertHardFloor(n, clearance);
@@ -11095,9 +10952,9 @@ static bool PathBSimV2Solve(
             vertNeighbors[e.b].push_back(e.a);
         }
     }
-    // Incident EDGE indices, for the silhouette bound's strain headroom. The
-    // neighbour list above is not enough: it needs each edge's AUTHORED rest
-    // length, which is the number the host discards a garment on.
+    // Incident EDGE indices, for the strain gate on the silhouette clamp. The
+    // neighbour list above is not enough: the gate needs each edge's rest
+    // length, and that changes per morph step under the graded metric.
     std::vector<std::vector<uint32_t>> vertEdges(n);
     for (size_t ei = 0; ei < edges.size(); ++ei) {
         const auto& e = edges[ei];
@@ -11342,95 +11199,13 @@ static bool PathBSimV2Solve(
         // Plumb ceiling for the authored-standoff floor (see PathBPlumbEnv).
         PathBPlumbEnv plumbEnv;
         if (kRadialFloors && kPlumbCapOn && shadowCeiling > -1.0e29f)
-            PathBBuildPlumbEnv(bodyVerts, shadowCeiling, plumbEnv,
-                               &refBody.verts);
-        // THE AUTHORED RADIUS, SPREAD OVER THE MESH.
-        //
-        // The bound takes the WIDER of the plumb line and what the artist drew,
-        // and the max is the physical statement, not a sum. A skirt hangs at the
-        // greater of its own width and the width of whatever is holding it out:
-        // on a slim body a straight tube stands off the hips, on a heavy body
-        // the hips push the tube out and it hangs plumb from them. Measured on
-        // the live Blacksmith, whose skirt is exactly that straight tube: its
-        // authored back stands 2 to 4 units (p95 10) outside the REFERENCE
-        // body's plumb, so carrying that standoff additively onto the morphed
-        // plumb handed the back 2.36 units of licensed bulge against 0.85 for
-        // the max. The standoff was never design; it was a tube over a slim body.
-        std::vector<float> plumbAuthR;
-        if (plumbEnv.valid) {
-            plumbAuthR.assign(n, -1.0f);
-            for (size_t i = 0; i < n; ++i) {
-                if (invMass[i] <= 0.0f || authoredGapArr[i] < -0.1f) continue;
-                plumbAuthR[i] = kPlumbAllow *
-                    std::hypot(baseVerts[i].x - plumbEnv.cx,
-                               baseVerts[i].y - plumbEnv.cy);
-            }
-            // LIFT THE DIPS, DO NOT SPREAD THE PEAKS. This is the second source
-            // of the crumpling he reported, and it is in the BOUND rather than
-            // in how the bound is enforced. Read strictly per vertex, the
-            // authored radius is jagged: on a pleated skirt the inner fold of a
-            // pleat is authored several units closer in than the outer fold
-            // beside it, so the bound licenses pulling the inner fold in while
-            // leaving the outer one - deepening every authored pleat into a
-            // gash, which is exactly the wedge pattern in his render.
-            //
-            // Each vertex therefore takes the larger of its own authored radius
-            // and its one-ring MEAN. That raises an isolated dip to its
-            // neighbourhood and can lower no one, so no vertex is ever bounded
-            // tighter than the artist drew it AND the bound can no longer carry
-            // a one-vertex step. A one-ring MAX was tried and spreads too far:
-            // on a coarse mesh two rings of it reach most of the way up a skirt.
-            //
-            // Over the MESH, not over a polar grid. An azimuthal envelope was
-            // tried first and is the wrong topology - it leaks a panel's width
-            // sideways into sectors that have nothing to do with it.
-            for (int pass = 0; pass < kPlumbSpread; ++pass) {
-                std::vector<float> lift = plumbAuthR;
-                for (size_t i = 0; i < n; ++i) {
-                    if (plumbAuthR[i] < 0.0f || vertNeighbors[i].empty()) continue;
-                    float acc = 0.0f; int cnt = 0;
-                    for (uint32_t j : vertNeighbors[i])
-                        if (j < n && plumbAuthR[j] >= 0.0f) {
-                            acc += plumbAuthR[j]; ++cnt;
-                        }
-                    if (cnt <= 0) continue;
-                    const float avg = acc / (float)cnt;
-                    if (avg > lift[i]) lift[i] = avg;
-                }
-                plumbAuthR.swap(lift);
-            }
-        }
-        // Multiplier for the silhouette constraint, per morph step like contact.
-        std::vector<float> plumbLambda(n, 0.0f);
-        // One-sided silhouette bound, as a COMPLIANT XPBD CONSTRAINT. A free
-        // vertex may hang anywhere between the body and the plumb line, and is
-        // pulled radially IN if it is outside it. It never pushes, so unlike the
-        // gravity shadow it cannot bell the hem or tent between the legs - the
-        // failure mode that got the shadow reverted.
-        //
-        // WHY XPBD AND NOT A PROJECTION (2026-07-29, root cause of the crumpling
-        // he reported: "está meio jagged/amarrotado ... se é um cloth sim
-        // deveria cair retinho"). This was the last geometric rule in the solver
-        // still written as a hard per-vertex projection guarded by a binary
-        // accept/reject gate, and that shape is what crumples the mesh. A
-        // projection cannot negotiate, so it needs some way to decline - and
-        // declining PER VERTEX means the gate passes on one vertex and fails on
-        // its neighbour, the passing one is moved the entire way, and the
-        // surface gets a one-vertex gash. Measured on his live yarl Clothes: the
-        // clamp alone (body eviction ablated to inert) drove worst magnetism
-        // 1.85 -> 5.26 and tore the back of the skirt into wedges, while every
-        // roughness scalar stayed flat. The eye saw it; the metric did not.
-        //
-        // This is the lesson the contact floor already learned here (see
-        // kContactXPBD): with a Lagrange multiplier an INFEASIBLE bound stops
-        // fighting. Lambda grows, the residual settles at alpha*lambda, and
-        // stretch and bending decide together how much of the correction the
-        // material can actually carry - continuously, and over a neighbourhood
-        // rather than a vertex. That is what keeps the surface smooth, and it is
-        // also what makes the old strain gate and its halving ladder
-        // unnecessary: compliance is how a constraint says "not here".
-        //
-        // Unilateral: lambda >= 0, so this can only ever pull cloth IN.
+            PathBBuildPlumbEnv(bodyVerts, shadowCeiling, plumbEnv);
+        // One-sided silhouette clamp: a free vertex may hang anywhere between
+        // the body and the plumb line, and is pulled radially IN if it is
+        // outside it. It never pushes, so unlike the gravity shadow it cannot
+        // bell the hem or tent between the legs - the failure mode that got the
+        // shadow reverted. Stepped like every other correction here so it
+        // negotiates with tension instead of snapping.
         auto plumbClamp = [&](std::vector<Vec3>& xs) {
             if (!plumbEnv.valid) return;
             for (size_t i = 0; i < n; ++i) {
@@ -11440,117 +11215,76 @@ static bool PathBSimV2Solve(
                 const float dx = xs[i].x - plumbEnv.cx;
                 const float dy = xs[i].y - plumbEnv.cy;
                 const float r = std::hypot(dx, dy);
-                if (r < 1.0e-4f) continue;
                 // A flared skirt is authored wider than the body's plumb line,
                 // and that flare is design, not inflation - Fine Clothes has a
-                // coat panel authored 10.8u off the body - so the bound is the
-                // WIDER of the plumb line and what the artist drew, taken from
-                // the mesh-spread authored radius above.
-                const float aR = plumbAuthR.empty() ? -1.0f : plumbAuthR[i];
-                float lim = env + kPlumbSlack;
-                if (aR > lim) lim = aR;
-                const float C = lim - r;          // violated when negative
-                if (C >= 0.0f) { plumbLambda[i] = 0.0f; continue; }
-                // CONTACT OWNS THE NEAR FIELD - but as a RAMP, not a cliff.
-                // Without any deference at all the bound took the vampire robe
-                // from 3 body penetrations to 285 (-6.66 deep): this is a
-                // silhouette rule, and pulling on cloth already against the body
-                // just fights contact and loses control of it. With a hard
-                // cutoff, though, the deference became a crumple source of its
-                // own, because two neighbours either side of the threshold got
-                // completely different treatment. Fading authority out through
-                // the compliance keeps the handover continuous and still ends at
-                // exactly zero authority on the body.
-                //
-                // The ramp starts AT kPlumbNear and climbs from there. Starting
-                // it at the keep-out distance instead - i.e. giving the bound
-                // partial authority inside the contact field - looked like a
-                // gentler handover and was not: it cost the live Blacksmith 8 ->
-                // 10 penetrating vertices at -2.19 instead of -0.47, in every
-                // compliance from 0.03 to 3, because cloth parked just above the
-                // keep-out line gets pulled onto it and the body then grows into
-                // it on the next morph step. Below kPlumbNear the bound has no
-                // authority at all; the softness is only in how it takes it up.
+                // coat panel authored 10.8u off the body. So the bound is the
+                // WIDER of the plumb line and what the artist drew. Without
+                // this the clamp would iron every flared garment onto the body.
+                const float authR = std::hypot(baseVerts[i].x - plumbEnv.cx,
+                                               baseVerts[i].y - plumbEnv.cy);
+                const float lim = std::max(env + kPlumbSlack, authR);
+                if (r <= lim + 1.0e-4f || r < 1.0e-4f) continue;
+                // CONTACT OWNS THE NEAR FIELD. Without this the clamp took the
+                // vampire robe from 3 body penetrations to 285 (-6.66 deep): it
+                // is a silhouette rule, and pulling on cloth that is already
+                // against the body just fights contact and loses control of it.
+                // Only cloth hanging clear is the silhouette's business.
                 float gNow = 0.0f;
                 if (!BVHSignedGap(body, xs[i], gNow, nullptr) ||
-                    gNow < kPlumbNear) {
-                    plumbLambda[i] = 0.0f;
+                    gNow < kPlumbNear)
                     continue;
-                }
-                float ramp = 1.0f;
-                if (kPlumbBand > 1.0e-3f) {
-                    const float t = ClampRange(
-                        (gNow - kPlumbNear) / kPlumbBand, 0.0f, 1.0f);
-                    ramp = t * t * (3.0f - 2.0f * t);   // smoothstep
-                }
-                if (ramp <= 1.0e-4f) { plumbLambda[i] = 0.0f; continue; }
-                // STRAIN HEADROOM, AS A SCALE AND NOT A VERDICT.
-                //
-                // The rule this replaces was a binary gate: reject the pull
-                // outright if any incident edge would pass 1.3x its authored
-                // rest, otherwise halve and retry five times. Deleting it
-                // altogether was tried on the theory that compliance would take
-                // over, and the measurement says it does not - the live Fine
-                // Clothes body went 1 -> 5 penetrating vertices at -4.58, and
-                // ThalmorRobesF went from clean to 14. The gate was carrying
-                // something real: a garment already near its tension limit
-                // cannot afford this correction, and pulling anyway drags its
-                // neighbours into the body.
-                //
-                // What was wrong with it was its SHAPE, not its existence.
-                // Per-vertex accept/reject is precisely how a bound acquires a
-                // one-vertex step: the verdict flips between two neighbours, one
-                // moves the whole way and the other not at all, and the surface
-                // gets the gash he described. Strain itself varies smoothly over
-                // a mesh, so used as a SCALE it declines exactly where the gate
-                // declined, by degrees, and the crumple has nowhere to come from.
-                float headroom = 1.0f;
-                for (uint32_t ei : vertEdges[i]) {
-                    const auto& e = edges[ei];
-                    const uint32_t j = (e.a == i) ? e.b : e.a;
-                    // The AUTHORED rest, not the live one. e.rest moves per
-                    // morph step under the graded metric, so measuring against
-                    // it means measuring a different number than the host uses
-                    // to throw the garment out - which cost the Thalmor
-                    // LongSkirt its publication once already (solve read 2.12x
-                    // while the host saw 8.35x).
-                    const float rest = (ei < baseEdgeRest.size() &&
-                                        baseEdgeRest[ei] > 1.0e-6f)
-                        ? baseEdgeRest[ei] : e.rest;
-                    if (j >= n || rest <= 1.0e-6f) continue;
-                    const float s = Len(Sub(xs[i], xs[j])) / rest;
-                    const float h = (kPlumbStrain - s) / kPlumbStrain;
-                    if (h < headroom) headroom = h;
-                }
-                headroom = ClampRange(headroom, 0.0f, 1.0f);
-                if (headroom <= 1.0e-4f) { plumbLambda[i] = 0.0f; continue; }
-                ramp *= headroom * headroom * (3.0f - 2.0f * headroom);
-                const float w = invMass[i];
-                const float alpha = kPlumbAlpha / ramp;
-                const float denom = w + alpha;
-                if (denom <= 1.0e-30f) continue;
-                float dl = (-C - alpha * plumbLambda[i]) / denom;
-                const float projected = std::max(plumbLambda[i] + dl, 0.0f);
-                dl = projected - plumbLambda[i];
-                plumbLambda[i] = projected;
-                float move = w * dl;
-                if (move <= 1.0e-6f) continue;
-                if (move > kPlumbStep) move = kPlumbStep;
-                // IT MAY NEVER SPEND BODY CLEARANCE TO STRAIGHTEN A SILHOUETTE.
-                // A bound that can push cloth into flesh is not a bound, it is a
-                // new defect - removing this cost 8 -> 10 penetrating vertices
-                // on the live Blacksmith and took the worst depth from -0.47 to
-                // -2.18. It is a CAP on the step, not a veto on the constraint:
-                // an inward radial move can close the body gap by at most its
-                // own length, so the move is limited to the clearance actually
-                // available. Rejecting the whole move instead is what made two
-                // neighbouring vertices get opposite treatment.
-                const float room = gNow - kPlumbKeep;
-                if (move > room) move = room;
-                if (move <= 1.0e-6f) continue;
                 const float inv = 1.0f / r;
-                xs[i].x -= dx * inv * move;
-                xs[i].y -= dy * inv * move;
+                // STRAIN GATE. This is what the whole silhouette correction was
+                // missing, and why the unstepped version fixed the Blacksmith
+                // (2.85 -> 0.47) while tearing the vampire robe to 28x rest.
+                // Pulling a vertex in stretches every edge to a neighbour that
+                // stayed put, and the vampire enters the solve at 7.5x against
+                // the host's 8.0 discard ceiling: it has no strain left to
+                // spend, so the correction must decline there. Take the largest
+                // pull whose incident edges all stay inside the ceiling - and
+                // an edge already over it may not get worse, which is how a
+                // garment with no budget ends up declining every time.
+                float pull = std::min(r - lim, kPlumbStep);
+                Vec3 cand = xs[i];
+                bool ok = false;
+                for (int attempt = 0; attempt < 5 && pull > 1.0e-3f; ++attempt) {
+                    cand = xs[i];
+                    cand.x -= dx * inv * pull;
+                    cand.y -= dy * inv * pull;
+                    ok = true;
+                    for (uint32_t ei : vertEdges[i]) {
+                        const auto& e = edges[ei];
+                        const uint32_t j = (e.a == i) ? e.b : e.a;
+                        // Measure against the AUTHORED rest, not the live one.
+                        // e.rest moves per morph step (graded metric, and for a
+                        // fixed-fixed edge it becomes the distance between the
+                        // anchors), so gating on it means gating on a different
+                        // number than the host uses to discard the garment.
+                        // Thalmor LongSkirt went from publishing at 5.25 to
+                        // being thrown out at 8.35 exactly this way.
+                        const float rest = (ei < baseEdgeRest.size() &&
+                                            baseEdgeRest[ei] > 1.0e-6f)
+                            ? baseEdgeRest[ei] : e.rest;
+                        if (j >= n || rest <= 1.0e-6f) continue;
+                        const float was = Len(Sub(xs[i], xs[j])) / rest;
+                        const float now = Len(Sub(cand, xs[j])) / rest;
+                        if (now > kPlumbStrain && now > was + 1.0e-4f) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) break;
+                    pull *= 0.5f;
+                }
+                if (!ok) continue;
+                // ...and it may never spend body clearance to straighten the
+                // silhouette. A bound that can push cloth into flesh is not a
+                // bound, it is a new defect.
+                float gCand = 0.0f;
+                if (!BVHSignedGap(body, cand, gCand, nullptr) ||
+                    gCand < kPlumbKeep)
+                    continue;
+                xs[i] = cand;
                 ++plumbCapped;
                 worstPlumbCap = std::max(worstPlumbCap, r - lim);
             }
