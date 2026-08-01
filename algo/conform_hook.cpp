@@ -10256,6 +10256,19 @@ static bool PathBSimV2Solve(
         EnvFloat("DRAPE_SHELL_FLOOR_CAP", 1.0e9f));
     std::vector<float> authoredGapArr(n, 0.0f);
     std::vector<float> contactFloor(n, clearance);
+    // HANGING cloth, by the classifier the rest of the solver already uses.
+    // The two authored-standoff rules below (this floor, and the body push) are
+    // measured to act ONLY on this class anyway - on his live captures, removing
+    // them moves hanging cloth from 2.10 to 0.79 units off the body on the
+    // vampire and 1.92 to 0.67 on the yarl, while worn cloth does not move at
+    // all (0.29 -> 0.28 and 0.25 -> 0.25) because it is pinned to the conform.
+    // So naming the class costs nothing and makes the rule say what it does.
+    std::vector<uint8_t> hangingVert(n, 0);
+    // Fabric thickness for hanging cloth: the standoff it keeps from the body
+    // when the authored-gap MEMORY is not used. 0 = keep the authored memory
+    // (previous behaviour exactly).
+    const float kHangFloor = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_HANG_FLOOR", 0.0f));
     // MATERIAL ANCHOR (2026-07-27). Which PIECE of the body the artist placed
     // this vertex against, as a triangle plus barycentric coordinates on the
     // REFERENCE body. The reference and morphed bodies share topology, so the
@@ -10305,6 +10318,40 @@ static bool PathBSimV2Solve(
         // error without giving up the rule: cloth still may not be sucked in,
         // it just cannot be shoved out past the cap.
         contactFloor[i] = std::max(std::min(authoredGap, kFloorCap), clearance);
+        // ...BUT THE AUTHORED GAP IS A MEMORY OF A BODY THAT NO LONGER EXISTS.
+        //
+        // It is the right floor for cloth the artist drew ON the body: a bodice
+        // put 0.4 off the skin should stay 0.4 off. It is the wrong floor for
+        // cloth that HANGS. A skirt drawn 3.5 units clear of slim hips is not
+        // saying "always be 3.5 clear" - it is hanging vertically, and 3.5 is
+        // only where those hips happened to be. Replay that number on a heavy
+        // body and the skirt inflates by it: on his live yarl skirt the excess
+        // beyond the plumb line is 2.27 with this memory and -0.64 without,
+        // against -1.32 for the authored mesh. That balloon is in turn what
+        // forces the plumb rule to pull hard enough to crumple the mesh, so both
+        // things he reported come from this one line.
+        //
+        // What the memory CANNOT simply be deleted for is the margin it gives
+        // the contact solve: at floor 0.02 the same hanging cloth settles 0.79
+        // off the body instead of 2.10, and the tail passes eat that. So the
+        // replacement is a fabric thickness - a physical constant, the same on
+        // every garment because every garment's cloth has one - and it is a
+        // FLOOR, not the cap that the old kVertHardF was.
+        hangingVert[i] = useSharedMask
+            ? (sharedMask[i] == DRAPE_CLASS_FREE ? 1 : 0)
+            : (authoredGap >= kAttachHi ? 1 : 0);
+        //
+        // FLAT, not min(thickness, authoredGap). Clamping the ask to what the
+        // artist drew reads like the safer rule - it is feasible by
+        // construction, since the authored pose is a witness that the distance
+        // can be held - and it measures worse across the corpus: it gives back
+        // the three garments that reach ZERO penetration under the flat floor
+        // (Fine Clothes Body 0 -> 1 at -0.92, both underwear pieces 0 -> 0 but
+        // Blacksmith -0.19 -> -0.39) in exchange for two fewer vampire verts.
+        // The authored gap is exactly the memory this rule exists to stop using;
+        // letting it back in through a min() brings its problems with it.
+        if (kHangFloor > 0.0f && hangingVert[i])
+            contactFloor[i] = std::max(kHangFloor, clearance);
     }
     // FEASIBILITY (review 2026-07-17): the radial floor against the nearest
     // point of the WHOLE body is provably infeasible in pinch corridors (a
@@ -11728,7 +11775,16 @@ static bool PathBSimV2Solve(
                 // immune to the tangent-plane error that broke the anchor-
                 // distance form, because displacements are compared, not
                 // distances.
-                if (kBodyPush && anchorTri[i] >= 0 && invMass[i] > 0.0f) {
+                // ...and it is gated off HANGING cloth for the same reason the
+                // floor above is. The body push copies the displacement of the
+                // body point the vertex was authored against, which is exactly
+                // right for a worn garment being carried outward by the flesh
+                // under it, and wrong for a skirt: below the hip the cloth hangs
+                // plumb, so pushing it out by the hip's growth at every height
+                // is the same balloon in a second form. Only meaningful when the
+                // hanging floor above is providing the standoff instead.
+                if (kBodyPush && anchorTri[i] >= 0 && invMass[i] > 0.0f &&
+                    !(kHangFloor > 0.0f && hangingVert[i])) {
                     const auto& bt = body.tris[(size_t)anchorTri[i]];
                     const auto& rt3 = refBody.tris[(size_t)anchorTri[i]];
                     const Vec3 apNow = TriPointBary(body, anchorTri[i],
@@ -23709,21 +23765,55 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
                 weldSeams(next);
 
-                // Local flip repair, ITERATED: a face that inverted gives its
-                // three vertices back to the pre-round pose and freezes them.
-                // One sweep is not enough - handing a vertex back can invert a
-                // neighbouring face, and the re-weld moves seam twins again. A
-                // single sweep left 5 of 6 garments abandoning at round 1-3.
-                // Each sweep freezes strictly more vertices and returns them to
-                // the last accepted pose, so this converges (in the limit the
-                // round is fully undone) instead of costing every other vertex
-                // its eviction.
+                // Local flip repair, ITERATED: a face that inverted hands its
+                // three vertices back toward the pre-round pose. One sweep is
+                // not enough - handing a vertex back can invert a neighbouring
+                // face, and the re-weld moves seam twins again.
+                //
+                // RETREAT, DO NOT ABANDON (2026-07-29). This used to snap the
+                // three vertices all the way back and freeze them out of the
+                // pass for good, and that binary is the single largest source of
+                // instability in the whole pipeline - which matters more than it
+                // sounds, because eviction is the ONLY tail pass whose result
+                // reaches the user (it takes the Blacksmith from 98 penetrating
+                // vertices to 8, the vampire from 89 to 5).
+                //
+                // Measured, changing one standoff constant by 0.15 units on the
+                // live Fine Clothes body:
+                //   K=1.50  frozen=12  inside 54 -> 0   worst 6.96 -> 0.00
+                //   K=1.65  frozen=17  inside 51 -> 8   worst 6.84 -> 4.82
+                // Same input to within 3 vertices, same 16 rounds, overStretch=0
+                // and abandoned=0 in both. FIVE more vertices tripped the flip
+                // veto, and because the deepest-buried vertex is exactly the one
+                // whose eviction most distorts its neighbourhood, the ones lost
+                // are the ones that mattered. A razor-thin geometric accident
+                // decides between a clean garment and one with cloth five units
+                // inside the body - and no amount of tuning above this can be
+                // trusted while that is true.
+                //
+                // So a vertex that inverts a face keeps HALF of its correction,
+                // then a quarter, and so on. The scale only ever decreases, so
+                // the sweep is still monotone and bounded, and after enough
+                // halvings it reaches the old behaviour anyway - but a vertex
+                // that only needed to back off a little keeps the rest of its
+                // eviction instead of losing all of it. Same lesson as the
+                // silhouette bound earlier today: clip the correction, never veto
+                // it, because a per-vertex verdict is what makes a result depend
+                // on luck.
+                const std::vector<Vec3> proposed = next;
+                std::vector<float> retreat(n, 1.0f);
                 for (int fix = 0; fix < 24; ++fix) {
                     int offenders = 0;
                     auto giveBack = [&](uint32_t vi) {
                         if (vi >= n) return;
-                        if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
-                        next[vi] = finalVerts[vi];
+                        retreat[vi] *= 0.5f;
+                        if (retreat[vi] < 1.0e-3f) {
+                            retreat[vi] = 0.0f;
+                            if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
+                        }
+                        next[vi] = Add(finalVerts[vi],
+                                       Scale(Sub(proposed[vi], finalVerts[vi]),
+                                             retreat[vi]));
                     };
                     for (const auto& t : *tris) {
                         if (!faceFlipped(next, t) || faceFlipped(finalVerts, t)) continue;
@@ -23760,6 +23850,13 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         for (uint32_t vi : grp) {
                             if (vi >= n) continue;
                             if (!frozen[vi]) { frozen[vi] = 1; ++frozenCount; }
+                            // Kept as a full hand-back, not a retreat: a seam is
+                            // ONE material point, so its members must land on one
+                            // position or the weld below simply averages them
+                            // back apart. Zero the scale too, or a later sweep
+                            // would restore part of the proposal for this member
+                            // alone and split the seam again.
+                            retreat[vi] = 0.0f;
                             next[vi] = finalVerts[vi];
                         }
                     }
