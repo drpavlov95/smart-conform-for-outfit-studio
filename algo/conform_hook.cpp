@@ -100,13 +100,23 @@ static fs::path TempDrapePath(const std::string& fileName) {
     return fs::path(path) / fileName;
 }
 
+// GAINED AN ARGUMENT IN 5.8.2: a trailing `const std::string& resultTargetName`.
+// Declared here with the WIDER signature and always forwarded, which is correct
+// for both hosts under the x64 convention: the CALLER owns the argument space,
+// so handing an 11th argument to the 10-argument 5.6.3 build is simply ignored
+// by it, while the 5.8.2 build receives the one it needs. The reverse -
+// declaring ten and being called by a host that passes eleven - is what would
+// misread the stack, so the wide form is the safe default rather than a
+// per-version switch. On 5.6.3 the extra pointer we receive is meaningless and
+// is never dereferenced; it is only handed straight back.
 typedef void (*PfnGenResult)(
     void* self,
     const std::string* shapeName,
     const std::string* sliderName,
     const std::string* refDataName,
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
-    bool axisX, bool axisY, bool axisZ);
+    bool axisX, bool axisY, bool axisZ,
+    const std::string* resultTargetName);
 
 // DiffDataSets::ZeroVertDiff(set, target, vertSet, mask) Ã¢â‚¬â€ scales each diff
 // vertex by mask[vert]; erases verts with weight 0 or absent from mask.
@@ -137,6 +147,21 @@ typedef void (*PfnSetResultDiff)(
 
 static PfnGenResult        g_origGenResult     = nullptr;
 static PfnDiffZeroVert     g_diffZeroVert      = nullptr;
+
+// Which OutfitStudio release we attached to, resolved once at install time from
+// the exe size. Null until then, and null means the hook is not running - so the
+// accessors below fall back to the oldest supported layout rather than reading a
+// null pointer if anything ever calls them early.
+static const drape_off::HostBuild* g_hostBuild = nullptr;
+
+static inline uintptr_t DrapeSrcDiffOffset() {
+    return g_hostBuild ? g_hostBuild->srcDiffDataPtrOffset
+                       : drape_off::kHostBuilds[0].srcDiffDataPtrOffset;
+}
+static inline uintptr_t DrapeResultDiffOffset() {
+    return g_hostBuild ? g_hostBuild->resultDiffDataOffset
+                       : drape_off::kHostBuilds[0].resultDiffDataOffset;
+}
 static PfnDiffGetDiffSet   g_diffGetDiffSet    = nullptr;
 static PfnGetRawResultDiff g_getRawResultDiff  = nullptr;
 static PfnSetResultDiff    g_setResultDiff     = nullptr;
@@ -2643,7 +2668,7 @@ static bool HostCopySourceDiff(void* self,
 #if defined(_MSC_VER)
     __try {
         void* srcDiffData = *reinterpret_cast<void**>(
-            reinterpret_cast<char*>(self) + drape_off::kSrcDiffDataPtrOffset);
+            reinterpret_cast<char*>(self) + DrapeSrcDiffOffset());
         if (!srcDiffData)
             return false;
 
@@ -2664,7 +2689,7 @@ static bool HostCopySourceDiff(void* self,
     }
 #else
     void* srcDiffData = *reinterpret_cast<void**>(
-        reinterpret_cast<char*>(self) + drape_off::kSrcDiffDataPtrOffset);
+        reinterpret_cast<char*>(self) + DrapeSrcDiffOffset());
     if (!srcDiffData)
         return false;
     TargetDataDiffs* hostDiff = g_diffGetDiffSet(srcDiffData, refDataName);
@@ -26054,7 +26079,8 @@ static void Detour_GenResult(
     const std::string* sliderName,
     const std::string* refDataName,
     bool transformResults, int maxResults, bool noSqueeze, bool solidMode,
-    bool axisX, bool axisY, bool axisZ)
+    bool axisX, bool axisY, bool axisZ,
+    const std::string* resultTargetName)
 {
     const bool smartCandidate =
         g_enabled.load(std::memory_order_acquire) && g_diffZeroVert &&
@@ -26067,7 +26093,7 @@ static void Detour_GenResult(
     // 1) Let the vanilla conform compute the selected slider's result diff.
     g_origGenResult(self, shapeName, sliderName, refDataName,
                     transformResults, maxResults, noSqueeze, solidMode,
-                    axisX, axisY, axisZ);
+                    axisX, axisY, axisZ, resultTargetName);
 
     if (!smartCandidate) {
         return;
@@ -26112,7 +26138,7 @@ static void Detour_GenResult(
     //    Result is keyed by dataName = shapeName + sliderName; build it with our
     //    own CRT (never receive a host-allocated std::string -> no /MT-/MD free).
     std::string setName = *shapeName + *sliderName;
-    void* resultDiffData = reinterpret_cast<char*>(self) + drape_off::kResultDiffDataOffset;
+    void* resultDiffData = reinterpret_cast<char*>(self) + DrapeResultDiffOffset();
     if (kEnableDirectDiffRewrite) {
         static const std::vector<EdgeConstraint> kNoEdges;
         const auto& edges = edgesIt != g_shapeEdges.end() ? edgesIt->second : kNoEdges;
@@ -26574,37 +26600,68 @@ int DrapeInstallConformHook(void* osHwnd, const char* bsDir,
     g_opts.tightDistance = tightDistance;
     g_opts.looseDistance = looseDistance;
 
-    if (!drape_off::Configured()) {
-        HLog("install: offsets not configured for this build Ã¢â‚¬â€ hook disabled");
-        return -2;
-    }
-
-    uint64_t exeSize = CurrentExeSize();
-    if (exeSize != drape_off::kExpectedImageSize) {
-        HLog("install: exe size mismatch (%llu != %llu) -- hook disabled",
-             (unsigned long long)exeSize,
-             (unsigned long long)drape_off::kExpectedImageSize);
+    // Pick the offsets for THIS OutfitStudio, instead of insisting on one
+    // build. An unknown binary is still refused - a stale address is a crash,
+    // not a message - but a known one no longer has to be the single build the
+    // RVAs were first found in. conform_offsets.h documents how to add one.
+    const uint64_t exeSize = CurrentExeSize();
+    const drape_off::HostBuild* hb = drape_off::FindHostBuild(exeSize);
+    if (!hb) {
+        HLog("install: unknown OutfitStudio build (exe %llu bytes) -- hook disabled",
+             (unsigned long long)exeSize);
+        for (const auto& b : drape_off::kHostBuilds)
+            HLog("install:   known: %s (%llu bytes)", b.name,
+                 (unsigned long long)b.imageSize);
         return -6;
     }
+    // The table says these addresses belong to this build; check that they do.
+    // A mismatch means the loaded binary is not the one the entry describes - a
+    // repack, a hotfix that happened to keep the file size, or a mistake of mine
+    // - and refusing is the only safe answer, because the hook would otherwise
+    // redirect execution into the middle of whatever is actually there. These
+    // addresses came from analysis, not from symbols, so they are checked.
+    {
+        const uintptr_t modBase =
+            reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const uintptr_t rvas[5] = {
+            hb->generateResultDiff, hb->diffSetsZeroVertDiff,
+            hb->diffSetsGetDiffSet, hb->automorphGetRawResultDiff,
+            hb->automorphSetResultDiff};
+        for (int f = 0; f < 5; ++f) {
+            bool recorded = false;
+            for (int k = 0; k < drape_off::kPrologueBytes; ++k)
+                if (hb->prologue[f][k]) { recorded = true; break; }
+            if (!recorded) continue;      // build predates the check
+            const uint8_t* live =
+                reinterpret_cast<const uint8_t*>(modBase + rvas[f]);
+            if (memcmp(live, hb->prologue[f], drape_off::kPrologueBytes) != 0) {
+                HLog("install: %s function %d mismatched at rva 0x%llx -- hook "
+                     "disabled (loaded binary is not the recorded build)",
+                     hb->name, f, (unsigned long long)rvas[f]);
+                return -7;
+            }
+        }
+    }
+    g_hostBuild = hb;
 
     uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    HLog("install: module base=0x%p (expected imagebase 0x%llx)",
-         (void*)base, (unsigned long long)drape_off::kImageBase);
+    HLog("install: %s, module base=0x%p (expected imagebase 0x%llx)",
+         hb->name, (void*)base, (unsigned long long)drape_off::kImageBase);
 
-    void* pGen = reinterpret_cast<void*>(base + drape_off::kGenerateResultDiff);
-    g_diffZeroVert = reinterpret_cast<PfnDiffZeroVert>(base + drape_off::kDiffSetsZeroVertDiff);
-    g_diffGetDiffSet = reinterpret_cast<PfnDiffGetDiffSet>(base + drape_off::kDiffSetsGetDiffSet);
+    void* pGen = reinterpret_cast<void*>(base + hb->generateResultDiff);
+    g_diffZeroVert = reinterpret_cast<PfnDiffZeroVert>(base + hb->diffSetsZeroVertDiff);
+    g_diffGetDiffSet = reinterpret_cast<PfnDiffGetDiffSet>(base + hb->diffSetsGetDiffSet);
     g_getRawResultDiff = reinterpret_cast<PfnGetRawResultDiff>(
-        base + drape_off::kAutomorphGetRawResultDiff);
+        base + hb->automorphGetRawResultDiff);
     g_setResultDiff = reinterpret_cast<PfnSetResultDiff>(
-        base + drape_off::kAutomorphSetResultDiff);
+        base + hb->automorphSetResultDiff);
 
     HLog("install: RVAs gen=0x%llx zero=0x%llx getDiff=0x%llx getRaw=0x%llx set=0x%llx",
-         (unsigned long long)drape_off::kGenerateResultDiff,
-         (unsigned long long)drape_off::kDiffSetsZeroVertDiff,
-         (unsigned long long)drape_off::kDiffSetsGetDiffSet,
-         (unsigned long long)drape_off::kAutomorphGetRawResultDiff,
-         (unsigned long long)drape_off::kAutomorphSetResultDiff);
+         (unsigned long long)hb->generateResultDiff,
+         (unsigned long long)hb->diffSetsZeroVertDiff,
+         (unsigned long long)hb->diffSetsGetDiffSet,
+         (unsigned long long)hb->automorphGetRawResultDiff,
+         (unsigned long long)hb->automorphSetResultDiff);
 
     if (MH_Initialize() != MH_OK) { HLog("install: MH_Initialize failed"); return -3; }
     if (MH_CreateHook(pGen, reinterpret_cast<void*>(&Detour_GenResult),
