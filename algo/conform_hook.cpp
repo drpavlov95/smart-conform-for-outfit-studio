@@ -10172,6 +10172,11 @@ static void PathBSelfCollide(std::vector<Vec3>& x,
 // the user sees plain vanilla. So the verdict has to be taken where the verdict
 // exists - after validation - and the retry re-runs the pass without the rule.
 static thread_local bool g_allowPlumbClamp = true;
+// Second rung of the same ladder, for the hanging-cloth standoff floor. See the
+// ladder at the two callers: the rules are dropped most-expensive-first so that
+// the LAST rung is exactly the behaviour that shipped before either existed, and
+// no garment can come out of the ladder worse than it used to.
+static thread_local bool g_allowHangFloor = true;
 
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
@@ -10264,11 +10269,25 @@ static bool PathBSimV2Solve(
     // all (0.29 -> 0.28 and 0.25 -> 0.25) because it is pinned to the conform.
     // So naming the class costs nothing and makes the rule say what it does.
     std::vector<uint8_t> hangingVert(n, 0);
-    // Fabric thickness for hanging cloth: the standoff it keeps from the body
-    // when the authored-gap MEMORY is not used. 0 = keep the authored memory
-    // (previous behaviour exactly).
-    const float kHangFloor = std::max(0.0f,
-        EnvFloat("DRAPE_SHELL_HANG_FLOOR", 0.0f));
+    // Fabric standoff for hanging cloth: what it keeps from the body once the
+    // authored-gap MEMORY is no longer used. 0 = keep the memory, i.e. exactly
+    // the behaviour that shipped before this existed.
+    //
+    // 1.5 is NOT a tuned optimum and must not be treated as one. The balloon it
+    // removes is stable across the whole range - the live yarl skirt sits at
+    // -0.32 to +0.06 of excess beyond the plumb line for every value from 1.2 to
+    // 1.8, against 2.13 with the authored memory and -1.32 for the authored mesh
+    // - but the PENETRATION side of the same sweep has cliffs in it: 1.45 sends
+    // the vampire robe over the publish ceiling and costs the whole garment
+    // (285 penetrating vertices of plain vanilla against 9 of ours), and Fine
+    // Clothes Body scores 0 at 1.50 and 7 at -4.24 at 1.65.
+    //
+    // That is exactly why this is on a LADDER rather than trusted on its own.
+    // The value only has to be good, not lucky: any garment it does not suit
+    // drops to the next rung, which is the previous behaviour.
+    const float kHangFloor = g_allowHangFloor
+        ? std::max(0.0f, EnvFloat("DRAPE_SHELL_HANG_FLOOR", 1.5f))
+        : 0.0f;
     // MATERIAL ANCHOR (2026-07-27). Which PIECE of the body the artist placed
     // this vertex against, as a triangle plus barycentric coordinates on the
     // REFERENCE body. The reference and morphed bodies share topology, so the
@@ -25001,42 +25020,62 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         SolveValidation v = ValidateSolveOutput(
             cap.baseVerts, out.solvedVerts,
             cap.edges.empty() ? nullptr : &cap.edges);
-        // Silhouette-clamp ladder: losing publication means the user sees the
-        // plain vanilla conform, which is strictly worse than this rule not
-        // running. Re-solve without it and keep whichever result survives.
-        if (out.passOk && !v.ok && g_allowPlumbClamp &&
+        // DEGRADATION LADDER. Losing publication means the user sees the plain
+        // vanilla conform, which is strictly worse than any of these rules not
+        // running - so a garment that cannot afford a rule drops it and keeps
+        // the rest instead of losing everything.
+        //
+        // The rungs are ordered most-capable-first and each drops exactly one
+        // more rule, so the LAST rung is precisely the behaviour that shipped
+        // before the hanging floor existed. That is what makes the floor safe to
+        // enable at all: its constant does not have to be lucky, because any
+        // garment it does not suit simply lands on the rung below. Measured, a
+        // 0.05 change in that constant is otherwise enough to cost the vampire
+        // robe its entire publication.
+        if (out.passOk && !v.ok && g_allowPlumbClamp && g_allowHangFloor &&
             EnvToggle("DRAPE_SHELL_PLUMB_LADDER", true)) {
-            g_allowPlumbClamp = false;
-            StaticSolveStats retryStats;
-            std::vector<Vec3> retryVerts, retryCollider;
-            TargetDataDiffs retryDiff;
-            const bool retryOk = ApplyStaticClothPass(
-                cap.shapeName, cap.sliderName, replayPreset, cap.baseVerts,
-                cap.profiles.empty() ? nullptr : &cap.profiles,
-                cap.edges.empty() ? nullptr : &cap.edges,
-                cap.tris.empty() ? nullptr : &cap.tris,
-                cap.hasBodyShell ? &cap.bodyShell : nullptr,
-                bodyBVH.valid ? &bodyBVH : nullptr, cap.presetMask, cap.rawDiff,
-                cap.outerColliders.empty() ? nullptr : &cap.outerColliders,
-                cap.innerColliders.empty() ? nullptr : &cap.innerColliders,
-                &retryVerts, &retryCollider, retryDiff, retryStats);
-            g_allowPlumbClamp = true;
-            if (retryVerts.empty() && retryOk)
-                retryVerts = SolvedVertsFromDiff(cap.baseVerts, retryDiff);
-            const SolveValidation rv = ValidateSolveOutput(
-                cap.baseVerts, retryVerts,
-                cap.edges.empty() ? nullptr : &cap.edges);
-            HLog("path-b-shell: plumb-ladder shape='%s' clamp rejected (%s, %.2f) "
-                 "-> without it %s (%.2f)", cap.shapeName.c_str(), v.reason,
-                 v.worstStretch, rv.ok ? "PUBLISHES" : "still rejected",
-                 rv.worstStretch);
-            if (retryOk && rv.ok) {
-                out.passOk = retryOk;
-                out.solvedVerts.swap(retryVerts);
-                out.colliderVerts.swap(retryCollider);
-                out.solvedDiff.swap(retryDiff);
-                stats = retryStats;
-                v = rv;
+            struct LadderRung { bool hang; bool plumb; const char* label; };
+            static const LadderRung kRungs[2] = {
+                { false, true,  "no hanging floor" },
+                { false, false, "no hanging floor, no plumb clamp" },
+            };
+            for (const LadderRung& rung : kRungs) {
+                g_allowHangFloor = rung.hang;
+                g_allowPlumbClamp = rung.plumb;
+                StaticSolveStats retryStats;
+                std::vector<Vec3> retryVerts, retryCollider;
+                TargetDataDiffs retryDiff;
+                const bool retryOk = ApplyStaticClothPass(
+                    cap.shapeName, cap.sliderName, replayPreset, cap.baseVerts,
+                    cap.profiles.empty() ? nullptr : &cap.profiles,
+                    cap.edges.empty() ? nullptr : &cap.edges,
+                    cap.tris.empty() ? nullptr : &cap.tris,
+                    cap.hasBodyShell ? &cap.bodyShell : nullptr,
+                    bodyBVH.valid ? &bodyBVH : nullptr, cap.presetMask,
+                    cap.rawDiff,
+                    cap.outerColliders.empty() ? nullptr : &cap.outerColliders,
+                    cap.innerColliders.empty() ? nullptr : &cap.innerColliders,
+                    &retryVerts, &retryCollider, retryDiff, retryStats);
+                g_allowHangFloor = true;
+                g_allowPlumbClamp = true;
+                if (retryVerts.empty() && retryOk)
+                    retryVerts = SolvedVertsFromDiff(cap.baseVerts, retryDiff);
+                const SolveValidation rv = ValidateSolveOutput(
+                    cap.baseVerts, retryVerts,
+                    cap.edges.empty() ? nullptr : &cap.edges);
+                HLog("path-b-shell: ladder shape='%s' rejected (%s, %.2f) -> "
+                     "with %s: %s (%.2f)", cap.shapeName.c_str(), v.reason,
+                     v.worstStretch, rung.label,
+                     rv.ok ? "PUBLISHES" : "still rejected", rv.worstStretch);
+                if (retryOk && rv.ok) {
+                    out.passOk = retryOk;
+                    out.solvedVerts.swap(retryVerts);
+                    out.colliderVerts.swap(retryCollider);
+                    out.solvedDiff.swap(retryDiff);
+                    stats = retryStats;
+                    v = rv;
+                    break;
+                }
             }
         }
         out.wouldPublish = out.passOk && v.ok;
@@ -26354,42 +26393,57 @@ static void Detour_GenResult(
             // simply don't call HostSetResultDiff below - vanilla stays untouched.
             if (passOk) {
                 SolveValidation validation = ValidateSolveOutput(vertsIt->second, solvedVerts, edges);
-                // Before giving the garment up to vanilla, drop the one rule it
-                // might not be able to afford and try again. Measured live on
-                // Thalmor LongSkirt: with the silhouette clamp it validates at
-                // 8.35 and is discarded; without it, 5.25 and it publishes.
-                // Falling back to the previous behaviour beats falling back to
-                // no Smart Conform at all.
-                if (!validation.ok && g_allowPlumbClamp &&
+                // Before giving the garment up to vanilla, drop the rules it
+                // might not be able to afford, one at a time, and try again.
+                // Measured live on Thalmor LongSkirt: with the silhouette clamp
+                // it validates at 8.35 and is discarded; without it, 5.25 and it
+                // publishes. Falling back to the previous behaviour beats
+                // falling back to no Smart Conform at all.
+                //
+                // Most-capable rung first, and the LAST rung is exactly the
+                // behaviour that shipped before the hanging floor existed - so
+                // the floor's constant never has to be lucky. See the twin
+                // ladder in the replay path for the measurements.
+                if (!validation.ok && g_allowPlumbClamp && g_allowHangFloor &&
                     EnvToggle("DRAPE_SHELL_PLUMB_LADDER", true)) {
-                    g_allowPlumbClamp = false;
-                    StaticSolveStats retryStats;
-                    std::vector<Vec3> retryVerts, retryCollider;
-                    TargetDataDiffs retryDiff;
-                    const bool retryOk = ApplyStaticClothPass(
-                        *shapeName, *sliderName, preset, vertsIt->second,
-                        profiles, edges, tris, bodyShell, bodyBVH, presetMask,
-                        rawDiff,
-                        outerColliders.empty() ? nullptr : &outerColliders,
-                        innerColliders.empty() ? nullptr : &innerColliders,
-                        &retryVerts, &retryCollider, retryDiff, retryStats);
-                    g_allowPlumbClamp = true;
-                    SolveValidation retryValidation = retryOk
-                        ? ValidateSolveOutput(vertsIt->second, retryVerts, edges)
-                        : SolveValidation{};
-                    HLog("path-b-shell: plumb-ladder shape='%s' clamp rejected "
-                         "(%s, %.2f) -> without it %s (%.2f)",
-                         shapeName->c_str(), validation.reason,
-                         validation.worstStretch,
-                         (retryOk && retryValidation.ok) ? "PUBLISHES"
-                                                         : "still rejected",
-                         retryValidation.worstStretch);
-                    if (retryOk && retryValidation.ok) {
-                        solvedVerts.swap(retryVerts);
-                        colliderVerts.swap(retryCollider);
-                        solvedDiff.swap(retryDiff);
-                        stats = retryStats;
-                        validation = retryValidation;
+                    struct LadderRung { bool hang; bool plumb; const char* label; };
+                    static const LadderRung kRungs[2] = {
+                        { false, true,  "no hanging floor" },
+                        { false, false, "no hanging floor, no plumb clamp" },
+                    };
+                    for (const LadderRung& rung : kRungs) {
+                        g_allowHangFloor = rung.hang;
+                        g_allowPlumbClamp = rung.plumb;
+                        StaticSolveStats retryStats;
+                        std::vector<Vec3> retryVerts, retryCollider;
+                        TargetDataDiffs retryDiff;
+                        const bool retryOk = ApplyStaticClothPass(
+                            *shapeName, *sliderName, preset, vertsIt->second,
+                            profiles, edges, tris, bodyShell, bodyBVH,
+                            presetMask, rawDiff,
+                            outerColliders.empty() ? nullptr : &outerColliders,
+                            innerColliders.empty() ? nullptr : &innerColliders,
+                            &retryVerts, &retryCollider, retryDiff, retryStats);
+                        g_allowHangFloor = true;
+                        g_allowPlumbClamp = true;
+                        SolveValidation retryValidation = retryOk
+                            ? ValidateSolveOutput(vertsIt->second, retryVerts, edges)
+                            : SolveValidation{};
+                        HLog("path-b-shell: ladder shape='%s' rejected (%s, %.2f)"
+                             " -> with %s: %s (%.2f)",
+                             shapeName->c_str(), validation.reason,
+                             validation.worstStretch, rung.label,
+                             (retryOk && retryValidation.ok) ? "PUBLISHES"
+                                                             : "still rejected",
+                             retryValidation.worstStretch);
+                        if (retryOk && retryValidation.ok) {
+                            solvedVerts.swap(retryVerts);
+                            colliderVerts.swap(retryCollider);
+                            solvedDiff.swap(retryDiff);
+                            stats = retryStats;
+                            validation = retryValidation;
+                            break;
+                        }
                     }
                 }
                 if (!validation.ok) {
