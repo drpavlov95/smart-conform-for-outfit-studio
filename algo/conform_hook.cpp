@@ -10021,129 +10021,228 @@ struct PathBUntangleStats {
     float worst = 0.0f;
 };
 
-static void PathBSegmentClosest(const Vec3& p1, const Vec3& p2,
-                                const Vec3& q1, const Vec3& q2,
-                                float& s, float& t)
-{
-    const Vec3 d1 = Sub(p2, p1), d2 = Sub(q2, q1), r = Sub(p1, q1);
-    const float a = Dot(d1, d1), e = Dot(d2, d2), f = Dot(d2, r);
-    if (a <= 1.0e-12f && e <= 1.0e-12f) { s = t = 0.0f; return; }
-    if (a <= 1.0e-12f) { s = 0.0f; t = ClampRange(f / e, 0.0f, 1.0f); return; }
-    const float c = Dot(d1, r);
-    if (e <= 1.0e-12f) { t = 0.0f; s = ClampRange(-c / a, 0.0f, 1.0f); return; }
-    const float b = Dot(d1, d2);
-    const float den = a * e - b * b;
-    s = (den > 1.0e-12f) ? ClampRange((b * f - c * e) / den, 0.0f, 1.0f) : 0.0f;
-    t = (b * s + f) / e;
-    if (t < 0.0f)      { t = 0.0f; s = ClampRange(-c / a, 0.0f, 1.0f); }
-    else if (t > 1.0f) { t = 1.0f; s = ClampRange((b - c) / a, 0.0f, 1.0f); }
-}
-
-static void PathBEdgeUntangle(std::vector<Vec3>& x,
-                              const std::vector<PathBShellEdge>& edges,
-                              const std::vector<float>& invMass,
-                              const BodyBVH& body,
-                              float bodyFloor,
-                              float thickness,
-                              int rounds,
-                              float relax,
-                              PathBUntangleStats& stats)
+// Untangle what actually CROSSES, and nothing else.
+//
+// The first version of this separated every edge pair closer than a thickness.
+// That is a proximity rule, not an untangle, and the log said so: 92802 pairs
+// pushed apart on a mesh with 877 real crossings - a hundred corrections for
+// every defect. All that surplus motion has to go somewhere, and where it went
+// was into the body: the gate came back with Fur BaseArmor 2@-0.07 -> 14@-1.56
+// and ThalmorRobesF 0 -> 21@-1.19. Folds that merely touch are how cloth
+// behaves; treating them as tangles inflates the garment.
+//
+// So the test is the same one the measurement uses: an edge of one triangle
+// passing THROUGH another (Moller-Trumbore). When that happens the correction
+// is not ambiguous either - the offending endpoint went through a known
+// surface, so it comes back out along that surface's normal, to the side its
+// own partner is still on. No axis has to be guessed.
+static void PathBTriUntangle(std::vector<Vec3>& x,
+                             const std::vector<std::array<uint16_t, 3>>& tris,
+                             const std::vector<float>& invMass,
+                             const std::vector<const BodyBVH*>& surfaces,
+                             const std::vector<std::vector<float>>& floors,
+                             float thickness,
+                             int rounds,
+                             float relax,
+                             PathBUntangleStats& stats)
 {
     const size_t n = x.size();
-    if (n == 0 || edges.size() < 2 || thickness <= 0.0f) return;
-    const float cell = std::max(thickness * 2.0f, 1.0e-3f);
-    const float inv = 1.0f / cell;
+    if (n == 0 || tris.size() < 2 || thickness <= 0.0f) return;
     auto hashOf = [](int a, int b, int c) -> uint64_t {
         return ((uint64_t)(uint32_t)a * 73856093ull) ^
                ((uint64_t)(uint32_t)b * 19349663ull) ^
                ((uint64_t)(uint32_t)c * 83492791ull);
     };
+
+    // Cell size from the mesh itself: a grid finer than the triangles turns
+    // every face into a smear of cells, and one coarser than them collapses the
+    // broad phase into a linear scan.
+    double meanSpan = 0.0;
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        const Vec3& a = x[t[0]]; const Vec3& b = x[t[1]]; const Vec3& c = x[t[2]];
+        meanSpan += std::max(std::max(Len(Sub(b, a)), Len(Sub(c, b))), Len(Sub(a, c)));
+    }
+    const float cell = std::max((float)(meanSpan / std::max<size_t>(1, tris.size())), 1.0e-3f);
+    const float inv = 1.0f / cell;
+
+    // Ray/triangle, returning the crossing parameter along the segment.
+    auto segHitsTri = [](const Vec3& o, const Vec3& d,
+                         const Vec3& v0, const Vec3& v1, const Vec3& v2,
+                         float& tOut) -> bool {
+        const Vec3 e1 = Sub(v1, v0), e2 = Sub(v2, v0);
+        const Vec3 p = Cross(d, e2);
+        const float det = Dot(e1, p);
+        if (std::fabs(det) < 1.0e-12f) return false;
+        const float invDet = 1.0f / det;
+        const Vec3 tv = Sub(o, v0);
+        const float u = Dot(tv, p) * invDet;
+        if (u < 0.0f || u > 1.0f) return false;
+        const Vec3 q = Cross(tv, e1);
+        const float v = Dot(d, q) * invDet;
+        if (v < 0.0f || u + v > 1.0f) return false;
+        const float t = Dot(e2, q) * invDet;
+        if (t <= 1.0e-6f || t >= 1.0f - 1.0e-6f) return false;
+        tOut = t;
+        return true;
+    };
+
     for (int r = 0; r < rounds; ++r) {
-        // Rebuilt each round: the whole point is that cloth moves as it frees
-        // itself, and a stale grid re-resolves pairs that are already apart.
+        // Rebuilt each round: cloth moves as it frees itself, and a stale grid
+        // re-resolves pairs that are already apart.
         std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
-        grid.reserve(edges.size() * 2);
-        for (uint32_t ei = 0; ei < (uint32_t)edges.size(); ++ei) {
-            const auto& e = edges[ei];
-            if (e.a >= n || e.b >= n) continue;
-            const Vec3& p1 = x[e.a]; const Vec3& p2 = x[e.b];
-            const int x0 = (int)std::floor((std::min(p1.x, p2.x) - thickness) * inv);
-            const int x1 = (int)std::floor((std::max(p1.x, p2.x) + thickness) * inv);
-            const int y0 = (int)std::floor((std::min(p1.y, p2.y) - thickness) * inv);
-            const int y1 = (int)std::floor((std::max(p1.y, p2.y) + thickness) * inv);
-            const int z0 = (int)std::floor((std::min(p1.z, p2.z) - thickness) * inv);
-            const int z1 = (int)std::floor((std::max(p1.z, p2.z) + thickness) * inv);
+        grid.reserve(tris.size() * 2);
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const Vec3& a = x[t[0]]; const Vec3& b = x[t[1]]; const Vec3& c = x[t[2]];
+            const int x0 = (int)std::floor(std::min(std::min(a.x, b.x), c.x) * inv);
+            const int x1 = (int)std::floor(std::max(std::max(a.x, b.x), c.x) * inv);
+            const int y0 = (int)std::floor(std::min(std::min(a.y, b.y), c.y) * inv);
+            const int y1 = (int)std::floor(std::max(std::max(a.y, b.y), c.y) * inv);
+            const int z0 = (int)std::floor(std::min(std::min(a.z, b.z), c.z) * inv);
+            const int z1 = (int)std::floor(std::max(std::max(a.z, b.z), c.z) * inv);
             if ((int64_t)(x1-x0+1)*(y1-y0+1)*(z1-z0+1) > 256) continue;
             for (int ix = x0; ix <= x1; ++ix)
             for (int iy = y0; iy <= y1; ++iy)
             for (int iz = z0; iz <= z1; ++iz)
-                grid[hashOf(ix, iy, iz)].push_back(ei);
+                grid[hashOf(ix, iy, iz)].push_back(ti);
         }
+
         int fixedThisRound = 0;
-        for (uint32_t ei = 0; ei < (uint32_t)edges.size(); ++ei) {
-            const auto& ea = edges[ei];
-            if (ea.a >= n || ea.b >= n) continue;
-            const int cx = (int)std::floor(x[ea.a].x * inv);
-            const int cy = (int)std::floor(x[ea.a].y * inv);
-            const int cz = (int)std::floor(x[ea.a].z * inv);
+        std::vector<uint32_t> seen;
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti) {
+            const auto& ta = tris[ti];
+            if (ta[0] >= n || ta[1] >= n || ta[2] >= n) continue;
+            const Vec3& a0 = x[ta[0]]; const Vec3& a1 = x[ta[1]]; const Vec3& a2 = x[ta[2]];
+            const int cx = (int)std::floor(((a0.x + a1.x + a2.x) / 3.0f) * inv);
+            const int cy = (int)std::floor(((a0.y + a1.y + a2.y) / 3.0f) * inv);
+            const int cz = (int)std::floor(((a0.z + a1.z + a2.z) / 3.0f) * inv);
+            seen.clear();
             for (int dx = -1; dx <= 1; ++dx)
             for (int dy = -1; dy <= 1; ++dy)
             for (int dz = -1; dz <= 1; ++dz) {
                 auto it = grid.find(hashOf(cx + dx, cy + dy, cz + dz));
                 if (it == grid.end()) continue;
-                for (uint32_t ej : it->second) {
-                    if (ej <= ei) continue;
-                    const auto& eb = edges[ej];
-                    if (eb.a >= n || eb.b >= n) continue;
-                    if (ea.a == eb.a || ea.a == eb.b ||
-                        ea.b == eb.a || ea.b == eb.b) continue;   // neighbours
-                    float s = 0.0f, t = 0.0f;
-                    PathBSegmentClosest(x[ea.a], x[ea.b], x[eb.a], x[eb.b], s, t);
-                    const Vec3 pa = Add(x[ea.a], Scale(Sub(x[ea.b], x[ea.a]), s));
-                    const Vec3 pb = Add(x[eb.a], Scale(Sub(x[eb.b], x[eb.a]), t));
-                    Vec3 dir = Sub(pa, pb);
-                    float dist = Len(dir);
-                    if (dist >= thickness) continue;
-                    if (dist < 1.0e-6f) continue;     // exactly coincident: no axis
-                    if (r == 0) ++stats.pairs;
-                    dir = Scale(dir, 1.0f / dist);
-                    const float need = (thickness - dist) * relax;
-                    const float wa0 = invMass[ea.a] * (1.0f - s) * (1.0f - s);
-                    const float wa1 = invMass[ea.b] * s * s;
-                    const float wb0 = invMass[eb.a] * (1.0f - t) * (1.0f - t);
-                    const float wb1 = invMass[eb.b] * t * t;
-                    const float wsum = wa0 + wa1 + wb0 + wb1;
-                    if (wsum <= 1.0e-12f) continue;
-                    const float lam = need / wsum;
-                    x[ea.a] = Add(x[ea.a], Scale(dir, invMass[ea.a] * (1.0f - s) * lam));
-                    x[ea.b] = Add(x[ea.b], Scale(dir, invMass[ea.b] * s * lam));
-                    x[eb.a] = Sub(x[eb.a], Scale(dir, invMass[eb.a] * (1.0f - t) * lam));
-                    x[eb.b] = Sub(x[eb.b], Scale(dir, invMass[eb.b] * t * lam));
-                    ++stats.resolved;
-                    ++fixedThisRound;
-                    stats.worst = std::max(stats.worst, thickness - dist);
+                for (uint32_t tj : it->second) {
+                    if (tj <= ti) continue;
+                    if (std::find(seen.begin(), seen.end(), tj) != seen.end()) continue;
+                    seen.push_back(tj);
+                    const auto& tb = tris[tj];
+                    if (tb[0] >= n || tb[1] >= n || tb[2] >= n) continue;
+                    bool adjacent = false;         // sharing a vertex is topology
+                    for (int k = 0; k < 3 && !adjacent; ++k)
+                        for (int m = 0; m < 3; ++m)
+                            if (ta[k] == tb[m]) { adjacent = true; break; }
+                    if (adjacent) continue;
+
+                    const Vec3& b0 = x[tb[0]]; const Vec3& b1 = x[tb[1]]; const Vec3& b2 = x[tb[2]];
+                    Vec3 nb = Cross(Sub(b1, b0), Sub(b2, b0));
+                    Vec3 na = Cross(Sub(a1, a0), Sub(a2, a0));
+                    const float lb = Len(nb), la = Len(na);
+                    if (lb < 1.0e-12f || la < 1.0e-12f) continue;
+                    nb = Scale(nb, 1.0f / lb);
+                    na = Scale(na, 1.0f / la);
+
+                    // Six edges, both ways. Whichever crosses names its own fix.
+                    for (int side = 0; side < 2; ++side) {
+                        const uint16_t* eT = side == 0 ? ta.data() : tb.data();
+                        const Vec3& f0 = side == 0 ? b0 : a0;
+                        const Vec3& f1 = side == 0 ? b1 : a1;
+                        const Vec3& f2 = side == 0 ? b2 : a2;
+                        const Vec3& nrm = side == 0 ? nb : na;
+                        const uint16_t* fT = side == 0 ? tb.data() : ta.data();
+                        for (int k = 0; k < 3; ++k) {
+                            const uint16_t ia = eT[k], ib = eT[(k + 1) % 3];
+                            float tHit = 0.0f;
+                            if (!segHitsTri(x[ia], Sub(x[ib], x[ia]), f0, f1, f2, tHit)) continue;
+                            if (r == 0) ++stats.pairs;
+
+                            // Both endpoints straddle the plane. The shallower
+                            // one is the cheaper way back out, and it goes to
+                            // the side its partner is still on.
+                            const float sd0 = Dot(Sub(x[ia], f0), nrm);
+                            const float sd1 = Dot(Sub(x[ib], f0), nrm);
+                            const int off = (std::fabs(sd0) <= std::fabs(sd1)) ? 0 : 1;
+                            const uint16_t vi = off == 0 ? ia : ib;
+                            const float sgn = (off == 0 ? sd1 : sd0) >= 0.0f ? 1.0f : -1.0f;
+                            const float have = (off == 0 ? sd0 : sd1) * sgn;
+                            const float need = (thickness - have) * relax;
+                            if (need <= 0.0f) continue;
+
+                            const Vec3 dir = Scale(nrm, sgn);
+                            const float wv = invMass[vi];
+                            const float wf = invMass[fT[0]] + invMass[fT[1]] + invMass[fT[2]];
+                            const float wsum = wv + wf / 3.0f;
+                            if (wsum <= 1.0e-12f) continue;
+                            const float lam = need / wsum;
+                            x[vi] = Add(x[vi], Scale(dir, wv * lam));
+                            for (int m = 0; m < 3; ++m)
+                                x[fT[m]] = Sub(x[fT[m]], Scale(dir, invMass[fT[m]] * lam / 3.0f));
+                            ++stats.resolved;
+                            ++fixedThisRound;
+                            stats.worst = std::max(stats.worst, need / std::max(relax, 1.0e-6f));
+                        }
+                    }
                 }
             }
         }
         // THE BODY GETS THE LAST WORD, EVERY ROUND.
         //
-        // Separation only knows the axis between two edges, so when two folds
-        // come apart one of them goes inward - and inward is the body. Left
-        // alone this pass frees the cloth from itself and buries it in flesh:
-        // measured, 0 penetrating vertices became 17 at -7.87, and the guard
-        // threw the whole thing away. Alternating separation with a push back
-        // out of the body is what makes the correction affordable at all,
-        // rather than a better separation direction, because no single
-        // direction can satisfy both a fold and the flesh under it.
-        if (body.valid) {
+        // Pushing an edge back out of the cloth it pierced can only aim along
+        // that cloth's normal, and that normal sometimes points at flesh. Left
+        // alone the pass frees the garment from itself and buries it in the
+        // body - measured, 0 penetrating vertices became 17 at -7.87 and the
+        // guard threw the whole thing away. No better direction exists, since
+        // a fold and the flesh beneath it cannot both be satisfied by one axis;
+        // alternating with a push back out is what makes the fix affordable.
+        // A FLAT floor against the body, which is not what you would guess and
+        // is what the gate actually chose. Three richer rules were built and
+        // all three measured WORSE, each for its own reason:
+        //
+        //   contactFloor[i], the solve's own per-vertex clearance   4 refusals
+        //   max(contactFloor[i], 0.15)                              4 refusals
+        //   per-vertex monotonic: never closer than it entered      6 refusals
+        //   flat 0.15                                               3 refusals
+        //
+        // The first two are identical in effect, which is the finding: contact-
+        // Floor is not the sparse authored quantity I assumed but sits above
+        // 0.15 nearly everywhere, and where it asks for more is precisely where
+        // the Blacksmith torso breaks (3@-0.19 -> 4@-0.91). The monotonic rule
+        // fails for the opposite reason - pinning every vertex at its entry
+        // clearance over-constrains the correction, so the cloth pays laterally
+        // instead, straight into the neighbouring piece (yarl garment-against-
+        // garment worst 1.84 -> 5.81). A separation needs somewhere to go.
+        //
+        // Neither half works alone, and both were measured. A flat 0.15 fights
+        // whatever the solver converged to, so widening it to 0.5 bought
+        // vampire_robes_alt (5@-1.80 -> 1@-2.84) and sold the Blacksmith torso
+        // (3@-0.19 -> 4@-1.22) - the signature of a global constant standing in
+        // for a per-vertex quantity that already exists. But contactFloor alone
+        // is worse still (4 refusals), because it is legitimately ZERO across
+        // most of a garment: inheriting it there means no push at all, and the
+        // untangle walks cloth straight into skin. The floor has to be the
+        // larger of the two.
+        //
+        // Measured with BVHSignedGap, deliberately: that is what the guard
+        // downstream scores, and an earlier version pushed with a raw closest-
+        // point sign instead. The two disagree wherever the body is concave, so
+        // the guard accepted a pose the harness then failed - vampire_robes_alt
+        // came back 5@-1.80 -> 8@-2.90. A correction and its acceptance test
+        // have to be the same measurement or the test means nothing.
+        for (size_t si = 0; si < surfaces.size(); ++si) {
+            const BodyBVH* surf = surfaces[si];
+            if (!surf || !surf->valid || si >= floors.size()) continue;
+            const std::vector<float>& fl = floors[si];
             for (size_t i = 0; i < n; ++i) {
                 if (invMass[i] <= 0.0f) continue;
-                Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
-                float d2 = 0.0f;
-                if (!BVHClosestPoint(body, x[i], cp, nrm, d2)) continue;
-                const float gap = Dot(Sub(x[i], cp), nrm);
-                if (gap >= bodyFloor) continue;
-                x[i] = Add(x[i], Scale(nrm, bodyFloor - gap));
+                const float floorV = i < fl.size() ? fl[i] : 0.0f;
+                if (floorV <= -1.0e29f) continue;      // this vertex is exempt
+                float gap = 0.0f;
+                Vec3 nrm{0.0f, 0.0f, 1.0f};
+                if (!BVHSignedGap(*surf, x[i], gap, &nrm)) continue;
+                if (gap >= floorV) continue;
+                x[i] = Add(x[i], Scale(nrm, floorV - gap));
             }
         }
         stats.rounds = r + 1;
@@ -13016,24 +13115,50 @@ static bool PathBSimV2Solve(
             EnvFloat("DRAPE_SHELL_UNTANGLE_ROUNDS", 24.0f), 1.0f, 200.0f);
         const float relax = ClampRange(
             EnvFloat("DRAPE_SHELL_UNTANGLE_RELAX", 0.5f), 0.05f, 1.0f);
-        const float kUntangleFloor = std::max(0.0f,
+        const float kMinFloor = std::max(0.0f,
             EnvFloat("DRAPE_SHELL_UNTANGLE_BODY_FLOOR", 0.15f));
+        // The surface list stays plural even though only the body is in it -
+        // the layers belong here the day one of them measures better, and the
+        // ACCEPTANCE test below already scores them.
+        std::vector<const BodyBVH*> untangleSurfaces{&morphedBody};
+        std::vector<std::vector<float>> untangleFloors(1,
+            std::vector<float>(n, kMinFloor));
         if (thick > 1.0e-4f) {
+            // Score EVERYTHING the gate scores, not just the body.
+            //
+            // The first guard here counted body penetration alone and happily
+            // accepted poses the gate then refused for garment-against-garment
+            // - yarl Clothes 185/1022 -> 189/1062, worst 1.84 -> 3.27. Freeing
+            // cloth from itself pushes it outward, and outward is whatever is
+            // worn over it, so a guard blind to the layers cannot see the price
+            // of its own correction. The inner colliders are already here for
+            // contact; they belong in the acceptance test too.
             auto bodyScore = [&](const std::vector<Vec3>& v) {
                 int pen = 0; float worst = 0.0f;
                 for (size_t i = 0; i < n; ++i) {
                     if (invMass[i] <= 0.0f) continue;
                     float g = 0.0f;
-                    if (!BVHSignedGap(morphedBody, v[i], g, nullptr)) continue;
-                    if (g < 0.0f) { ++pen; worst = std::min(worst, g); }
+                    if (BVHSignedGap(morphedBody, v[i], g, nullptr) && g < 0.0f) {
+                        ++pen; worst = std::min(worst, g);
+                    }
+                    if (!innerColliders) continue;
+                    for (size_t li = 0; li < innerColliders->size(); ++li) {
+                        const BodyBVH& surf = (*innerColliders)[li].Current();
+                        if (!surf.valid) continue;
+                        if (authoredGapArr[i] < -0.1f) continue; // authored-inside
+                        float lg = 0.0f;
+                        if (BVHSignedGap(surf, v[i], lg, nullptr) && lg < 0.0f) {
+                            ++pen; worst = std::min(worst, lg);
+                        }
+                    }
                 }
                 return std::make_pair(pen, worst);
             };
             const std::vector<Vec3> before = x;
             const auto b0 = bodyScore(before);
             PathBUntangleStats us;
-            PathBEdgeUntangle(x, edges, invMass, morphedBody, kUntangleFloor,
-                              thick, rounds, relax, us);
+            PathBTriUntangle(x, tris, invMass, untangleSurfaces, untangleFloors,
+                             thick, rounds, relax, us);
             // Pinned vertices cannot move here by construction - their inverse
             // mass is zero, so every weight in the separation is zero - which is
             // why no re-pin is needed. The weld still runs: separation moves
