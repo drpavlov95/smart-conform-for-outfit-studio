@@ -14594,6 +14594,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     std::unordered_set<uint64_t> seamVectorSeen;
     std::vector<std::vector<uint32_t>> weldGroups;
     std::vector<std::vector<uint32_t>> exactSeamGroups;
+    // COINCIDENT VERTICES ARE A PROPERTY OF THE MESH, NOT OF THE PRESET.
+    //
+    // This was gated on cloth-ish presets, so a belt or an armour piece got an
+    // EMPTY seam group list - and every seam guard downstream that consumes it
+    // was quietly protecting nothing. The pieces that tear worst are exactly
+    // the ones excluded: across the 19 live captures the host conform opens
+    // zero seams and we opened 101, led by the Blacksmith belt at 51 (worst
+    // 4.66u) and the yarl belt at 12. A per-vertex bind resolves twins to
+    // different support triangles, and nothing was in place to notice.
+    //
+    // A seam is two indices at one point. Whether the artist labelled the
+    // garment cloth or a belt has nothing to do with it, and gating a mesh
+    // invariant on a preset is how the invariant stops being one.
+    //
+    // MEASURED, AND RESTORED: building them for everyone is right, but this
+    // list has other consumers, and switching it on wholesale switched THEM on
+    // too for presets that never had them. The corpus named the price on a
+    // skin-tight piece the change was never aiming at - Undies
+    // worstSupportEdgeStretch 1.14 -> 4.90, publishStretch 4.12 -> 5.40 - from
+    // a weld pass that had simply never run there. Some of the drift was good
+    // (bodyPenetrations 607 -> 582, worstBodyGap -1.80 -> -1.51), which is
+    // exactly why it needs separating rather than accepting: I want the DATA
+    // everywhere and the BEHAVIOUR unchanged, and one flag cannot say both.
+    //
+    // So the gate stays until the consumers are separated from the source. The
+    // belt tear is real (101 open seams against the host's 0) and its fix waits
+    // on giving the ARAP a welded mesh, which needs neither this list nor a new
+    // pass on anyone else.
     const bool needsExactSeamWeld =
         params.verletCloth ||
         normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
@@ -20240,6 +20268,41 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (u >= 0.05f && v >= 0.05f && w >= 0.05f &&
                     std::fabs(off) <= kBeltHandleMaxOff) wellCond[i] = 1;  // accurate offset dir
             }
+            // 1b) SEAM TWINS BIND AS ONE.
+            //
+            // The query above runs per vertex, and a seam twin pair occupies the
+            // SAME base position - so the two queries are a tie, broken by BVH
+            // traversal order. They can land on different support triangles,
+            // take different face normals, and receive different targets. The
+            // bind itself then pulls the seam apart, before any cloth physics
+            // runs at all, and no amount of welding afterwards undoes a
+            // conflict that was written into the targets.
+            //
+            // Measured across the 19 live pieces: the host conform opens ZERO
+            // seams, ours opened 101 - worst 4.66u on the Blacksmith belt, and
+            // the "beads" visible across the yarl waist. They opened with the
+            // shell solve OFF and every flag off, which is what pointed here.
+            //
+            // Identical input must produce identical binding, so the whole
+            // group inherits one member's answer. Which member does not matter
+            // - they are coincident, so every query was equally valid - only
+            // that they AGREE. wellCond travels with it because the handle
+            // decision has to be shared too: one twin held as an ARAP handle
+            // while its partner is left for the solver to fill separates them
+            // just as surely as two different targets would.
+            for (const auto& grp : exactSeamGroups) {
+                int rep = -1;
+                for (uint32_t gi : grp)
+                    if (gi < n && hasTarget[gi]) { rep = (int)gi; break; }
+                if (rep < 0) continue;
+                for (uint32_t gi : grp) {
+                    if (gi >= n || (int)gi == rep) continue;
+                    target[gi]    = target[(size_t)rep];
+                    hasTarget[gi] = 1;
+                    wellCond[gi]  = wellCond[(size_t)rep];
+                    offAbs[gi]    = offAbs[(size_t)rep];
+                }
+            }
             // 2) connected components: each disconnected island (wrap/strap/buckle) needs
             //    its own handles or its ARAP block is singular (unconstrained rigid body).
             std::vector<int> parent(n);
@@ -20263,6 +20326,43 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             for (size_t i = 0; i < n; ++i)
                 if (hasTarget[i] && !isHandle[i] && handleCountByComp[findRoot((int)i)] < kMinHandles)
                     isHandle[i] = 1;
+            // The small-island promotion above is keyed on CONNECTED COMPONENT,
+            // and seam twins are by definition in different components - that
+            // separation is what makes them twins. So the promotion can still
+            // reach one side of a seam and not the other even though their
+            // binding now agrees. If either twin is a handle they all are.
+            // EVERY targeted seam twin is a handle - not just the groups that
+            // already had one.
+            //
+            // Sharing a target was necessary and not sufficient. A vertex that
+            // is not a handle gets its position FILLED by the ARAP, from its
+            // own connected component's rigidity, and seam twins are in
+            // different components by construction - that separation is what
+            // makes them twins. So two twins holding the same target still
+            // drift apart when neither is pinned to it, and the belts stayed at
+            // 51 and 12 open seams with the shared bind in place. Pinning the
+            // whole group is what actually holds the seam, and the target they
+            // are pinned to is the authored-offset one, so this constrains the
+            // ARAP with the same relation the bind already chose.
+            // ...and it works, and it costs too much. Belts went 51 and 12 open
+            // seams to ZERO, total 101 -> 10 across the live pieces. But pinning
+            // every twin over-constrains the ARAP, and the corpus shows the
+            // bill: worstSupportEdgeStretch 1.14 -> 4.90, publishStretch 4.12 ->
+            // 5.40, stretchEnergy +45%. That is trading a tear for a rubber
+            // sheet, which is the same defect wearing different clothes.
+            //
+            // The real fix is not a constraint at all: give the ARAP the WELDED
+            // mesh, one vertex per seam group, solve, and scatter back. Then
+            // coincidence is topology instead of something to enforce, twins
+            // cannot diverge because they are one vertex, and it costs no
+            // stretch. Off until that exists.
+            if (EnvToggle("DRAPE_BELT_SEAM_PIN", false)) {
+                for (const auto& grp : exactSeamGroups) {
+                    if (grp.size() <= 1) continue;
+                    for (uint32_t gi : grp)
+                        if (gi < n && hasTarget[gi]) isHandle[gi] = 1;
+                }
+            }
             // 4) assemble + solve.
             std::vector<std::array<uint32_t, 3>> aTris;
             aTris.reserve(tris->size());
@@ -20326,7 +20426,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         }
                     }
                 }
-                HLog("belt M1 ARAP: support='%s' verts=%zu handles=%zu comps=%zu bodyFloored=%d authoredOffsetMean=%.3f",
+                HLog("belt M1 ARAP: seamGroups=%zu support='%s' verts=%zu handles=%zu comps=%zu bodyFloored=%d authoredOffsetMean=%.3f",
+                     exactSeamGroups.size(),
                      supName.c_str(), n, hIdx.size(), roots.size(), floored,
                      offCnt > 0 ? (float)(offSum / offCnt) : 0.0f);
                 // Preserve the two already-approved corpus belts (4 and 7 raw
