@@ -9994,6 +9994,163 @@ struct PathBSelfCollideStats {
     float worst = 0.0f;
 };
 
+// EDGE AGAINST EDGE, ONCE, AFTER THE SOLVE HAS CONVERGED.
+//
+// The per-iteration self-collision is vertex-against-triangle, and that
+// structurally cannot see the dominant way cloth tangles: two folds crossing
+// edge to edge, with no vertex inside any triangle. Measured on the live yarl
+// scene by triangle-triangle intersection, which does count those: the authored
+// garment crosses itself 14 times, the host's conform 448, ours 877. Feeding
+// the vertex-triangle pass harder makes it worse, not better (836 at every
+// iteration against 657 at the default interval), because a vertex shoved
+// halfway out crosses fresh triangles on the way.
+//
+// So this runs where the solver's own note said it belonged: once, after
+// convergence, when nothing else is moving. That is what makes an aggressive
+// correction affordable - during the solve it fought the membrane and lost
+// publication; here there is no membrane left to fight, and the caller keeps
+// the pre-untangle pose to fall back on.
+//
+// Symmetric separation along the closest-point axis of the two segments, which
+// is the direction that costs the least length. Edges sharing a vertex are
+// skipped: they are neighbours, not a tangle.
+struct PathBUntangleStats {
+    int pairs = 0;         // violating edge pairs found on the first round
+    int resolved = 0;
+    int rounds = 0;
+    float worst = 0.0f;
+};
+
+static void PathBSegmentClosest(const Vec3& p1, const Vec3& p2,
+                                const Vec3& q1, const Vec3& q2,
+                                float& s, float& t)
+{
+    const Vec3 d1 = Sub(p2, p1), d2 = Sub(q2, q1), r = Sub(p1, q1);
+    const float a = Dot(d1, d1), e = Dot(d2, d2), f = Dot(d2, r);
+    if (a <= 1.0e-12f && e <= 1.0e-12f) { s = t = 0.0f; return; }
+    if (a <= 1.0e-12f) { s = 0.0f; t = ClampRange(f / e, 0.0f, 1.0f); return; }
+    const float c = Dot(d1, r);
+    if (e <= 1.0e-12f) { t = 0.0f; s = ClampRange(-c / a, 0.0f, 1.0f); return; }
+    const float b = Dot(d1, d2);
+    const float den = a * e - b * b;
+    s = (den > 1.0e-12f) ? ClampRange((b * f - c * e) / den, 0.0f, 1.0f) : 0.0f;
+    t = (b * s + f) / e;
+    if (t < 0.0f)      { t = 0.0f; s = ClampRange(-c / a, 0.0f, 1.0f); }
+    else if (t > 1.0f) { t = 1.0f; s = ClampRange((b - c) / a, 0.0f, 1.0f); }
+}
+
+static void PathBEdgeUntangle(std::vector<Vec3>& x,
+                              const std::vector<PathBShellEdge>& edges,
+                              const std::vector<float>& invMass,
+                              const BodyBVH& body,
+                              float bodyFloor,
+                              float thickness,
+                              int rounds,
+                              float relax,
+                              PathBUntangleStats& stats)
+{
+    const size_t n = x.size();
+    if (n == 0 || edges.size() < 2 || thickness <= 0.0f) return;
+    const float cell = std::max(thickness * 2.0f, 1.0e-3f);
+    const float inv = 1.0f / cell;
+    auto hashOf = [](int a, int b, int c) -> uint64_t {
+        return ((uint64_t)(uint32_t)a * 73856093ull) ^
+               ((uint64_t)(uint32_t)b * 19349663ull) ^
+               ((uint64_t)(uint32_t)c * 83492791ull);
+    };
+    for (int r = 0; r < rounds; ++r) {
+        // Rebuilt each round: the whole point is that cloth moves as it frees
+        // itself, and a stale grid re-resolves pairs that are already apart.
+        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+        grid.reserve(edges.size() * 2);
+        for (uint32_t ei = 0; ei < (uint32_t)edges.size(); ++ei) {
+            const auto& e = edges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            const Vec3& p1 = x[e.a]; const Vec3& p2 = x[e.b];
+            const int x0 = (int)std::floor((std::min(p1.x, p2.x) - thickness) * inv);
+            const int x1 = (int)std::floor((std::max(p1.x, p2.x) + thickness) * inv);
+            const int y0 = (int)std::floor((std::min(p1.y, p2.y) - thickness) * inv);
+            const int y1 = (int)std::floor((std::max(p1.y, p2.y) + thickness) * inv);
+            const int z0 = (int)std::floor((std::min(p1.z, p2.z) - thickness) * inv);
+            const int z1 = (int)std::floor((std::max(p1.z, p2.z) + thickness) * inv);
+            if ((int64_t)(x1-x0+1)*(y1-y0+1)*(z1-z0+1) > 256) continue;
+            for (int ix = x0; ix <= x1; ++ix)
+            for (int iy = y0; iy <= y1; ++iy)
+            for (int iz = z0; iz <= z1; ++iz)
+                grid[hashOf(ix, iy, iz)].push_back(ei);
+        }
+        int fixedThisRound = 0;
+        for (uint32_t ei = 0; ei < (uint32_t)edges.size(); ++ei) {
+            const auto& ea = edges[ei];
+            if (ea.a >= n || ea.b >= n) continue;
+            const int cx = (int)std::floor(x[ea.a].x * inv);
+            const int cy = (int)std::floor(x[ea.a].y * inv);
+            const int cz = (int)std::floor(x[ea.a].z * inv);
+            for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dz = -1; dz <= 1; ++dz) {
+                auto it = grid.find(hashOf(cx + dx, cy + dy, cz + dz));
+                if (it == grid.end()) continue;
+                for (uint32_t ej : it->second) {
+                    if (ej <= ei) continue;
+                    const auto& eb = edges[ej];
+                    if (eb.a >= n || eb.b >= n) continue;
+                    if (ea.a == eb.a || ea.a == eb.b ||
+                        ea.b == eb.a || ea.b == eb.b) continue;   // neighbours
+                    float s = 0.0f, t = 0.0f;
+                    PathBSegmentClosest(x[ea.a], x[ea.b], x[eb.a], x[eb.b], s, t);
+                    const Vec3 pa = Add(x[ea.a], Scale(Sub(x[ea.b], x[ea.a]), s));
+                    const Vec3 pb = Add(x[eb.a], Scale(Sub(x[eb.b], x[eb.a]), t));
+                    Vec3 dir = Sub(pa, pb);
+                    float dist = Len(dir);
+                    if (dist >= thickness) continue;
+                    if (dist < 1.0e-6f) continue;     // exactly coincident: no axis
+                    if (r == 0) ++stats.pairs;
+                    dir = Scale(dir, 1.0f / dist);
+                    const float need = (thickness - dist) * relax;
+                    const float wa0 = invMass[ea.a] * (1.0f - s) * (1.0f - s);
+                    const float wa1 = invMass[ea.b] * s * s;
+                    const float wb0 = invMass[eb.a] * (1.0f - t) * (1.0f - t);
+                    const float wb1 = invMass[eb.b] * t * t;
+                    const float wsum = wa0 + wa1 + wb0 + wb1;
+                    if (wsum <= 1.0e-12f) continue;
+                    const float lam = need / wsum;
+                    x[ea.a] = Add(x[ea.a], Scale(dir, invMass[ea.a] * (1.0f - s) * lam));
+                    x[ea.b] = Add(x[ea.b], Scale(dir, invMass[ea.b] * s * lam));
+                    x[eb.a] = Sub(x[eb.a], Scale(dir, invMass[eb.a] * (1.0f - t) * lam));
+                    x[eb.b] = Sub(x[eb.b], Scale(dir, invMass[eb.b] * t * lam));
+                    ++stats.resolved;
+                    ++fixedThisRound;
+                    stats.worst = std::max(stats.worst, thickness - dist);
+                }
+            }
+        }
+        // THE BODY GETS THE LAST WORD, EVERY ROUND.
+        //
+        // Separation only knows the axis between two edges, so when two folds
+        // come apart one of them goes inward - and inward is the body. Left
+        // alone this pass frees the cloth from itself and buries it in flesh:
+        // measured, 0 penetrating vertices became 17 at -7.87, and the guard
+        // threw the whole thing away. Alternating separation with a push back
+        // out of the body is what makes the correction affordable at all,
+        // rather than a better separation direction, because no single
+        // direction can satisfy both a fold and the flesh under it.
+        if (body.valid) {
+            for (size_t i = 0; i < n; ++i) {
+                if (invMass[i] <= 0.0f) continue;
+                Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                float d2 = 0.0f;
+                if (!BVHClosestPoint(body, x[i], cp, nrm, d2)) continue;
+                const float gap = Dot(Sub(x[i], cp), nrm);
+                if (gap >= bodyFloor) continue;
+                x[i] = Add(x[i], Scale(nrm, bodyFloor - gap));
+            }
+        }
+        stats.rounds = r + 1;
+        if (fixedThisRound == 0) break;     // converged: nothing left crossing
+    }
+}
+
 static void PathBBuildNearRings(size_t n,
                                 const std::vector<std::array<uint16_t, 3>>& tris,
                                 std::vector<std::vector<uint32_t>>& out)
@@ -12834,6 +12991,66 @@ static bool PathBSimV2Solve(
             baseVerts, x, fixed, authoredGapArr, morphedBody, kMorphSteps,
             traceVertexContact, traceFaceContact, traceChannelFloor,
             traceChannelCeiling, traceSticky, traceMinimumGap);
+    }
+    // POST-CONVERGENCE UNTANGLE, GUARDED.
+    //
+    // Runs here and nowhere else: during the solve an aggressive separation
+    // fights the membrane and costs publication, which is why the per-iteration
+    // form had to be either violent or useless. With the solve finished there is
+    // nothing left to fight, and a snapshot makes the whole thing revertible -
+    // so it can be as aggressive as it needs to be and still not be a risk.
+    //
+    // The guard is deliberately about the BODY, not about the tangles: freeing
+    // cloth from itself must not push it into flesh, and body penetration is the
+    // defect the user sees first. Tangles it can only improve, since separation
+    // is all it does.
+    if (EnvToggle("DRAPE_SHELL_UNTANGLE", false) && !edges.empty()) {
+        const float meanEdge = [&] {
+            double s = 0.0; size_t c = 0;
+            for (const auto& e : edges) { s += e.rest; ++c; }
+            return c ? (float)(s / (double)c) : 0.0f;
+        }();
+        const float thick = meanEdge *
+            ClampRange(EnvFloat("DRAPE_SHELL_UNTANGLE_THICK", 0.25f), 0.0f, 2.0f);
+        const int rounds = (int)ClampRange(
+            EnvFloat("DRAPE_SHELL_UNTANGLE_ROUNDS", 24.0f), 1.0f, 200.0f);
+        const float relax = ClampRange(
+            EnvFloat("DRAPE_SHELL_UNTANGLE_RELAX", 0.5f), 0.05f, 1.0f);
+        const float kUntangleFloor = std::max(0.0f,
+            EnvFloat("DRAPE_SHELL_UNTANGLE_BODY_FLOOR", 0.15f));
+        if (thick > 1.0e-4f) {
+            auto bodyScore = [&](const std::vector<Vec3>& v) {
+                int pen = 0; float worst = 0.0f;
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    float g = 0.0f;
+                    if (!BVHSignedGap(morphedBody, v[i], g, nullptr)) continue;
+                    if (g < 0.0f) { ++pen; worst = std::min(worst, g); }
+                }
+                return std::make_pair(pen, worst);
+            };
+            const std::vector<Vec3> before = x;
+            const auto b0 = bodyScore(before);
+            PathBUntangleStats us;
+            PathBEdgeUntangle(x, edges, invMass, morphedBody, kUntangleFloor,
+                              thick, rounds, relax, us);
+            // Pinned vertices cannot move here by construction - their inverse
+            // mass is zero, so every weight in the separation is zero - which is
+            // why no re-pin is needed. The weld still runs: separation moves
+            // seam twins independently, and a split seam is a visible tear.
+            // `before` is the settled pose, so it is the right target for any
+            // fixed member of a group.
+            PathBSeamWeld(x, exactSeamGroups, fixed, before);
+            const auto b1 = bodyScore(x);
+            const bool worseBody = (b1.first > b0.first) ||
+                                   (b1.second < b0.second - 1.0e-4f);
+            HLog("path-b-shell: untangle pairs=%d resolved=%d rounds=%d worst=%.3f "
+                 "thick=%.3f body %d@%.2f -> %d@%.2f %s",
+                 us.pairs, us.resolved, us.rounds, us.worst, thick,
+                 b0.first, b0.second, b1.first, b1.second,
+                 worseBody ? "REVERTIDO" : "aceito");
+            if (worseBody) x = before;
+        }
     }
     out = std::move(x);
     return true;
