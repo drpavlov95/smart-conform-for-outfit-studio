@@ -11947,6 +11947,17 @@ static bool PathBSimV2Solve(
         std::vector<float> prevContactGap(n, -1.0e9f);
         // XPBD contact multiplier, per morph step like the others.
         std::vector<float> contactLambda(n, 0.0f);
+        // Faces touching each vertex, so a correction can be asked whether it
+        // would turn one of them inside out before it is applied.
+        std::vector<std::vector<uint32_t>> vertFaces(n);
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti)
+            for (int k = 0; k < 3; ++k)
+                if (tris[ti][k] < n) vertFaces[tris[ti][k]].push_back(ti);
+        // OFF: built on a hypothesis the measurement then refused. See the
+        // clamp below - it barely moves the flips (80 -> 74 over six steps,
+        // 30 -> 30 on the first) and makes the worst outward spike WORSE,
+        // 7.76 -> 8.42. Contact is not what inverts these faces.
+        const bool kNoFlip = EnvToggle("DRAPE_SHELL_CONTACT_NOFLIP", false);
         // One multiplier set per underlying garment, reset per morph step like
         // the body's. Same constraint, different surface.
         const bool kLayerContact = EnvToggle("DRAPE_SHELL_LAYER_CONTACT", false);
@@ -12318,6 +12329,7 @@ static bool PathBSimV2Solve(
                 }
                 prevContactGap[i] = gap;
                 Vec3 move = Sub(target, x[i]);
+                float dlApplied = 0.0f;
                 const float moveLen = Len(move);
                 worstContact = std::max(worstContact, moveLen);
                 if (kContactXPBD) {
@@ -12355,6 +12367,7 @@ static bool PathBSimV2Solve(
                     const float projected = std::max(contactLambda[i] + dl, 0.0f);
                     dl = projected - contactLambda[i];
                     contactLambda[i] = projected;
+                    dlApplied = dl;
                     move = Scale(nrm, w * dl);
                     // Corridor guard, kept: in a crevice the nearest feature can
                     // face the opposite wall, so refuse a step that would leave
@@ -12365,6 +12378,51 @@ static bool PathBSimV2Solve(
                         move = Scale(move, 0.5f);
                 } else if (moveLen > stepCap) {
                     move = Scale(move, stepCap / moveLen);
+                }
+                // A CORRECTION MAY NOT TURN A FACE INSIDE OUT.
+                //
+                // This is the vertex the user described jumping out through the
+                // garment's own surface, and the solver was already printing it
+                // and doing nothing about it: on the yarl dress the log walks
+                // 30, 34, 39, 45, 58, 80 inverted faces across the six morph
+                // steps, every step STALLED, while the worst contact correction
+                // climbs to 10.63 units. A demand that size is not a nudge, it
+                // is a teleport - the vertex crosses its own neighbours and the
+                // triangle comes out reversed.
+                //
+                // Scaled, never vetoed. A binary per-vertex refusal is the shape
+                // this project keeps being punished for; it leaves a one-vertex
+                // step, which is a visible crease. So the move is cut to the
+                // largest fraction that keeps every incident triangle on the
+                // side it started, found by halving, and the multiplier gives
+                // back exactly the part that went unspent. Contact stays
+                // unilateral and keeps its memory - it simply cannot buy an
+                // inversion with it, and comes back for the rest next iteration
+                // once its neighbours have moved.
+                if (kNoFlip && i < vertFaces.size() && !vertFaces[i].empty()) {
+                    auto wouldFlip = [&](const Vec3& cand) -> bool {
+                        for (uint32_t ti : vertFaces[i]) {
+                            const auto& t = tris[ti];
+                            Vec3 a = x[t[0]], b = x[t[1]], c = x[t[2]];
+                            const Vec3 n0 = Cross(Sub(b, a), Sub(c, a));
+                            if (t[0] == i) a = cand;
+                            else if (t[1] == i) b = cand;
+                            else c = cand;
+                            const Vec3 n1 = Cross(Sub(b, a), Sub(c, a));
+                            if (Dot(n0, n1) <= 0.0f) return true;
+                        }
+                        return false;
+                    };
+                    float scale = 1.0f;
+                    for (int guard = 0; guard < 8 &&
+                         wouldFlip(Add(x[i], Scale(move, scale))); ++guard)
+                        scale *= 0.5f;
+                    if (wouldFlip(Add(x[i], Scale(move, scale)))) scale = 0.0f;
+                    if (scale < 1.0f) {
+                        contactLambda[i] = std::max(0.0f,
+                            contactLambda[i] - dlApplied * (1.0f - scale));
+                        move = Scale(move, scale);
+                    }
                 }
                 x[i] = Add(x[i], move);
                 stickyCp[i] = cp;
