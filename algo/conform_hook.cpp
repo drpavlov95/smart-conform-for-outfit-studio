@@ -10044,7 +10044,8 @@ static void PathBTriUntangle(std::vector<Vec3>& x,
                              float thickness,
                              int rounds,
                              float relax,
-                             PathBUntangleStats& stats)
+                             PathBUntangleStats& stats,
+                             const std::vector<float>* freeWeight = nullptr)
 {
     const size_t n = x.size();
     if (n == 0 || tris.size() < 2 || thickness <= 0.0f) return;
@@ -10194,7 +10195,24 @@ static void PathBTriUntangle(std::vector<Vec3>& x,
                             const uint16_t vi = off == 0 ? ia : ib;
                             const float sgn = (off == 0 ? sd1 : sd0) >= 0.0f ? 1.0f : -1.0f;
                             const float have = (off == 0 ? sd0 : sd1) * sgn;
-                            const float need = (thickness - have) * relax;
+                            float need = (thickness - have) * relax;
+                            // HOW MUCH CLOTH IS FREE TO FOLD HERE.
+                            //
+                            // A garment worn against skin has no folds to
+                            // untangle, so every correction there is pure cost:
+                            // the gate charged this pass 0 -> 4@-0.38 on Fine
+                            // Clothes' Body and 0 -> 2@-0.23 on its underwear,
+                            // both skin-tight, while the pieces that actually
+                            // drape improved. Scaled by the authored distance to
+                            // the body rather than gated on a preset or a class,
+                            // because the question is physical - is there room
+                            // for a fold - and a per-vertex on/off would leave a
+                            // one-vertex step, which is the shape this project
+                            // keeps paying for.
+                            if (freeWeight) {
+                                const float wa = vi < freeWeight->size() ? (*freeWeight)[vi] : 1.0f;
+                                need *= wa;
+                            }
                             if (need <= 0.0f) continue;
 
                             const Vec3 dir = Scale(nrm, sgn);
@@ -11985,6 +12003,52 @@ static bool PathBSimV2Solve(
         // 30 -> 30 on the first) and makes the worst outward spike WORSE,
         // 7.76 -> 8.42. Contact is not what inverts these faces.
         const bool kNoFlip = EnvToggle("DRAPE_SHELL_CONTACT_NOFLIP", false);
+        const bool kSelfEdge = EnvToggle("DRAPE_SHELL_SELF_EDGE", true);
+        const int kSelfEdgeEvery = (int)ClampRange(
+            EnvFloat("DRAPE_SHELL_SELF_EDGE_EVERY", 8.0f), 1.0f, 64.0f);
+        const float kSelfEdgeRelax = ClampRange(
+            EnvFloat("DRAPE_SHELL_SELF_EDGE_RELAX", 0.15f), 0.01f, 1.0f);
+        float kSelfEdgeThick = 0.0f;
+        if (kSelfEdge && !edges.empty()) {
+            double sum = 0.0;
+            for (const auto& e : edges) sum += e.rest;
+            kSelfEdgeThick = (float)(sum / edges.size()) *
+                ClampRange(EnvFloat("DRAPE_SHELL_SELF_EDGE_THICK", 0.10f), 0.0f, 2.0f);
+        }
+        // A FLAT floor, and borrowing contactFloor[i] here was measured WORSE -
+        // 7 refusals against 4, Blacksmith torso 3@-0.19 -> 8@-2.86. Which is
+        // the identical result the post-convergence untangle got a few hours
+        // earlier, recorded thirty lines above this one and read too late:
+        // contactFloor sits well above 0.15 nearly everywhere, so adopting it
+        // makes the correction travel further, and the membrane drags the
+        // neighbours in behind it. Sharing the floor sounds principled and is
+        // not; the two passes want different things from it.
+        const float kSelfEdgeFloor = std::max(0.0f,
+            EnvFloat("DRAPE_SHELL_SELF_EDGE_FLOOR", 0.15f));
+        std::vector<const BodyBVH*> untangleSurfacesLoop{&morphedBody};
+        std::vector<std::vector<float>> untangleFloorsLoop(1,
+            std::vector<float>(n, kSelfEdgeFloor));
+
+        int selfEdgePairs = 0, selfEdgeFixed = 0;
+        // The pass DOES separate seam twins on pieces whose seam list arrives
+        // empty - the same preset gate that hid the belt tear this morning -
+        // and it costs 2 open seams (Fur BaseArmor 25 -> 26, worst 0.34 -> 1.05).
+        // Two repairs were measured and both are WORSE: welding with a list this
+        // solve builds for itself took the total 40 -> 45, because the weld pulls
+        // twins onto a target chosen for a pose this pass just changed, and
+        // excluding twins from the correction did not recover it either. Left as
+        // the known cost, because it is small, located, and the fix belongs with
+        // the seam list reaching the solve at all rather than here.
+        // Free to fold: 0 where the artist put the cloth against skin, 1 once it
+        // stands off by the same distance the solver already uses to call a
+        // vertex free, smooth in between so no edge straddles a cliff.
+        std::vector<float> selfEdgeFree(n, 1.0f);
+        for (size_t i = 0; i < n; ++i) {
+            const float g = authoredGapArr[i];
+            const float t = (g - kAttachLo) / std::max(1.0e-4f, kAttachHi - kAttachLo);
+            const float c = ClampRange(t, 0.0f, 1.0f);
+            selfEdgeFree[i] = c * c * (3.0f - 2.0f * c);
+        }
         // One multiplier set per underlying garment, reset per morph step like
         // the body's. Same constraint, different surface.
         const bool kLayerContact = EnvToggle("DRAPE_SHELL_LAYER_CONTACT", false);
@@ -12664,6 +12728,43 @@ static bool PathBSimV2Solve(
                                  selfThickness, kSelfRelax, selfLambda,
                                  kSelfAlpha, selfStats);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
+            // EDGE-EDGE SELF-COLLISION, INSIDE THE LOOP.
+            //
+            // Today produced the right TEST with the wrong SHAPE and the wrong
+            // test with the right shape, and never both. The post-convergence
+            // untangle uses the exact measure of tangling - an edge passing
+            // THROUGH a triangle - but runs after everything has settled, where
+            // nothing remains to absorb it: 15265 corrections for 756 crossings
+            // on the yarl dress, all of it landing in the body (35@-1.49 ->
+            // 53@-1.87) and all of it thrown away by its own guard. The in-loop
+            // self-collision has the right shape but tests vertex-against-
+            // triangle, which is structurally blind to two folds crossing edge
+            // to edge - no vertex is inside anything.
+            //
+            // So the crossing test moves INTO the sweep, one round per pass, at
+            // low relaxation. The point is not the correction itself, it is that
+            // stretch, bending, contact and the weld all run afterwards and get
+            // to negotiate: the surplus material is spread across the membrane
+            // instead of dumped into the nearest surface. Detection is the
+            // expensive part, so it runs every kSelfEdgeEvery iterations rather
+            // than all of them.
+            //
+            // The body floor is passed through unchanged, so this cannot buy an
+            // untangle with the clearance the solve just earned - that trade is
+            // exactly what made the post-pass unusable.
+            if (kSelfEdge && (iteration % kSelfEdgeEvery) == 0) {
+                PathBUntangleStats es;
+                PathBTriUntangle(x, tris, invMass, untangleSurfacesLoop,
+                                 untangleFloorsLoop, kSelfEdgeThick, 1,
+                                 kSelfEdgeRelax, es, &selfEdgeFree);
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+                selfEdgePairs += es.pairs;
+                selfEdgeFixed += es.resolved;
+                if (selfEdgePairs && selfEdgeFixed == es.resolved)
+                    HLog("path-b-shell: self-edge ON thick=%.3f every=%d relax=%.2f "
+                         "primeiros pares=%d", kSelfEdgeThick, kSelfEdgeEvery,
+                         kSelfEdgeRelax, es.pairs);
             }
             // BENDING LAST (ordering probe 2026-07-20): bending currently runs
             // before contact, so contact/face/weld overwrite whatever shape it
