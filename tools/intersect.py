@@ -98,6 +98,8 @@ def pair_intersections(vA, fA, vB, fB, same=False, chunk=200000):
             o = B[:, k]; d = B[:, (k + 1) % 3] - o
             hit |= edges_hit_tris(o, d, A[:, 0], A[:, 1], A[:, 2])
         hit_a.append(qa[hit]); hit_b.append(qb[hit])
+    if not hit_a:                      # no candidate pairs survived the reject
+        return np.empty(0, int), np.empty(0, int)
     return np.concatenate(hit_a), np.concatenate(hit_b)
 
 

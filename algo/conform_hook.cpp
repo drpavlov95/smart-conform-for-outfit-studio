@@ -10041,6 +10041,8 @@ static void PathBSelfCollide(std::vector<Vec3>& x,
                              const std::vector<std::vector<uint32_t>>& nearRing,
                              float thickness,
                              float relaxation,
+                             std::vector<float>& lambda,
+                             float alpha,
                              PathBSelfCollideStats& stats)
 {
     const size_t n = x.size();
@@ -10081,9 +10083,30 @@ static void PathBSelfCollide(std::vector<Vec3>& x,
                     grid[hashOf(ix, iy, iz)].push_back(ti);
     }
 
+    // ONE CONSTRAINT PER VERTEX PER SWEEP, against its DEEPEST violation, and
+    // solved as XPBD rather than projected. The old form applied a fresh
+    // (thickness - d) * relax shove for every triangle it found, with no memory
+    // between sweeps, and its own comment records where that leads: unclamped it
+    // untangles well (2477 crossing pairs, below both baselines) and flings the
+    // mesh hard enough to lose publication; clamped to one thickness it lands
+    // WORSE than doing nothing, because a vertex pushed halfway out crosses
+    // fresh triangles on the way through.
+    //
+    // Both failures are the same missing thing. A memoryless projection has to
+    // choose its whole correction in one sweep, so it is either violent or
+    // useless. With a Lagrange multiplier the correction ACCUMULATES: lambda
+    // grows over the sweeps, a vertex buried several units deep is drawn out
+    // gradually instead of shoved, and the residual settles at alpha*lambda
+    // negotiated against stretch and bending in the same loop instead of
+    // fighting them. It is the same fix the body contact and the silhouette
+    // bound each needed, for the same reason.
     for (size_t vi = 0; vi < n; ++vi) {
         const float wv = (vi < invMass.size()) ? invMass[vi] : 0.0f;
         if (wv <= 0.0f) continue;                    // pinned: nothing to move
+        float bestGap = 1.0e30f;                     // deepest violation found
+        Vec3 bestDir{0.0f, 0.0f, 0.0f};
+        float bestBary[3] = {0.0f, 0.0f, 0.0f};
+        uint32_t bestTri = 0xFFFFFFFFu;
         const int cx = (int)std::floor(x[vi].x * inv);
         const int cy = (int)std::floor(x[vi].y * inv);
         const int cz = (int)std::floor(x[vi].z * inv);
@@ -10161,31 +10184,44 @@ static void PathBSelfCollide(std::vector<Vec3>& x,
                 // applying it as a single post-convergence resolution with the
                 // integrity repair behind it, rather than as a per-iteration
                 // constraint. Left gated off until that exists.
-                const float d = signed_d;
-                const float clampStep = std::max(0.0f,
-                    EnvFloat("DRAPE_SHELL_SELF_MAX_STEP", 0.0f));
-                float need = (thickness - d) * relaxation;
-                if (clampStep > 0.0f) need = std::min(need, clampStep);
-                const float bary[3] = {bu, bv, bw};
-                float wt = 0.0f;
-                for (int k = 0; k < 3; ++k) {
-                    const float wk = (t[k] < invMass.size()) ? invMass[t[k]] : 0.0f;
-                    wt += wk * bary[k] * bary[k];
+                if (signed_d < bestGap) {
+                    bestGap = signed_d;
+                    bestDir = dir;
+                    bestBary[0] = bu; bestBary[1] = bv; bestBary[2] = bw;
+                    bestTri = ti;
                 }
-                const float denom = wv + wt;
-                if (denom <= 1.0e-12f) continue;
-                const float lam = need / denom;
-                x[vi] = Add(x[vi], Scale(dir, wv * lam));
-                for (int k = 0; k < 3; ++k) {
-                    const float wk = (t[k] < invMass.size()) ? invMass[t[k]] : 0.0f;
-                    if (wk <= 0.0f) continue;
-                    x[t[k]] = Sub(x[t[k]], Scale(dir, wk * bary[k] * lam));
-                }
-                ++stats.resolved;
-                stats.worst = std::max(stats.worst, thickness - d);
                 (void)cp;
             }
         }
+        if (bestTri == 0xFFFFFFFFu) {
+            // Nothing violating: release the multiplier so a vertex that has
+            // been freed does not keep pushing on its old neighbour.
+            if (vi < lambda.size()) lambda[vi] = 0.0f;
+            continue;
+        }
+        const auto& bt = tris[bestTri];
+        float wt = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            const float wk = (bt[k] < invMass.size()) ? invMass[bt[k]] : 0.0f;
+            wt += wk * bestBary[k] * bestBary[k];
+        }
+        const float denom = wv + wt + alpha;
+        if (denom <= 1.0e-12f) continue;
+        const float Cval = bestGap - thickness;          // violated when negative
+        float lam = (vi < lambda.size()) ? lambda[vi] : 0.0f;
+        float dl = (-Cval - alpha * lam) / denom;
+        const float projected = std::max(lam + dl, 0.0f);   // unilateral: only separates
+        dl = (projected - lam) * relaxation;
+        if (vi < lambda.size()) lambda[vi] = projected;
+        if (dl <= 0.0f) continue;
+        x[vi] = Add(x[vi], Scale(bestDir, wv * dl));
+        for (int k = 0; k < 3; ++k) {
+            const float wk = (bt[k] < invMass.size()) ? invMass[bt[k]] : 0.0f;
+            if (wk <= 0.0f) continue;
+            x[bt[k]] = Sub(x[bt[k]], Scale(bestDir, wk * bestBary[k] * dl));
+        }
+        ++stats.resolved;
+        stats.worst = std::max(stats.worst, thickness - bestGap);
     }
 }
 
@@ -10217,6 +10253,12 @@ static bool PathBSimV2Solve(
     // out by the host, solves again without it - falling back to the previous
     // behaviour rather than all the way to the vanilla conform.
     bool allowPlumbClamp,
+    // Garments worn UNDER this one. The solver has never received these, and
+    // that is why it pushes a skirt straight through the pants: it can see the
+    // body and nothing else. Measured over his six live scenes, cloth-in-cloth
+    // crossings grow 26% between pieces and 69% within a piece against the
+    // plain host conform - on every scene, not just the one he reported.
+    const std::vector<OuterCollider>* innerColliders,
     std::vector<Vec3>& out,
     std::string& failReason)
 {
@@ -11161,6 +11203,14 @@ static bool PathBSimV2Solve(
     // Built once: topology does not move. The 2-ring exclusion is what lets a
     // fold touch itself without a triangle fighting its own neighbours.
     std::vector<std::vector<uint32_t>> selfNearRing;
+    // Multiplier per vertex, reset each morph step like contact's. This is what
+    // lets the untangling arrive gradually instead of in one shove.
+    std::vector<float> selfLambda;
+    // Compliance of the self-collision constraint. At the scale of the vertex
+    // mass, as the silhouette bound had to learn: anything far below w is a
+    // rigid projection wearing a multiplier.
+    const float kSelfAlpha = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_SELF_COMPLIANCE", 0.3f));
     float selfThickness = 0.0f;
     const int selfCollideEvery = kSelfEvery;
     bool selfCollideOn = false;
@@ -11172,6 +11222,7 @@ static bool PathBSimV2Solve(
         selfThickness = meanEdge * kSelfThickFrac;
         if (selfThickness > 1.0e-3f) {
             PathBBuildNearRings(n, tris, selfNearRing);
+            selfLambda.assign(n, 0.0f);
             selfCollideOn = true;
             HLog("path-b-shell: self-collide ON meanEdge=%.3f thickness=%.3f every=%d",
                  meanEdge, selfThickness, selfCollideEvery);
@@ -11640,6 +11691,18 @@ static bool PathBSimV2Solve(
         std::vector<float> prevContactGap(n, -1.0e9f);
         // XPBD contact multiplier, per morph step like the others.
         std::vector<float> contactLambda(n, 0.0f);
+        // One multiplier set per underlying garment, reset per morph step like
+        // the body's. Same constraint, different surface.
+        const bool kLayerContact = EnvToggle("DRAPE_SHELL_LAYER_CONTACT", false);
+        const float kLayerAlpha = std::max(0.0f,
+            EnvFloat("DRAPE_SHELL_LAYER_COMPLIANCE", 1.0e-4f));
+        const float kLayerFloor = std::max(0.0f,
+            EnvFloat("DRAPE_SHELL_LAYER_FLOOR", 0.15f));
+        const size_t layerCount =
+            (kLayerContact && innerColliders) ? innerColliders->size() : 0;
+        std::vector<std::vector<float>> layerLambda(layerCount,
+                                                    std::vector<float>(n, 0.0f));
+        int layerMoves = 0;
         int contactMoves = 0;
         int faceContactMoves = 0;
         int shadowMoves = 0;
@@ -12054,6 +12117,43 @@ static bool PathBSimV2Solve(
                 ++contactMoves;
                 if (traceContact) ++traceVertexContact[traceOffset + i];
             }
+            // LAYER CONTACT: the garments worn under this one, treated exactly
+            // like the body, because that is what they are to this cloth - a
+            // surface it may rest on and must not pass through. Same XPBD form
+            // and for the same reason: a projection would fight the membrane
+            // every iteration and settle wherever the tug of war lands, while a
+            // multiplier lets the compliance set the residual.
+            //
+            // INNER colliders only. Their sense is unambiguous - stay outside,
+            // exactly like the body. Outer colliders carry the opposite rule
+            // ("stay under me") and "inside" is not well defined for an open
+            // surface, so that half is deliberately not attempted here.
+            for (size_t li = 0; li < layerCount; ++li) {
+                const BodyBVH& surf = (*innerColliders)[li].Current();
+                if (!surf.valid) continue;
+                std::vector<float>& lam = layerLambda[li];
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;  // authored-inside parity
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nrm{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(surf, x[i], cp, nrm, d2)) continue;
+                    const float gap = Dot(Sub(x[i], cp), nrm);
+                    const float Cv = gap - kLayerFloor;      // violated when < 0
+                    if (Cv >= 0.0f) { lam[i] = 0.0f; continue; }
+                    const float w = invMass[i];
+                    const float denom = w + kLayerAlpha;
+                    if (denom <= 1.0e-30f) continue;
+                    float dl = (-Cv - kLayerAlpha * lam[i]) / denom;
+                    const float projected = std::max(lam[i] + dl, 0.0f);
+                    dl = projected - lam[i];
+                    lam[i] = projected;
+                    if (dl <= 0.0f) continue;
+                    x[i] = Add(x[i], Scale(nrm, w * dl));
+                    ++layerMoves;
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
             if (kNoContact) { /* ablation: contact disabled */ } else
             if (hullOn) {
                 int hullMoves = 0;
@@ -12220,7 +12320,8 @@ static bool PathBSimV2Solve(
             // it is a per-vertex pass like the others.
             if (selfCollideOn && (iteration % selfCollideEvery) == 0) {
                 PathBSelfCollide(x, baseVerts, tris, invMass, selfNearRing,
-                                 selfThickness, kSelfRelax, selfStats);
+                                 selfThickness, kSelfRelax, selfLambda,
+                                 kSelfAlpha, selfStats);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             // BENDING LAST (ordering probe 2026-07-20): bending currently runs
@@ -14534,6 +14635,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
                                  drapeMask, /*allowPlumbClamp=*/true,
+                                 innerColliders,
                                  shellCandidate, failReason))
                 return false;
             // OFF by default: the verdict that matters is taken after the whole
@@ -14555,6 +14657,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
                                  drapeMask, /*allowPlumbClamp=*/false,
+                                 innerColliders,
                                  retry, retryReason))
                 return true;   // keep the first candidate; the gates judge it
             float retryWorst = 0.0f;
