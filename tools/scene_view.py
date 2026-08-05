@@ -127,6 +127,8 @@ def main():
     ap.add_argument("--mode", default="solid", choices=["solid", "pen", "diff"])
     ap.add_argument("--env", default="")
     ap.add_argument("--px", type=int, default=760)
+    ap.add_argument("--cull", action="store_true", help="descarta faces de costas")
+    ap.add_argument("--two-sided", action="store_true", help="ilumina os dois lados")
     ap.add_argument("--col", action="append", default=[],
                     help="rotulo=ENV=VAL ...  (use ENV literal VANILLA para o conform do host)")
     a = ap.parse_args()
@@ -154,7 +156,7 @@ def main():
             center, half = frame_bounds(meshes, view, crop)
             fr = Frame(a.px, int(a.px * 1.25))
             if body is not None:
-                draw(fr, body[0], body[1], BODY, view, center, half)
+                draw(fr, body[0], body[1], BODY, view, center, half, cull=a.cull, two_sided=a.two_sided)
             for pi, (v, f, tint, shape) in enumerate(pieces):
                 col = np.array(tint, np.float32)
                 if a.mode == "pen":
@@ -173,7 +175,7 @@ def main():
                         t = np.clip(d / max(d.max(), 1e-6), 0, 1)[:, None]
                         col = (np.array(tint, np.float32)[None, :] * (1 - t) +
                                np.array(HOT, np.float32)[None, :] * t)
-                draw(fr, v, f, col, view, center, half)
+                draw(fr, v, f, col, view, center, half, cull=a.cull, two_sided=a.two_sided)
             axes[ri][ci].imshow(fr.image())
             axes[ri][ci].set_title(f"{label} — {view}", fontsize=13)
             axes[ri][ci].axis("off")

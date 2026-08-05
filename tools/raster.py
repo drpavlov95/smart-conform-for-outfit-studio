@@ -51,7 +51,8 @@ class Frame:
         return np.clip(self.rgb, 0, 1)
 
 
-def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25):
+def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25,
+         cull=False, two_sided=False):
     """Rasterize one mesh into the frame. `color` is an (r,g,b) or per-vertex array."""
     right, fwd = VIEWS[view]
     up = np.array([0.0, 0.0, 1.0])
@@ -78,6 +79,12 @@ def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25)
     area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - \
            (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
     keep = np.abs(area) > 1e-9
+    if cull:
+        # Screen-space winding: drop faces turned away from the camera. If a
+        # dark region VANISHES under culling it was the reverse side of
+        # single-sided cloth seen through a gap, not an inverted face - two
+        # very different defects that look identical shaded.
+        keep &= (area > 0)
     idx = np.nonzero(keep)[0]
 
     xmin = np.floor(np.minimum(np.minimum(a[:, 0], b[:, 0]), c[:, 0])).astype(int)
