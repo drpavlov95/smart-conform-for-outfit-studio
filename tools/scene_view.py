@@ -53,46 +53,26 @@ def load_obj(path):
     return np.array(vs, np.float64), np.array(fs, np.int32)
 
 
-def inside_mask(pts, verts, faces, grid=3.0):
-    """Which of `pts` lie inside the closed-ish surface (verts, faces).
+def inside_mask(pts, verts, faces, tol=0.12):
+    """Which of `pts` sit behind the surface (verts, faces).
 
-    Nearest triangle by a coarse hash, then the sign of the offset against that
-    triangle's normal. Approximate on purpose: it is a picture, and the point is
-    to SEE where cloth is buried, not to score it - the harness already scores
-    it exactly. Anything within a hair of the surface is left uncoloured so
-    ordinary contact does not light up the whole garment.
+    Nearest face centroid, then the sign against that face's normal. Approximate
+    on purpose - this decides a COLOUR, not a score; the harness scores
+    penetration exactly and is the thing to quote. `tol` keeps ordinary contact
+    from lighting up the whole garment.
+
+    Vectorised through a KD-tree because a slow viewer is a viewer I stop
+    running, and looking once was itself one of the failures here.
     """
+    from scipy.spatial import cKDTree
     tri = verts[faces]
     cen = tri.mean(axis=1)
     fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
     ln = np.linalg.norm(fn, axis=1, keepdims=True)
     ln[ln == 0] = 1
     fn = fn / ln
-    lo = cen.min(axis=0)
-    cells = {}
-    key = ((cen - lo) // grid).astype(int)
-    for i, k in enumerate(map(tuple, key)):
-        cells.setdefault(k, []).append(i)
-    out = np.zeros(len(pts), bool)
-    for n, p in enumerate(pts):
-        c = ((p - lo) // grid).astype(int)
-        cand = []
-        r = 1
-        while not cand and r <= 3:
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    for dz in range(-r, r + 1):
-                        cand += cells.get((c[0] + dx, c[1] + dy, c[2] + dz), [])
-            r += 1
-        if not cand:
-            continue
-        cand = np.array(cand)
-        d2 = ((cen[cand] - p) ** 2).sum(1)
-        j = cand[np.argmin(d2)]
-        s = float(np.dot(p - cen[j], fn[j]))
-        if s < -0.12:                     # clearly behind the surface
-            out[n] = True
-    return out
+    _d, j = cKDTree(cen).query(pts)
+    return np.einsum("ij,ij->i", pts - cen[j], fn[j]) < -tol
 
 
 def build_columns(scene, work, harness, env_extra, variants):
