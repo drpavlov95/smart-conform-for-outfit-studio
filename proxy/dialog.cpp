@@ -259,6 +259,14 @@ static bool LoadDrapeAlgo(DlgData* d) {
         PostLog(nullptr, std::string("ERROR: Cannot load drape-algo.dll from ") + algoPath);
         return false;
     }
+    // Say which one was loaded, for the same reason the proxy logs its own
+    // path: two copies exist on disk and a virtual file system decides which is
+    // visible, so "I deployed it" is not the same as "that is what ran".
+    {
+        char loaded[MAX_PATH] = {};
+        GetModuleFileNameA(d->hAlgo, loaded, MAX_PATH);
+        PostLog(nullptr, std::string("drape-algo.dll loaded from ") + loaded);
+    }
 
     typedef int (*PfnGetApi)(DrapeAlgoApi*);
     PfnGetApi pGetApi = (PfnGetApi)GetProcAddress(d->hAlgo, "DrapeGetApi");

@@ -585,6 +585,16 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         DbgLog("DllMain PROCESS_ATTACH: exe='%s'", exePath);
+        // WHICH copy of us is actually running. There are two on disk - one
+        // beside OutfitStudio.exe and one in a separate mod folder that a
+        // virtual file system may or may not be overlaying - and when they
+        // disagree, every other line in this log is about the wrong build.
+        // Logging the resolved path settles it without guesswork.
+        {
+            char selfPath[MAX_PATH] = {};
+            GetModuleFileNameA(hMod, selfPath, MAX_PATH);
+            DbgLog("DllMain: this version.dll = '%s'", selfPath);
+        }
 
         std::string exe(exePath);
         std::transform(exe.begin(), exe.end(), exe.begin(), ::tolower);
