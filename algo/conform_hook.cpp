@@ -14594,6 +14594,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     std::unordered_set<uint64_t> seamVectorSeen;
     std::vector<std::vector<uint32_t>> weldGroups;
     std::vector<std::vector<uint32_t>> exactSeamGroups;
+    std::vector<std::vector<uint32_t>> exactSeamGroupsAll;
     // COINCIDENT VERTICES ARE A PROPERTY OF THE MESH, NOT OF THE PRESET.
     //
     // This was gated on cloth-ish presets, so a belt or an armour piece got an
@@ -14622,12 +14623,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // belt tear is real (101 open seams against the host's 0) and its fix waits
     // on giving the ARAP a welded mesh, which needs neither this list nor a new
     // pass on anyone else.
+    // DATA DISCOVERY IS UNIVERSAL; THE CONSUMERS OPT IN.
+    //
+    // These two questions were one condition, and they are not the same
+    // question. "Which vertices are the same material point" is topology of the
+    // mesh. "Should a seam weld pass run" is a decision about the preset.
+    // Coupling them meant a belt could not SEE its own seams without also
+    // switching on every pass that consumes them, and the one time I ungated it
+    // the bill landed on a skin-tight piece that was never the target - Undies
+    // worstSupportEdgeStretch 1.14 -> 4.90, from a weld pass that had simply
+    // never run there.
+    //
+    // So exactSeamGroupsAll is built for everyone and read by whoever asks;
+    // exactSeamGroups stays exactly as gated as it was, and the existing
+    // consumers cannot tell the difference.
     const bool needsExactSeamWeld =
         params.verletCloth ||
         normPreset == DRAPE_PRESET_LOOSE_DRAPED ||
         normPreset == DRAPE_PRESET_FITTED_CLOTH ||
         normPreset == DRAPE_PRESET_TUBULAR;
-    if (needsExactSeamWeld && n <= 0xFFFF) {
+    if (n <= 0xFFFF) {
         std::unordered_map<std::string, std::vector<uint32_t>> coincidence;
         coincidence.reserve(n);
         auto quantKey = [](const Vec3& p) -> std::string {
@@ -14668,14 +14683,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
             for (auto& cluster : clusters) {
                 if (cluster.size() <= 1) continue;
-                exactSeamGroups.push_back(cluster);
-                if (params.verletCloth)
+                exactSeamGroupsAll.push_back(cluster);
+                if (needsExactSeamWeld && params.verletCloth)
                     weldGroups.push_back(cluster);
             }
         }
-        if (!exactSeamGroups.empty())
-            HLog("detour: exact-seam-groups shape='%s' groups=%zu",
-                 shapeName.c_str(), exactSeamGroups.size());
+        if (needsExactSeamWeld)
+            exactSeamGroups = exactSeamGroupsAll;
+        if (!exactSeamGroupsAll.empty())
+            HLog("detour: exact-seam-groups shape='%s' groups=%zu consumers=%d",
+                 shapeName.c_str(), exactSeamGroupsAll.size(),
+                 needsExactSeamWeld ? 1 : 0);
     }
     // Keep the caller's material classification seam-coherent as well as the
     // solver's.  Otherwise the shell can correctly promote a coincident free
@@ -20290,7 +20308,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // decision has to be shared too: one twin held as an ARAP handle
             // while its partner is left for the solver to fill separates them
             // just as surely as two different targets would.
-            for (const auto& grp : exactSeamGroups) {
+            for (const auto& grp : exactSeamGroupsAll) {
                 int rep = -1;
                 for (uint32_t gi : grp)
                     if (gi < n && hasTarget[gi]) { rep = (int)gi; break; }
@@ -20357,7 +20375,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // cannot diverge because they are one vertex, and it costs no
             // stretch. Off until that exists.
             if (EnvToggle("DRAPE_BELT_SEAM_PIN", false)) {
-                for (const auto& grp : exactSeamGroups) {
+                for (const auto& grp : exactSeamGroupsAll) {
                     if (grp.size() <= 1) continue;
                     for (uint32_t gi : grp)
                         if (gi < n && hasTarget[gi]) isHandle[gi] = 1;
@@ -20374,7 +20392,89 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (isHandle[i]) { hIdx.push_back((uint32_t)i); hTgt.push_back(target[i]); }
             std::unordered_set<int> roots;
             for (size_t i = 0; i < n; ++i) roots.insert(findRoot((int)i));
-            if (!hIdx.empty() && SolveArap(arap, aTris, hIdx, hTgt, 4)) {
+            // WELD FOR THE SOLVE: one vertex per seam group, then scatter back.
+            //
+            // Pinning both twins to the same target was measured and it works -
+            // belts 51 and 12 open seams to zero - and it costs a rubber sheet
+            // (worstSupportEdgeStretch 1.14 -> 4.90), because a constraint and a
+            // topology are not interchangeable. Two coincident handles say "A
+            // must be here and B must be here" while still belonging to separate
+            // neighbourhoods, so the ARAP satisfies both by stretching whatever
+            // lies between. A weld says something strictly stronger and cheaper:
+            // A and B ARE ONE DEGREE OF FREEDOM. Then the seam cannot open,
+            // there is nothing to enforce, and nothing to pay for it.
+            //
+            // The collapse is temporary and local to this solve - the shape's
+            // own vertices are never merged, only the ARAP's view of them.
+            bool arapOk = false;
+            const bool weldedArap = EnvToggle("DRAPE_BELT_WELDED_ARAP", true) &&
+                                    !exactSeamGroupsAll.empty();
+            if (weldedArap) {
+                std::vector<uint32_t> weldOf(n);
+                for (size_t i = 0; i < n; ++i) weldOf[i] = (uint32_t)i;
+                for (const auto& grp : exactSeamGroupsAll) {
+                    if (grp.size() <= 1) continue;
+                    uint32_t canon = 0xFFFFFFFFu;
+                    for (uint32_t gi : grp) if (gi < n) canon = std::min(canon, gi);
+                    if (canon == 0xFFFFFFFFu) continue;
+                    for (uint32_t gi : grp) if (gi < n) weldOf[gi] = canon;
+                }
+                std::vector<uint32_t> compact(n, 0xFFFFFFFFu);
+                uint32_t wn = 0;
+                for (size_t i = 0; i < n; ++i)
+                    if (weldOf[i] == (uint32_t)i) compact[i] = wn++;
+                for (size_t i = 0; i < n; ++i) weldOf[i] = compact[weldOf[i]];
+
+                std::vector<ArapVec3> wRest((size_t)wn);
+                for (size_t i = 0; i < n; ++i) wRest[weldOf[i]] = arap[i];
+
+                // A face with two corners in the same group collapses to a
+                // segment and has no rest shape to be rigid about.
+                std::vector<std::array<uint32_t, 3>> wTris;
+                wTris.reserve(aTris.size());
+                for (const auto& t : aTris) {
+                    const uint32_t x = weldOf[t[0]], y = weldOf[t[1]], z = weldOf[t[2]];
+                    if (x == y || y == z || x == z) continue;
+                    wTris.push_back({x, y, z});
+                }
+
+                // Twins share a bind by now, so their targets should already
+                // agree exactly. Measured anyway: a non-zero disagreement here
+                // means something upstream is still handing the same material
+                // point two different answers, and I would rather find that
+                // before the ARAP averages it away silently.
+                std::vector<uint8_t> wHas((size_t)wn, 0);
+                std::vector<ArapVec3> wTargets((size_t)wn);
+                float maxDisagree = 0.0f;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!isHandle[i]) continue;
+                    const uint32_t wv = weldOf[i];
+                    if (wHas[wv]) {
+                        const Vec3 d{ wTargets[wv].x - target[i].x,
+                                      wTargets[wv].y - target[i].y,
+                                      wTargets[wv].z - target[i].z };
+                        maxDisagree = std::max(maxDisagree, Len(d));
+                        continue;
+                    }
+                    wTargets[wv] = target[i];
+                    wHas[wv] = 1;
+                }
+                std::vector<uint32_t> wIdx; std::vector<ArapVec3> wTgt;
+                for (uint32_t wv = 0; wv < wn; ++wv)
+                    if (wHas[wv]) { wIdx.push_back(wv); wTgt.push_back(wTargets[wv]); }
+
+                if (!wIdx.empty() && SolveArap(wRest, wTris, wIdx, wTgt, 4)) {
+                    for (size_t i = 0; i < n; ++i) arap[i] = wRest[weldOf[i]];
+                    arapOk = true;
+                }
+                HLog("belt M1 welded-ARAP: verts=%zu->%u tris=%zu->%zu handles=%zu "
+                     "targetDisagree=%.6f ok=%d",
+                     n, wn, aTris.size(), wTris.size(), wIdx.size(),
+                     maxDisagree, arapOk ? 1 : 0);
+            }
+            if (!arapOk && !weldedArap)
+                arapOk = !hIdx.empty() && SolveArap(arap, aTris, hIdx, hTgt, 4);
+            if (arapOk) {
                 for (size_t i = 0; i < n; ++i)
                     finalVerts[i] = Vec3{ arap[i].x, arap[i].y, arap[i].z };
                 // Thin DANGLING STRAPS keep VANILLA, not ARAP (2026-07-09, Yarl belt
