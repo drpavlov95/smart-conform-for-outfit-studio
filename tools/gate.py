@@ -20,6 +20,7 @@ a regression hides behind an improvement.
 """
 from __future__ import annotations
 import argparse
+import concurrent.futures as cf
 import os
 import re
 import subprocess
@@ -57,6 +58,7 @@ def main():
     ap.add_argument("--baseline", default="", help="env da BASELINE (vazio = defaults atuais)")
     ap.add_argument("--candidate", default="", help="env do CANDIDATO")
     ap.add_argument("--tol", type=float, default=1e-4)
+    ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4)))
     a = ap.parse_args()
 
     caps = sorted(Path(a.caps).rglob("*.drcap"))
@@ -64,12 +66,28 @@ def main():
         print("nenhuma captura em", a.caps)
         return 2
 
-    rows = []
+    # In parallel, because the length of this loop changes how I THINK.
+    #
+    # Sequential this took 12 minutes, and a 12-minute wait is what turns
+    # "test a hypothesis" into "while I'm waiting, try another constant too."
+    # Six runs went by on one day and three of them were nothing but a
+    # different floor value - not diagnosis, just a knob, which is exactly the
+    # habit I was told not to have. The replays are independent and the box has
+    # cores; a loop that answers in a minute is one you can actually ask
+    # questions with.
+    jobs = []
     for cap in caps:
         shape = cap.name.split("___")[-1].split("__RM")[0]
-        scene = cap.parent.name[:12]
-        rows.append((f"{scene}/{shape}", run(a.harness, cap, a.baseline),
-                     run(a.harness, cap, a.candidate)))
+        name = f"{cap.parent.name[:12]}/{shape}"
+        jobs.append((name, cap, a.baseline))
+        jobs.append((name, cap, a.candidate))
+    got = {}
+    with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
+        fut = {ex.submit(run, a.harness, c, e): (nm, i)
+               for i, (nm, c, e) in enumerate(jobs)}
+        for f in cf.as_completed(fut):
+            got[fut[f][1]] = f.result()
+    rows = [(jobs[i][0], got[i], got[i + 1]) for i in range(0, len(jobs), 2)]
 
     fails, wins = [], []
     print(f"{'peca':<34} {'corpo':>14} {'roupa':>18} {'pub':>4}")
