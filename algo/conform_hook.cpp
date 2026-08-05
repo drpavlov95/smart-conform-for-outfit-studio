@@ -10159,8 +10159,35 @@ static void PathBTriUntangle(std::vector<Vec3>& x,
                             if (r == 0) ++stats.pairs;
 
                             // Both endpoints straddle the plane. The shallower
-                            // one is the cheaper way back out, and it goes to
-                            // the side its partner is still on.
+                            // one is the cheaper way back out, and it goes to the
+                            // side its own partner is still on.
+                            //
+                            // TWO ATTEMPTS TO IMPROVE THIS CHOICE, BOTH WORSE.
+                            // The problem is real: on the yarl dress the guard
+                            // throws all 15265 corrections away because they cost
+                            // body clearance the solve had just bought (22
+                            // vertices inside the body down to 5), so the freed
+                            // cloth goes back into flesh - 35@-1.49 -> 53@-1.87,
+                            // REVERTIDO. Penetration and self-intersection are
+                            // competing for the same room.
+                            //
+                            // Choosing by resulting clearance:  207@-9.55, worst
+                            // correction 3.6 -> 35.6 units. The deepest endpoint
+                            // always lands furthest out, so it always wins, and
+                            // it is exactly the one with the longest way to go.
+                            // Letting the body merely VETO the cheap endpoint:
+                            // 234@-10.26. The veto fires almost every time, since
+                            // a push along the pierced CLOTH's normal usually
+                            // reduces some body gap, and every firing hands the
+                            // move to the expensive endpoint again.
+                            //
+                            // Both failures share a cause worth keeping: the
+                            // endpoint choice is not the lever. Which vertex
+                            // moves cannot fix a pass whose total displacement
+                            // has nowhere to go. That needs the excess material
+                            // absorbed somewhere - fewer, smaller corrections
+                            // spread over more of the mesh - not a better pick
+                            // between two.
                             const float sd0 = Dot(Sub(x[ia], f0), nrm);
                             const float sd1 = Dot(Sub(x[ib], f0), nrm);
                             const int off = (std::fabs(sd0) <= std::fabs(sd1)) ? 0 : 1;
