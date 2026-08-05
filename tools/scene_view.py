@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""Render a WHOLE live scene the way he actually looks at it.
+"""See a whole outfit the way he sees it, and be able to trust the picture.
 
-Every "it measured better" that turned out to be wrong this project had the same
-cause: I was looking at one garment, flat-shaded, in isolation, from one fixed
-angle, with no body - and he opens the outfit assembled, on the body, shaded,
-from whatever angle the defect is visible in. A skirt that is fine alone can be
-wrong next to the cloak; a silhouette that reads straight from dead-behind can
-balloon at three-quarters.
+Three things kept me reporting wins he could not find:
 
-So this renders the SET: every shape of a scene together, the body underneath,
-smooth-shaded, from several angles, vanilla against ours side by side. It is
-slower and less quantitative than the scalars, and it is the only thing that has
-consistently agreed with him.
+  1. I rendered ONE garment, isolated, with no body. He opens the set - cloak
+     over skirt over pants over belt - on the body. A piece can measure fine
+     alone and wreck the assembly.
+  2. I sorted faces by depth, which invents shards wherever two surfaces touch,
+     so the picture could not distinguish a real defect from its own artifact.
+     This uses a z-buffer (tools/raster.py).
+  3. I only ever compared against vanilla. When he says "it got worse" he means
+     worse than the build he had, and that axis did not exist. Any number of
+     columns can be given now.
+
+Modes:
+  solid   each piece its own tint, body dull underneath
+  pen     paint the CLOTH-IN-CLOTH and CLOTH-IN-BODY vertices red. The defect
+          he reports as "horroroso" is one garment coming through another, and
+          it should be visible as itself rather than inferred from a scalar.
+  diff    heat the vertices that moved between the first column and this one
 """
 from __future__ import annotations
 import argparse
+import os
 import subprocess
 from pathlib import Path
 
@@ -22,143 +30,177 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.collections import PolyCollection
 
-# right, forward - Z is up in mesh space. Skyrim: front = +y, back = -y.
-VIEWS = {
-    "frente":      (np.array([1.0, 0, 0]),   np.array([0, -1.0, 0])),
-    "costas":      (np.array([-1.0, 0, 0]),  np.array([0, 1.0, 0])),
-    "perfil":      (np.array([0, -1.0, 0]),  np.array([-1.0, 0, 0])),
-    "costas34":    (np.array([-0.7071, -0.7071, 0]), np.array([0.7071, -0.7071, 0])),
-    "frente34":    (np.array([0.7071, -0.7071, 0]),  np.array([-0.7071, -0.7071, 0])),
-}
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from raster import Frame, draw, frame_bounds, VIEWS   # noqa: E402
+
+TINTS = [(0.74, 0.76, 0.82), (0.82, 0.73, 0.68), (0.71, 0.80, 0.73),
+         (0.84, 0.80, 0.66), (0.76, 0.71, 0.83), (0.80, 0.78, 0.74)]
+BODY = (0.50, 0.48, 0.47)
+HOT = (0.92, 0.15, 0.12)
 
 
-def load_obj(path: Path):
+def load_obj(path):
     vs, fs = [], []
     for line in open(path):
         if line.startswith("v "):
             vs.append([float(x) for x in line.split()[1:4]])
         elif line.startswith("f "):
-            idx = [int(t.split("/")[0]) - 1 for t in line.split()[1:]]
-            for k in range(1, len(idx) - 1):
-                fs.append([idx[0], idx[k], idx[k + 1]])
-    return np.array(vs), np.array(fs, dtype=int)
+            i = [int(t.split("/")[0]) - 1 for t in line.split()[1:]]
+            for k in range(1, len(i) - 1):
+                fs.append([i[0], i[k], i[k + 1]])
+    return np.array(vs, np.float64), np.array(fs, np.int32)
 
 
-def draw(ax, meshes, view, crop=None):
-    """meshes: list of (verts, faces, base_rgb). Painter's algorithm, one pass."""
-    right, fwd = VIEWS[view]
-    up = np.array([0, 0, 1.0])
-    polys, colors, depths = [], [], []
-    for vs, fs, rgb in meshes:
-        if len(fs) == 0:
+def inside_mask(pts, verts, faces, grid=3.0):
+    """Which of `pts` lie inside the closed-ish surface (verts, faces).
+
+    Nearest triangle by a coarse hash, then the sign of the offset against that
+    triangle's normal. Approximate on purpose: it is a picture, and the point is
+    to SEE where cloth is buried, not to score it - the harness already scores
+    it exactly. Anything within a hair of the surface is left uncoloured so
+    ordinary contact does not light up the whole garment.
+    """
+    tri = verts[faces]
+    cen = tri.mean(axis=1)
+    fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    ln = np.linalg.norm(fn, axis=1, keepdims=True)
+    ln[ln == 0] = 1
+    fn = fn / ln
+    lo = cen.min(axis=0)
+    cells = {}
+    key = ((cen - lo) // grid).astype(int)
+    for i, k in enumerate(map(tuple, key)):
+        cells.setdefault(k, []).append(i)
+    out = np.zeros(len(pts), bool)
+    for n, p in enumerate(pts):
+        c = ((p - lo) // grid).astype(int)
+        cand = []
+        r = 1
+        while not cand and r <= 3:
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    for dz in range(-r, r + 1):
+                        cand += cells.get((c[0] + dx, c[1] + dy, c[2] + dz), [])
+            r += 1
+        if not cand:
             continue
-        tri = vs[fs]
-        n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-        nl = np.linalg.norm(n, axis=1, keepdims=True)
-        nl[nl == 0] = 1
-        n = n / nl
-        # headlight plus a fill from above, which is roughly what the OS
-        # viewport does and keeps folds readable instead of flat.
-        lam = np.clip(-(n @ fwd), 0, 1) * 0.75 + np.clip(n @ up, 0, 1) * 0.25
-        shade = 0.25 + 0.75 * lam
-        x2 = tri @ right
-        y2 = tri @ up
-        polys.extend(np.stack([x2, y2], axis=-1))
-        colors.extend(np.clip(np.array(rgb)[None, :] * shade[:, None], 0, 1))
-        depths.extend((tri @ fwd).mean(axis=1))   # one depth per face, not per corner
-    order = np.argsort(depths)
-    pc = PolyCollection([polys[i] for i in order],
-                        facecolors=[colors[i] for i in order],
-                        edgecolors="none", antialiased=False)
-    ax.add_collection(pc)
-    allv = np.concatenate([m[0] for m in meshes])
-    if crop:
-        zlo, zhi = crop
-        sel = (allv[:, 2] >= zlo) & (allv[:, 2] <= zhi)
-        if sel.any():
-            allv = allv[sel]
-    xs, ys = allv @ right, allv @ up
-    pad = 2.0
-    cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
-    half = max(xs.max() - xs.min(), ys.max() - ys.min()) / 2 + pad
-    ax.set_xlim(cx - half, cx + half)
-    ax.set_ylim(cy - half, cy + half)
-    ax.set_aspect("equal")
-    ax.axis("off")
+        cand = np.array(cand)
+        d2 = ((cen[cand] - p) ** 2).sum(1)
+        j = cand[np.argmin(d2)]
+        s = float(np.dot(p - cen[j], fn[j]))
+        if s < -0.12:                     # clearly behind the surface
+            out[n] = True
+    return out
 
 
-# Garments get distinct tints so a piece can be told from its neighbour; the
-# body is deliberately dull so cloth reads against it.
-TINTS = [(0.72, 0.74, 0.80), (0.80, 0.72, 0.68), (0.70, 0.78, 0.72),
-         (0.82, 0.78, 0.66), (0.74, 0.70, 0.80), (0.78, 0.76, 0.74)]
-BODY = (0.52, 0.50, 0.49)
+def build_columns(scene, work, harness, env_extra, variants):
+    caps = sorted(Path(scene).glob("*.drcap"))
+    if not caps:
+        raise SystemExit(f"nenhuma captura em {scene}")
+    work = Path(work); work.mkdir(parents=True, exist_ok=True)
+    base = dict(os.environ)
+    base.update(dict(DRAPE_SHELL_SOLVE="1", DRAPE_SHELL_TRANSACTIONS="0",
+                     DRAPE_SHELL_BODY_EVICT="1", DRAPE_ANTICLIP_SAFE_FLOOR="1",
+                     DRAPE_POSTERIOR_CHORD="1"))
+    for kv in env_extra.split():
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            base[k] = v
+
+    cols, body = [], None
+    for label, envs in variants:
+        env = dict(base)
+        for kv in envs.split():
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                env[k] = v
+        pieces = []
+        for i, cap in enumerate(caps):
+            shape = cap.name.split("___")[-1].split("__RM")[0]
+            tag = label.replace(" ", "_").replace("/", "_")
+            out = work / f"{shape}__{tag}.obj"
+            bod = work / f"{shape}__body.obj"
+            args = [harness, "--replay", str(cap), "--body-obj", str(bod)]
+            args += (["--input-obj", str(out)] if envs == "VANILLA"
+                     else ["--result-obj", str(out)])
+            subprocess.run(args, env=env, capture_output=True)
+            if out.exists():
+                v, f = load_obj(out)
+                pieces.append((v, f, TINTS[i % len(TINTS)], shape))
+            if body is None and bod.exists():
+                body = load_obj(bod)
+        cols.append((label, pieces))
+        print(f"  coluna '{label}': {len(pieces)} peca(s)")
+    return cols, body
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", required=True, help="dir with the scene's .drcap files")
+    ap.add_argument("--scene", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--harness", default="./build/algo/Release/drape-harness.exe")
     ap.add_argument("--work", default="tmp/sceneview")
     ap.add_argument("--views", default="costas,costas34,perfil")
-    ap.add_argument("--crop", default="", help="zlo:zhi to zoom a band")
+    ap.add_argument("--crop", default="")
+    ap.add_argument("--mode", default="solid", choices=["solid", "pen", "diff"])
     ap.add_argument("--env", default="")
+    ap.add_argument("--px", type=int, default=760)
+    ap.add_argument("--col", action="append", default=[],
+                    help="rotulo=ENV=VAL ...  (use ENV literal VANILLA para o conform do host)")
     a = ap.parse_args()
 
-    work = Path(a.work)
-    work.mkdir(parents=True, exist_ok=True)
-    caps = sorted(Path(a.scene).glob("*.drcap"))
-    if not caps:
-        print("nenhuma captura em", a.scene)
-        return 1
+    variants = []
+    for c in a.col:
+        label, _, envs = c.partition("=")
+        variants.append((label, envs))
+    if not variants:
+        variants = [("VANILLA (sem Drape)", "VANILLA"), ("NOSSO", "")]
 
-    import os
-    base_env = dict(os.environ)
-    base_env.update(dict(DRAPE_SHELL_SOLVE="1", DRAPE_SHELL_TRANSACTIONS="0",
-                         DRAPE_SHELL_BODY_EVICT="1", DRAPE_ANTICLIP_SAFE_FLOOR="1",
-                         DRAPE_POSTERIOR_CHORD="1"))
-    for kv in a.env.split():
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            base_env[k] = v
-
-    ours, vanilla, body = [], [], None
-    for i, cap in enumerate(caps):
-        shape = cap.name.split("___")[-1].split("__RM")[0]
-        r = work / f"{shape}__ours.obj"
-        v = work / f"{shape}__vanilla.obj"
-        b = work / f"{shape}__body.obj"
-        subprocess.run([a.harness, "--replay", str(cap), "--result-obj", str(r),
-                        "--input-obj", str(v), "--body-obj", str(b)],
-                       env=base_env, capture_output=True)
-        if r.exists():
-            ours.append((*load_obj(r), TINTS[i % len(TINTS)]))
-        if v.exists():
-            vanilla.append((*load_obj(v), TINTS[i % len(TINTS)]))
-        if body is None and b.exists():
-            body = (*load_obj(b), BODY)
-        print(f"  {shape}")
-
-    if body is not None:
-        ours.append(body)
-        vanilla.append(body)
+    cols, body = build_columns(a.scene, a.work, a.harness, a.env, variants)
     views = [v.strip() for v in a.views.split(",") if v.strip() in VIEWS]
     crop = tuple(float(x) for x in a.crop.split(":")) if a.crop else None
 
-    fig, axes = plt.subplots(len(views), 2,
-                             figsize=(9 * 2, 8 * len(views)), squeeze=False)
-    for r, view in enumerate(views):
-        for c, (label, meshes) in enumerate((("VANILLA (sem Drape)", vanilla),
-                                             ("NOSSO", ours))):
-            draw(axes[r][c], meshes, view, crop)
-            axes[r][c].set_title(f"{label} — {view}", fontsize=15)
+    ref = cols[0][1]
+    fig, axes = plt.subplots(len(views), len(cols),
+                             figsize=(6.4 * len(cols), 6.4 * len(views)),
+                             squeeze=False)
+    for ci, (label, pieces) in enumerate(cols):
+        meshes = [(v, f, t) for v, f, t, _ in pieces]
+        if body is not None:
+            meshes = meshes + [(body[0], body[1], BODY)]
+        for ri, view in enumerate(views):
+            center, half = frame_bounds(meshes, view, crop)
+            fr = Frame(a.px, int(a.px * 1.25))
+            if body is not None:
+                draw(fr, body[0], body[1], BODY, view, center, half)
+            for pi, (v, f, tint, shape) in enumerate(pieces):
+                col = np.array(tint, np.float32)
+                if a.mode == "pen":
+                    hot = np.zeros(len(v), bool)
+                    if body is not None:
+                        hot |= inside_mask(v, body[0], body[1])
+                    for qi, (ov, of, _t, _s) in enumerate(pieces):
+                        if qi != pi:
+                            hot |= inside_mask(v, ov, of)
+                    col = np.tile(np.array(tint, np.float32), (len(v), 1))
+                    col[hot] = HOT
+                elif a.mode == "diff" and ci > 0 and pi < len(ref):
+                    rv = ref[pi][0]
+                    if len(rv) == len(v):
+                        d = np.linalg.norm(v - rv, axis=1)
+                        t = np.clip(d / max(d.max(), 1e-6), 0, 1)[:, None]
+                        col = (np.array(tint, np.float32)[None, :] * (1 - t) +
+                               np.array(HOT, np.float32)[None, :] * t)
+                draw(fr, v, f, col, view, center, half)
+            axes[ri][ci].imshow(fr.image())
+            axes[ri][ci].set_title(f"{label} — {view}", fontsize=13)
+            axes[ri][ci].axis("off")
     fig.tight_layout()
-    fig.savefig(a.out, dpi=95, facecolor="white")
+    fig.savefig(a.out, dpi=100, facecolor="white")
     print("wrote", a.out)
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
