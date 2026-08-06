@@ -25091,6 +25091,24 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         giveBack(worstV);
                     }
                     if (offenders == 0) break;
+                    // O RECUO NAO E O MECANISMO - medido, nao suposto.
+                    //
+                    // As faces que estouram a area tem um salto de deslocamento
+                    // DENTRO da propria face 29x maior que a media da malha
+                    // (1.049 contra 0.037): no tri 2971 um vertice anda 0.913 e
+                    // outro 2.099, e ele sai com 13x a area autorada. Pareceu a
+                    // mesma classe da fronteira preso/livre do braco, que ja
+                    // custou 21.4x de esticamento e foi resolvida com transicao
+                    // suave, entao implementei a transicao aqui e espalhei
+                    // retreat pelo anel.
+                    //
+                    // Efeito ZERO em qualquer intensidade, e o log diz por que:
+                    // frozen=2, abandoned=0, overStretch=0 em 1777 vertices. O
+                    // recuo mal dispara nesta peca, entao nao ha o que suavizar.
+                    // O salto vem da propria correcao da eviccao - vertice ja
+                    // livre recebe zero, vizinho enterrado recebe o empurrao
+                    // inteiro - e sobreviver ao `spread` de 0.5 e o que ainda
+                    // precisa ser explicado.
                     // FROZEN-AWARE WELD. The plain average weld is why this
                     // sweep sometimes failed to converge: giveBack() returns a
                     // twin to the pre-round pose, then the average drags it
