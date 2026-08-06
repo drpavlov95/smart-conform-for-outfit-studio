@@ -24776,6 +24776,25 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // 0 = desligado. Unidade: unidades de deslocamento por aresta.
             const float kGradLimit = std::max(0.0f,
                 EnvFloat("DRAPE_EVICT_GRAD_LIMIT", 0.0f));
+            // SPIKE D: MUDANCA DE MODELO, nao outro parametro da mesma lei.
+            //
+            // B e C tentaram consertar a correcao - fazer as direcoes
+            // concordarem, acoplar as magnitudes - e as duas medem PIOR. O que
+            // sobra e a hipotese que nenhuma das duas testa: uma face que
+            // atravessa um vinco do corpo talvez nao seja evacuavel vertice a
+            // vertice, ponto. Aqui essa classe de face simplesmente NAO recebe
+            // a correcao (ou recebe uma fracao dela), e stretch, contato e o
+            // reparo de flip que rodam depois resolvem a regiao.
+            //
+            // Isto pode aumentar penetracao, e e exatamente por isso que vale
+            // como experimento: se a malha para de deformar e o clipping sobe,
+            // o modelo vertice-a-vertice E a fonte da deformacao e falta um
+            // mecanismo de contato estrutural. Se nao muda nem geometria nem
+            // aparencia, a hipotese perde forca.
+            const float kCreaseAngle = ClampRange(
+                EnvFloat("DRAPE_EVICT_CREASE_ANGLE", 0.0f), 0.0f, 180.0f);
+            const float kCreaseScale = ClampRange(
+                EnvFloat("DRAPE_EVICT_CREASE_SCALE", 0.0f), 0.0f, 1.0f);
 
             // TRACE FINO POR RODADA. Diagnostico puro, sem efeito no resultado.
             // DRAPE_EVICT_TRACE_TRIS=2971,2926,2967,3000
@@ -25041,6 +25060,32 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     }
                 }
 
+                // SPIKE D. Divergencia MEDIDA: 122 graus de mediana nas
+                // faces que estouram a area contra 29 nas saudaveis. A face
+                // inteira e marcada, nao o vertice, porque a face e a unidade
+                // que rasga - marcar por vertice deixaria dois cantos evacuando
+                // e um parado, que e o gradiente que o spike C ja tentou.
+                if (kCreaseAngle > 0.0f) {
+                    const float cosLim = std::cos(kCreaseAngle * 3.14159265f / 180.0f);
+                    std::vector<uint8_t> creased(n, 0);
+                    int creasedFaces = 0;
+                    for (const auto& t : *tris) {
+                        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                        float worst = 1.0f;
+                        for (int k = 0; k < 3; ++k)
+                            worst = std::min(worst,
+                                Dot(nrmOf[t[k]], nrmOf[t[(k + 1) % 3]]));
+                        if (worst >= cosLim) continue;
+                        ++creasedFaces;
+                        for (int k = 0; k < 3; ++k) creased[t[k]] = 1;
+                    }
+                    for (size_t i = 0; i < n; ++i)
+                        if (creased[i]) corr[i] = Scale(corr[i], kCreaseScale);
+                    if (r == 0)
+                        HLog("evict-crease: shape='%s' angle=%.0fg scale=%.2f "
+                             "faces=%d/%zu", shapeName.c_str(), kCreaseAngle,
+                             kCreaseScale, creasedFaces, tris->size());
+                }
                 std::vector<Vec3> corrRaw;
                 if (!traceTris.empty()) corrRaw = corr;
                 if (spread > 0.0f) {
