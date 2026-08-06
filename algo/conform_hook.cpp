@@ -24770,6 +24770,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 EnvFloat("DRAPE_SHELL_BODY_EVICT_STEP", 0.60f), 0.05f, 1.0f);
             const float spread = ClampRange(
                 EnvFloat("DRAPE_SHELL_BODY_EVICT_SPREAD", 0.50f), 0.0f, 1.0f);
+            const float kCoherentNrm = ClampRange(
+                EnvFloat("DRAPE_EVICT_COHERENT_NRM", 0.0f), 0.0f, 180.0f);
+            // SPIKE C: limite de GRADIENTE do deslocamento entre vizinhos.
+            // 0 = desligado. Unidade: unidades de deslocamento por aresta.
+            const float kGradLimit = std::max(0.0f,
+                EnvFloat("DRAPE_EVICT_GRAD_LIMIT", 0.0f));
 
             // TRACE FINO POR RODADA. Diagnostico puro, sem efeito no resultado.
             // DRAPE_EVICT_TRACE_TRIS=2971,2926,2967,3000
@@ -24997,6 +25003,44 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (violating == 0) break;
                 ++roundsRun;
 
+                // SPIKE B: DIRECAO COERENTE ONDE A SUPERFICIE DO CORPO VIRA.
+                //
+                // Medido: nas faces que estouram a area, as normais corporais
+                // que os tres vertices perseguem divergem em MEDIANA 122 graus,
+                // contra 29 nas faces saudaveis. Nao e magnitude - e direcao.
+                // A eviccao empurra cada vertice pela SUA normal, entao uma face
+                // atravessando um vinco do corpo (fresta braco-tronco, virilha)
+                // tem seus vertices mandados para lados quase opostos e e
+                // rasgada. Disparidade de GAP nao explica: as saudaveis tem
+                // disparidade MAIOR (1.889 contra 1.626).
+                //
+                // Onde a vizinhanca concorda, nada muda. Onde ela briga, o
+                // vertice segue a direcao media do anel em vez da propria: a
+                // face passa a ser empurrada como uma peca so. Continua
+                // unilateral - a projecao adiante ainda descarta componente
+                // que nao seja para fora.
+                if (kCoherentNrm > 0.0f) {
+                    const float cosLim = std::cos(kCoherentNrm * 3.14159265f / 180.0f);
+                    std::vector<Vec3> nc = nrmOf;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (ring[i].empty()) continue;
+                        float worst = 1.0f;
+                        Vec3 acc = nrmOf[i];
+                        for (uint32_t j : ring[i]) {
+                            worst = std::min(worst, Dot(nrmOf[i], nrmOf[j]));
+                            acc = Add(acc, nrmOf[j]);
+                        }
+                        if (worst >= cosLim) continue;      // vizinhanca concorda
+                        const float L = Len(acc);
+                        if (L > 1.0e-6f) nc[i] = Scale(acc, 1.0f / L);
+                    }
+                    nrmOf.swap(nc);
+                    for (size_t i = 0; i < n; ++i) {
+                        const float m = Len(corr[i]);
+                        if (m > 1.0e-9f) corr[i] = Scale(nrmOf[i], m);
+                    }
+                }
+
                 std::vector<Vec3> corrRaw;
                 if (!traceTris.empty()) corrRaw = corr;
                 if (spread > 0.0f) {
@@ -25021,6 +25065,36 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     const float along = Dot(corr[i], nrmOf[i]);
                     if (along <= 0.0f) continue;
                     next[i] = Add(finalVerts[i], Scale(nrmOf[i], along));
+                }
+                // SPIKE C. A eviccao resolve contato vertice a vertice e nada
+                // acopla vizinhos, entao dois pontos da mesma face podem receber
+                // deslocamentos muito diferentes e a face e rasgada - medido, o
+                // salto DENTRO da face e 29x maior nas que estouram. Isto nao
+                // mexe na direcao nem no alvo: so impede que vertices ligados por
+                // uma aresta se afastem alem de um limite por rodada, puxando
+                // SEMPRE o maior para baixo. Contato continua unilateral e a
+                // varredura continua monotona, porque a correcao so diminui.
+                if (kGradLimit > 0.0f) {
+                    std::vector<float> mv(n, 0.0f);
+                    for (size_t i = 0; i < n; ++i) mv[i] = Len(Sub(next[i], finalVerts[i]));
+                    for (int it = 0; it < 4; ++it) {
+                        int cut = 0;
+                        for (const EvEdge& e : evEdges) {
+                            const float hi = std::max(mv[e.a], mv[e.b]);
+                            const float lo = std::min(mv[e.a], mv[e.b]);
+                            if (hi - lo <= kGradLimit) continue;
+                            const float cap = lo + kGradLimit;
+                            if (mv[e.a] > mv[e.b]) mv[e.a] = cap; else mv[e.b] = cap;
+                            ++cut;
+                        }
+                        if (cut == 0) break;
+                    }
+                    for (size_t i = 0; i < n; ++i) {
+                        const Vec3 dvec = Sub(next[i], finalVerts[i]);
+                        const float have = Len(dvec);
+                        if (have <= 1.0e-9f || mv[i] >= have - 1.0e-6f) continue;
+                        next[i] = Add(finalVerts[i], Scale(dvec, mv[i] / have));
+                    }
                 }
                 if (!traceTris.empty()) {
                     for (size_t i = 0; i < n; ++i) {
