@@ -24121,8 +24121,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // free-panel position coherent.  A later pass may only publish a
             // locally repaired candidate once it passes this transaction; it
             // cannot buy a lower penetration count by retaining a failed pose.
-            finalVerts = pathBShellPublishedReference;
-            finalReason += " -> restored physical checkpoint";
+            // EXPERIMENTO, desligado: manter a cauda mesmo reprovada, para medir
+            // o que os passes POSTERIORES fariam com ela. Nao muda o pipeline -
+            // serve para provar ou refutar que a aceitacao acontece cedo demais,
+            // ou seja, que o portao rejeita por um defeito que um passe logo
+            // adiante repara. Nunca ligar em producao: pular a restauracao sem
+            // essa prova e publicar uma pose que falhou um invariante duro.
+            if (EnvToggle("DRAPE_EXP_KEEP_TAIL", false)) {
+                finalReason += " -> EXPERIMENTO: cauda mantida";
+            } else {
+                finalVerts = pathBShellPublishedReference;
+                finalReason += " -> restored physical checkpoint";
+            }
         }
         // The downstream proxy must always match the pose this transaction
         // actually publishes, including its deterministic fallback.
@@ -24343,6 +24353,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             HLog("last-chance flip repair: rounds=%d remaining=%d",
                  rounds, lastFlipped);
     }
+    DrapeDumpStage(finalVerts, "x2_after_fliprepair", shapeName, bodyBVH);
 
     // The last-chance flip repair deliberately pulls broken faces toward the
     // nominal conform and can therefore reintroduce lateral drift after the
