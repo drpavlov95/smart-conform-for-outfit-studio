@@ -13476,7 +13476,16 @@ static void DrapeDumpStage(const std::vector<Vec3>& verts, const char* stage,
     }
     const char* t = getenv("TEMP");
     if (!t) return;
-    std::string path = std::string(t) + "/drape_stage_" + stage + "__" +
+    // SEQUENCE ID EXPLICITO no nome do arquivo.
+    //
+    // A ordem dos estagios foi inferida duas vezes e errada duas vezes: por
+    // NOME (os numeros do rotulo nao seguem a execucao - 06_selfcol_tuck roda
+    // antes de 04_stretch_cap) e por MTIME (funciona por acidente e nao e
+    // garantia de nada). Ordem de execucao agora e um dado, nao uma deducao.
+    static thread_local int s_stageSeq = 0;
+    char seq[8];
+    snprintf(seq, sizeof(seq), "%03d", s_stageSeq++);
+    std::string path = std::string(t) + "/drape_stage_" + seq + "_" + stage + "__" +
                        SafeFilePart(shape) + ".obj";
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
@@ -21662,6 +21671,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // Pit verts sit ON island junctions (the armpit is the arm<->torso stitch);
             // per-vert lifts can open prox pairs â€” restore the invariant here, not at
             // the end of the wreck (vampire-tear lesson, 3rd application).
+            DrapeDumpStage(finalVerts, "00z_before_panelflatten", shapeName, bodyBVH);
             if (nPit > 0)
                 applyFinalProxSeamCap(6, "post-pit-prox-cap");
             HLog("detour: panel-flatten shape='%s' eligible=%zu/%zu pit=%zu chords=%zu seamGroups=%zu gapMin=%.2f iters=%d",
