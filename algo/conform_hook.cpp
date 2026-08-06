@@ -9042,7 +9042,12 @@ static int PathBFaceContactProject(
     const std::vector<uint8_t>* triActive = nullptr,
     bool countOnly = false,
     std::vector<uint32_t>* perVertexMoves = nullptr,
-    bool crawlInPinch = false)
+    bool crawlInPinch = false,
+    // Mesmo orcamento de deslocamento do contato de vertice: a amostra de face
+    // empurra os tres cantos e caminha o pano exatamente igual.
+    std::vector<float>* drift = nullptr,
+    float driftCap = 0.0f,
+    bool driftTangentOnly = true)
 {
     if (!body.valid || contactFloors.size() !=
             tris.size() * std::size(kTriangleSamples)) return 0;
@@ -9120,6 +9125,31 @@ static int PathBFaceContactProject(
                 const float weight = invMass[vi[k]] * bary[k] / denom;
                 if (weight <= 0.0f) continue;
                 Vec3 mv = Scale(correction, weight);
+                if (drift && driftCap > 0.0f && vi[k] < drift->size()) {
+                    if (!driftTangentOnly) {
+                        const float have = Len(mv);
+                        const float left = driftCap - (*drift)[vi[k]];
+                        if (left <= 0.0f) continue;
+                        if (have > left) mv = Scale(mv, left / have);
+                        (*drift)[vi[k]] += Len(mv);
+                        x[vi[k]] = Add(x[vi[k]], mv);
+                        if (perVertexMoves && perVertexMoves->size() == x.size())
+                            ++(*perVertexMoves)[vi[k]];
+                        continue;
+                    }
+                    const Vec3 normalPart = Scale(nrm, Dot(mv, nrm));
+                    Vec3 tangPart = Sub(mv, normalPart);
+                    const float tl = Len(tangPart);
+                    if (tl > 1.0e-9f) {
+                        const float left = driftCap - (*drift)[vi[k]];
+                        if (left <= 0.0f) tangPart = Vec3{0.0f, 0.0f, 0.0f};
+                        else {
+                            if (tl > left) tangPart = Scale(tangPart, left / tl);
+                            (*drift)[vi[k]] += Len(tangPart);
+                        }
+                        mv = Add(normalPart, tangPart);
+                    }
+                }
                 // per-vert clamp: a lone movable vert with a small barycentric
                 // weight receives correction/b (amplified) - measured as edge
                 // spikes and a permanent 9-moves/round oscillation in the
@@ -11562,6 +11592,70 @@ static bool PathBSimV2Solve(
     int standoffMoves = 0;
     float worstStandoff = 0.0f;
     int totalIters = 0;
+    // CONTATO NAO TRANSLADA, CONTATO SEPARA.
+    //
+    // Medido no vao frontal da saia do Yarl: os vertices do apice se deslocam
+    // 16 unidades, das quais ~13 sao TANGENTES a superficie do corpo - eles
+    // nao sao empurrados para fora, sao CAMINHADOS de lado. O mecanismo e o
+    // corredor entre as duas coxas: a normal do ponto mais proximo aponta de
+    // lado, o empurrao move o vertice lateralmente, ele continua dentro do
+    // corredor, e a proxima iteracao empurra de novo - ate ele sair pela beira
+    // da perna, a 15.8 do eixo contra 3.7 no autorado e 4.4 no sculpt do
+    // usuario. E o V escancarado entre as pernas que ele ve na tela.
+    //
+    // O clamp de corredor que ja existe impede atravessar a parede OPOSTA; nao
+    // impede sair de lado, que e o que acontece. Isto limita o total que o
+    // contato pode deslocar um vertice no solve inteiro: a correcao e ESCALADA
+    // para caber no que resta do orcamento, nunca vetada - um veto por vertice
+    // deixa degrau de um vertice, que e a forma que este projeto ja pagou
+    // caro para aprender a evitar. Contato continua unilateral e continua
+    // resolvendo penetracao; ele so nao pode mais arrastar o pano.
+    // SO A PARTE TANGENCIAL TEM ORCAMENTO.
+    //
+    // Limitar o deslocamento TOTAL foi medido e reprovado no portao: 5 pecas
+    // regridem em penetracao (Fine Clothes Body 0 -> 6@-1.49, Thalmor 0 -> 11,
+    // vampire 4 -> 21), porque o mesmo limite que impede a caminhada tambem
+    // impede o contato de terminar de tirar o pano de dentro da carne. A
+    // medicao ja tinha dito qual metade e a patologica: 13 das 16 unidades do
+    // apice sao TANGENTES a superficie. Empurrar ao longo da normal e o que
+    // contato faz; deslizar ao longo da superficie e o que ele nao deveria
+    // fazer sozinho, porque num corredor isso vira uma caminhada sem fim.
+    //
+    // Entao a componente normal passa inteira, sempre, e so a tangencial gasta
+    // orcamento. Penetracao continua sendo resolvida na mesma velocidade; o
+    // pano e que para de ser arrastado de lado.
+    const float kContactDriftCap = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_CONTACT_DRIFT", 0.0f));
+    // 1 = so a componente tangencial gasta orcamento (MEDIDO INERTE: 526 -> 516
+    //     de auto-interseccao, borda e quadril inalterados - refuta a explicacao
+    //     de que a caminhada lateral e o mecanismo).
+    // 0 = o deslocamento TOTAL gasta orcamento. Tem efeito grande e conhecido:
+    //     auto-interseccao 526 -> 355, e o portao REPROVA por penetracao em 5
+    //     pecas, porque estrangula o contato inteiro e nao so a patologia.
+    const bool kDriftTangentOnly = EnvToggle("DRAPE_SHELL_CONTACT_DRIFT_TANGENT", true);
+    std::vector<float> contactDrift(n, 0.0f);
+    auto clipContactDrift = [&](size_t i, Vec3 move, const Vec3& nrm) -> Vec3 {
+        if (kContactDriftCap <= 0.0f || i >= n) return move;
+        if (!kDriftTangentOnly) {
+            const float len = Len(move);
+            if (len <= 1.0e-9f) return move;
+            const float left = kContactDriftCap - contactDrift[i];
+            if (left <= 0.0f) return Vec3{0.0f, 0.0f, 0.0f};
+            if (len > left) move = Scale(move, left / len);
+            contactDrift[i] += Len(move);
+            return move;
+        }
+        const float along = Dot(move, nrm);
+        const Vec3 normalPart = Scale(nrm, along);
+        Vec3 tangPart = Sub(move, normalPart);
+        const float tl = Len(tangPart);
+        if (tl <= 1.0e-9f) return move;
+        const float left = kContactDriftCap - contactDrift[i];
+        if (left <= 0.0f) return normalPart;
+        if (tl > left) tangPart = Scale(tangPart, left / tl);
+        contactDrift[i] += Len(tangPart);
+        return Add(normalPart, tangPart);
+    };
     // Last support field produced by the continuation.  Post-loop safety
     // passes must use this field, not rebuild `base + raw` and accidentally
     // turn a free physical recovery into a vanilla-position recovery.
@@ -12545,6 +12639,7 @@ static bool PathBSimV2Solve(
                         move = Scale(move, scale);
                     }
                 }
+                move = clipContactDrift(i, move, nrm);
                 x[i] = Add(x[i], move);
                 stickyCp[i] = cp;
                 stickyN[i] = nrm;
@@ -12747,7 +12842,9 @@ static bool PathBSimV2Solve(
                     x, tris, invMass, body, faceHardFloor,
                     kFaceStepC, kFaceRelaxC,
                     worstFaceContact, &triActive, /*countOnly=*/false,
-                    traceContact ? &faceMovesThisStep : nullptr);
+                    traceContact ? &faceMovesThisStep : nullptr,
+                    /*crawlInPinch=*/false, &contactDrift, kContactDriftCap,
+                    kDriftTangentOnly);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             // Cloth against itself. Runs after the body contact so the body has
@@ -13105,6 +13202,7 @@ static bool PathBSimV2Solve(
                     Vec3 move = Sub(target, x[i]);
                     const float moveLen = Len(move);
                     if (moveLen > 0.5f) move = Scale(move, 0.5f / moveLen);
+                    move = clipContactDrift(i, move, nrm);
                     x[i] = Add(x[i], move);
                     if (pinned) {
                         // hard cap on total drift from the anchor: the band
@@ -13121,7 +13219,8 @@ static bool PathBSimV2Solve(
                     x, tris, invMass, fullBody, faceHardFloor,
                     0.5f, 1.0f, worstFinalFace, nullptr,
                     /*countOnly=*/false, /*perVertexMoves=*/nullptr,
-                    /*crawlInPinch=*/true);
+                    /*crawlInPinch=*/true, &contactDrift, kContactDriftCap,
+                    kDriftTangentOnly);
             }
             contactMovesT += contactMoved;
             // (c) tension strain limit - one sweep, fixed verts immovable
@@ -13231,6 +13330,8 @@ static bool PathBSimV2Solve(
                     const float maxStep = 0.5f;
                     if (moveLen > maxStep)
                         move = Scale(move, maxStep / moveLen);
+                    move = clipContactDrift(i, move, nrm);
+                    if (Len(move) <= 1.0e-9f) continue;
                     x[i] = Add(x[i], move);
                     ++evicted;
                 }
