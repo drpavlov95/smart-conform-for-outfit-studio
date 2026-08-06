@@ -24771,6 +24771,33 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             const float spread = ClampRange(
                 EnvFloat("DRAPE_SHELL_BODY_EVICT_SPREAD", 0.50f), 0.0f, 1.0f);
 
+            // TRACE FINO POR RODADA. Diagnostico puro, sem efeito no resultado.
+            // DRAPE_EVICT_TRACE_TRIS=2971,2926,2967,3000
+            std::vector<uint32_t> traceTris;
+            std::vector<uint8_t> traceVert(n, 0);
+            if (const char* tt = getenv("DRAPE_EVICT_TRACE_TRIS")) {
+                uint32_t acc = 0; bool has = false;
+                for (const char* c = tt; ; ++c) {
+                    if (*c >= '0' && *c <= '9') { acc = acc * 10 + (uint32_t)(*c - '0'); has = true; }
+                    else {
+                        if (has && acc < tris->size()) {
+                            traceTris.push_back(acc);
+                            for (int k = 0; k < 3; ++k)
+                                if ((*tris)[acc][k] < n) traceVert[(*tris)[acc][k]] = 1;
+                        }
+                        acc = 0; has = false;
+                        if (!*c) break;
+                    }
+                }
+            }
+            auto traceAreaRatio = [&](const std::vector<Vec3>& v, uint32_t ti) -> float {
+                const auto& t = (*tris)[ti];
+                const float a0 = 0.5f * Len(Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                                  Sub(baseVerts[t[2]], baseVerts[t[0]])));
+                if (a0 <= 1.0e-6f) return 0.0f;
+                return 0.5f * Len(Cross(Sub(v[t[1]], v[t[0]]), Sub(v[t[2]], v[t[0]]))) / a0;
+            };
+
             std::vector<std::vector<uint32_t>> ring(n);
             for (const auto& t : *tris) {
                 if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
@@ -24970,6 +24997,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (violating == 0) break;
                 ++roundsRun;
 
+                std::vector<Vec3> corrRaw;
+                if (!traceTris.empty()) corrRaw = corr;
                 if (spread > 0.0f) {
                     std::vector<Vec3> sm = corr;
                     for (size_t i = 0; i < n; ++i) {
@@ -24992,6 +25021,27 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     const float along = Dot(corr[i], nrmOf[i]);
                     if (along <= 0.0f) continue;
                     next[i] = Add(finalVerts[i], Scale(nrmOf[i], along));
+                }
+                if (!traceTris.empty()) {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!traceVert[i]) continue;
+                        Vec3 cp{0,0,0}, nb{0,0,1}; float d2 = 0.0f;
+                        float gap = 0.0f;
+                        if (BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nb, d2))
+                            gap = Dot(Sub(finalVerts[i], cp), nb);
+                        const float rawAlong = Dot(corrRaw[i], nrmOf[i]);
+                        const float smAlong  = Dot(corr[i], nrmOf[i]);
+                        HLog("evict-trace r=%d v=%zu gap=%.4f frozen=%d "
+                             "corrRaw=%.4f corrSm=%.4f along=%.4f applied=%.4f "
+                             "nrm=(%.3f,%.3f,%.3f)",
+                             r, i, gap, frozen[i] ? 1 : 0,
+                             rawAlong, smAlong, smAlong,
+                             smAlong > 0.0f ? smAlong : 0.0f,
+                             nrmOf[i].x, nrmOf[i].y, nrmOf[i].z);
+                    }
+                    for (uint32_t ti : traceTris)
+                        HLog("evict-trace r=%d tri=%u areaRatio=%.3f", r, ti,
+                             traceAreaRatio(next, ti));
                 }
 
                 weldSeams(next);
