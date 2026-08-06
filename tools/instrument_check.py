@@ -185,6 +185,22 @@ def test_camera_basis(view, eps=1e-9):
         upness = float(np.dot(u, np.array([0.0, 0.0, 1.0])))
         if upness <= 0.0:
             return False, abs(upness), f"up aponta para BAIXO (up.z = {upness:.3f})"
+    # E O NOME TEM DE CORRESPONDER AO QUE A CAMERA MOSTRA.
+    #
+    # Terceira vez que a base esta impecavel e a semantica errada: `costas34`
+    # tinha fwd com y NEGATIVO, ou seja, olhava para a frente, e entregava uma
+    # frontal de tres-quartos rotulada como costas. Frente = +y e costas = -y
+    # (confirmado pelo usuario, ver a memoria de orientacao), entao ver as
+    # COSTAS exige camera atras olhando para +y.
+    #
+    # Nenhum teste geometrico pega isto, porque a base esta certa - so aponta
+    # para o lado errado do corpo. O rotulo e uma promessa e precisa ser testada
+    # como qualquer outra.
+    fy = float(f[1])
+    if view.startswith("costas") and fy <= 0.2:
+        return False, abs(fy), f"nome diz costas mas a camera olha para a frente (fwd.y = {fy:+.2f})"
+    if view.startswith("frente") and fy >= -0.2:
+        return False, abs(fy), f"nome diz frente mas a camera nao olha para a frente (fwd.y = {fy:+.2f})"
     return True, worst[1], "ok"
 
 

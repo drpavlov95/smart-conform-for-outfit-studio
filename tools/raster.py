@@ -24,7 +24,12 @@ VIEWS = {
     "costas":   (np.array([-1.0, 0, 0]), np.array([0, 1.0, 0])),
     "perfil":   (np.array([0, -1.0, 0]), np.array([-1.0, 0, 0])),
     "perfilD":  (np.array([0, 1.0, 0]),  np.array([1.0, 0, 0])),
-    "costas34": (np.array([-0.7071, -0.7071, 0]), np.array([0.7071, -0.7071, 0])),
+    # costas34 olhava para a FRENTE: fwd tinha y NEGATIVO, o que aponta a camera
+    # para +y->-y, e a vista saia sendo uma frontal de tres-quartos com nome de
+    # costas. Frente = +y e costas = -y, entao ver as COSTAS exige a camera atras
+    # (-y) olhando para +y, isto e fwd.y POSITIVO. O usuario viu; o teste nao,
+    # porque testava a geometria da base e nunca o que o nome promete.
+    "costas34": (np.array([0.7071, 0.7071, 0]), np.array([-0.7071, 0.7071, 0])),
     "frente34": (np.array([0.7071, -0.7071, 0]),  np.array([-0.7071, -0.7071, 0])),
     "debaixo":  (np.array([1.0, 0, 0]),  np.array([0, -0.45, 0.89])),
 }
