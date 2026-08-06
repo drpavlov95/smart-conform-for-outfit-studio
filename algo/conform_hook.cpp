@@ -19148,6 +19148,99 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                  kTargetMin, kTargetMax);
     }
 
+    // Conta triangulos da PROPRIA peca que se atravessam. Grid por celula do
+    // tamanho medio da aresta, e o mesmo teste que tools/intersect.py usa
+    // (aresta passando POR DENTRO de um triangulo), para o numero aqui e o
+    // numero que eu meco fora baterem.
+    auto countSelfCrossings = [&](const std::vector<Vec3>& V) -> int {
+        if (!tris || tris->empty() || V.empty()) return 0;
+        const auto& T = *tris;
+        double span = 0.0;
+        for (const auto& t : T) {
+            if (t[0] >= V.size() || t[1] >= V.size() || t[2] >= V.size()) continue;
+            span += Len(Sub(V[t[1]], V[t[0]]));
+        }
+        const float cell = std::max((float)(span / std::max<size_t>(1, T.size())), 1.0e-3f);
+        const float inv = 1.0f / cell;
+        auto key = [](int a, int b, int c) -> uint64_t {
+            return ((uint64_t)(uint32_t)a * 73856093ull) ^
+                   ((uint64_t)(uint32_t)b * 19349663ull) ^
+                   ((uint64_t)(uint32_t)c * 83492791ull);
+        };
+        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+        grid.reserve(T.size() * 2);
+        for (uint32_t ti = 0; ti < (uint32_t)T.size(); ++ti) {
+            const auto& t = T[ti];
+            if (t[0] >= V.size() || t[1] >= V.size() || t[2] >= V.size()) continue;
+            const Vec3& a0 = V[t[0]]; const Vec3& b0 = V[t[1]]; const Vec3& c0 = V[t[2]];
+            const int x0 = (int)std::floor(std::min(std::min(a0.x, b0.x), c0.x) * inv);
+            const int x1 = (int)std::floor(std::max(std::max(a0.x, b0.x), c0.x) * inv);
+            const int y0 = (int)std::floor(std::min(std::min(a0.y, b0.y), c0.y) * inv);
+            const int y1 = (int)std::floor(std::max(std::max(a0.y, b0.y), c0.y) * inv);
+            const int z0 = (int)std::floor(std::min(std::min(a0.z, b0.z), c0.z) * inv);
+            const int z1 = (int)std::floor(std::max(std::max(a0.z, b0.z), c0.z) * inv);
+            if ((int64_t)(x1-x0+1)*(y1-y0+1)*(z1-z0+1) > 256) continue;
+            for (int ix = x0; ix <= x1; ++ix)
+            for (int iy = y0; iy <= y1; ++iy)
+            for (int iz = z0; iz <= z1; ++iz)
+                grid[key(ix, iy, iz)].push_back(ti);
+        }
+        auto hits = [](const Vec3& o, const Vec3& d, const Vec3& v0,
+                       const Vec3& v1, const Vec3& v2) -> bool {
+            const Vec3 e1 = Sub(v1, v0), e2 = Sub(v2, v0);
+            const Vec3 pv = Cross(d, e2);
+            const float det = Dot(e1, pv);
+            if (std::fabs(det) < 1.0e-12f) return false;
+            const float id = 1.0f / det;
+            const Vec3 tv = Sub(o, v0);
+            const float u = Dot(tv, pv) * id;
+            if (u < 0.0f || u > 1.0f) return false;
+            const Vec3 qv = Cross(tv, e1);
+            const float vv = Dot(d, qv) * id;
+            if (vv < 0.0f || u + vv > 1.0f) return false;
+            const float tt = Dot(e2, qv) * id;
+            return tt > 1.0e-6f && tt < 1.0f - 1.0e-6f;
+        };
+        int count = 0;
+        std::vector<uint32_t> seen;
+        for (uint32_t ti = 0; ti < (uint32_t)T.size(); ++ti) {
+            const auto& ta = T[ti];
+            if (ta[0] >= V.size() || ta[1] >= V.size() || ta[2] >= V.size()) continue;
+            const Vec3& a0 = V[ta[0]]; const Vec3& b0 = V[ta[1]]; const Vec3& c0 = V[ta[2]];
+            const int cx = (int)std::floor(((a0.x + b0.x + c0.x) / 3.0f) * inv);
+            const int cy = (int)std::floor(((a0.y + b0.y + c0.y) / 3.0f) * inv);
+            const int cz = (int)std::floor(((a0.z + b0.z + c0.z) / 3.0f) * inv);
+            seen.clear();
+            for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dz = -1; dz <= 1; ++dz) {
+                auto it = grid.find(key(cx + dx, cy + dy, cz + dz));
+                if (it == grid.end()) continue;
+                for (uint32_t tj : it->second) {
+                    if (tj <= ti) continue;
+                    if (std::find(seen.begin(), seen.end(), tj) != seen.end()) continue;
+                    seen.push_back(tj);
+                    const auto& tb = T[tj];
+                    bool adj = false;
+                    for (int k = 0; k < 3 && !adj; ++k)
+                        for (int m = 0; m < 3; ++m)
+                            if (ta[k] == tb[m]) { adj = true; break; }
+                    if (adj) continue;
+                    const Vec3& d0 = V[tb[0]]; const Vec3& d1 = V[tb[1]]; const Vec3& d2 = V[tb[2]];
+                    bool hit = false;
+                    const Vec3 A3[3] = { a0, b0, c0 };
+                    const Vec3 B3[3] = { d0, d1, d2 };
+                    for (int k = 0; k < 3 && !hit; ++k)
+                        hit = hits(A3[k], Sub(A3[(k + 1) % 3], A3[k]), d0, d1, d2);
+                    for (int k = 0; k < 3 && !hit; ++k)
+                        hit = hits(B3[k], Sub(B3[(k + 1) % 3], B3[k]), a0, b0, c0);
+                    if (hit) ++count;
+                }
+            }
+        }
+        return count;
+    };
+
     auto applyOuterAccessoryInnerClearance = [&](const char* stageLabel) -> int {
         bool layerOrderPreserve = EnvToggle("DRAPE_LAYER_ORDER_PRESERVE", false);
 #if !defined(DRAPE_HARNESS_BUILD)
@@ -19924,8 +20017,41 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             DrapeDumpStage(finalVerts, "05_body_clearance", shapeName, bodyBVH);
     }
     tracePathBTail("12-cap-clear");
-    if (finalInnerLayerClearance)
+    if (finalInnerLayerClearance) {
+        // TRANSACAO DE AUTO-INTERSECCAO.
+        //
+        // A genealogia dos cruzamentos por estagio apontou este passe como o
+        // dono do defeito, e nao o solver. Na saia do Yarl o pipeline chega ao
+        // estagio 06 com 284 cruzamentos - MELHOR que os 287 do conform do host
+        // e a caminho dos 200 do refit feito a mao - e esta chamada sozinha
+        // devolve +399. Tudo o que vem depois so administra o estrago: a solda
+        // de costura recupera 84, a evicao 75, e a peca publica 526.
+        //
+        // Faz sentido que seja ela: o passe afasta a peca de baixo para abrir
+        // espaco para o acessorio de cima, e mede esse espaco contra a OUTRA
+        // peca. Nada nele olha se o deslocamento esta enfiando o vestido dentro
+        // do proprio vestido.
+        //
+        // Nao mexo no que ele calcula - a folga entre camadas e um requisito
+        // real e o portao cobra por ela. Mexo em quando ele pode publicar: se o
+        // resultado atravessa a si mesmo mais do que antes, volta atras. E o
+        // mesmo padrao das transacoes que ja existem aqui, com o eixo que
+        // faltava.
+        const bool guardSelf = EnvToggle("DRAPE_CLEARANCE_SELF_GUARD", false);
+        const std::vector<Vec3> beforeClear = finalVerts;
+        const int selfBefore = guardSelf ? countSelfCrossings(beforeClear) : 0;
         applyOuterAccessoryInnerClearance("post-cap");
+        if (guardSelf) {
+            const int selfAfter = countSelfCrossings(finalVerts);
+            const int slack = (int)std::max(0.0f,
+                EnvFloat("DRAPE_CLEARANCE_SELF_SLACK", 0.0f));
+            const bool worse = selfAfter > selfBefore + slack;
+            HLog("detour: clearance self-transaction shape='%s' self=%d->%d %s",
+                 shapeName.c_str(), selfBefore, selfAfter,
+                 worse ? "REVERTIDO" : "aceito");
+            if (worse) finalVerts = beforeClear;
+        }
+    }
     applyFinalExactSeamWeld("pre-prox-exact-seam-weld");
     applyFinalSeamVectorPairs(18, "final-boundary-seam-vector");
     logProxSeamState("before-final-prox-cap");
@@ -23302,6 +23428,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // skipped/finished, immediately before its final transaction at writeback.
     if (!pathBShellAccepted)
         applyFinalBodyFloorPass();
+        DrapeDumpStage(finalVerts, "w1_after_floor1", shapeName, bodyBVH);
 
     // Actual posterior bridge (-Y).  This runs on the shipped final surface and
     // keeps that entry mesh as the downstream collision proxy, so an opt-in
@@ -23495,6 +23622,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // baseline and can safely serve as a downstream-only collider proxy.
     if (!pathBShellAccepted && !posteriorChordMoved && !tangentialRepairMoved)
         applyTensionPlumb();
+        DrapeDumpStage(finalVerts, "w2_after_plumb", shapeName, bodyBVH);
 
     // Final degradation guard for the anti-clip pilot.  The captured Vampire
     // failure is not merely a few body penetrations: the legacy final floor can
@@ -23618,6 +23746,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // into a material local stretch that neither stage sees alone.
                 finalFloorIntegrityReference = integrityReference;
                 applyFinalBodyFloorPass();
+                DrapeDumpStage(finalVerts, "w3_after_floor2", shapeName, bodyBVH);
                 int floorFlips = 0, floorCollapsed = 0;
                 int floorEdgeViolations = 0, floorBodyFaceViolations = 0;
                 for (const auto& t : *tris) {
@@ -23770,6 +23899,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // Gives the safe floor a fixed, accepted topology/body reference.
             finalFloorIntegrityReference = pathBShellPublishedReference;
             applyFinalBodyFloorPass();
+            DrapeDumpStage(finalVerts, "w4_after_floor3", shapeName, bodyBVH);
 
             bool stable = false;
             int finalClosureCycles = 0;
@@ -24122,7 +24252,47 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // correction already, while projecting unrelated seams a second time can
     // invert a sleeve face.
     if (pathBShellAccepted) {
+        // TRANSACAO DE AUTO-INTERSECCAO.
+        //
+        // Achado pela genealogia de cruzamentos por estagio: este passe e o dono
+        // do defeito que o usuario reporta como malha retalhada. Na saia do Yarl
+        // o pipeline chega aqui com 303 cruzamentos e sai com 514 - mais 211 de
+        // uma vez, o maior salto depois do proprio solve, e o unico que nao e
+        // desfeito por ninguem. A evicao de corpo, que eu vinha culpando, poe
+        // 12.
+        //
+        // Faz sentido que seja ele: line locks trava vertices numa linha
+        // autorada, e uma linha autorada foi desenhada para o corpo ORIGINAL.
+        // Sobre um corpo morfado a mesma linha pede que o pano volte para onde
+        // nao cabe mais, e o tecido que sobra dobra por cima de si.
+        //
+        // Nao mudo o que ele calcula - a linha autorada e intencao de design e o
+        // sculpt do usuario a respeita. Mudo quando ele pode publicar: se travar
+        // na linha custa mais auto-interseccao do que havia, volta atras. Mesmo
+        // padrao das transacoes que ja existem no fim do pipeline, com o eixo
+        // que faltava.
+        // OFF: a transacao funciona mecanicamente - disparou e reverteu - mas o
+        // contador em C++ diverge do contador em Python que esta validado: 557
+        // contra 303 no mesmo ponto do pipeline. Um portao vale o que vale a
+        // regua dele, e esta regua ainda nao foi conferida contra a que eu uso
+        // para medir. Ligada por padrao ela tambem custou corpus (deriva) e
+        // portao (Fine Clothes Body 0 -> 5@-0.09), o que e o resultado esperado
+        // de reverter passes com base num numero errado.
+        const bool guardLocks = EnvToggle("DRAPE_LINELOCK_SELF_GUARD", false);
+        const std::vector<Vec3> beforeLocks = finalVerts;
+        const int lockSelfBefore = guardLocks ? countSelfCrossings(beforeLocks) : 0;
         applyLooseAuthoredLineLocks();
+        if (guardLocks) {
+            const int lockSelfAfter = countSelfCrossings(finalVerts);
+            const int slack = (int)std::max(0.0f,
+                EnvFloat("DRAPE_LINELOCK_SELF_SLACK", 0.0f));
+            const bool worse = lockSelfAfter > lockSelfBefore + slack;
+            HLog("detour: linelock self-transaction shape='%s' self=%d->%d %s",
+                 shapeName.c_str(), lockSelfBefore, lockSelfAfter,
+                 worse ? "REVERTIDO" : "aceito");
+            if (worse) finalVerts = beforeLocks;
+        }
+        DrapeDumpStage(finalVerts, "w5_after_linelocks", shapeName, bodyBVH);
     }
 
     // Final contact release. The shell can converge to a valid but elevated
