@@ -170,6 +170,21 @@ def test_camera_basis(view, eps=1e-9):
     handed = float(np.dot(np.cross(r, u), f))
     if handed < 0.999:
         return False, abs(handed - 1.0), f"orientacao divergente (cross(r,u).fwd = {handed:.3f})"
+    # E CIMA TEM DE SER CIMA.
+    #
+    # Ortonormal + orientacao consistente NAO garante isso, e nenhum teste que
+    # compare a imagem com ela mesma pega: `costas34` derivava up = (0,0,-1) e
+    # renderizava a peca inteira de ponta-cabeca. Passou por aqui limpo e o
+    # usuario viu na primeira olhada. A base pode estar impecavel e a semantica
+    # errada.
+    #
+    # Vale para toda camera cujo fwd nao seja o proprio eixo Z; se um dia
+    # existir uma vista de topo puro, up perde o significado e a excecao tem de
+    # ser explicita, nao silenciosa.
+    if abs(float(np.dot(f, np.array([0.0, 0.0, 1.0])))) < 0.999:
+        upness = float(np.dot(u, np.array([0.0, 0.0, 1.0])))
+        if upness <= 0.0:
+            return False, abs(upness), f"up aponta para BAIXO (up.z = {upness:.3f})"
     return True, worst[1], "ok"
 
 

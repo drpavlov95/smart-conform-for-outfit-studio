@@ -54,6 +54,19 @@ def view_basis(view):
             r = np.array([1.0, 0.0, 0.0]); nr = 1.0
     r = r / nr
     u = np.cross(f, r)
+    # CIMA TEM DE SER CIMA.
+    #
+    # Ortonormal e com orientacao consistente nao garante isso, e a diferenca e
+    # invisivel para qualquer teste que so compare a imagem com ela mesma: para
+    # `costas34`, cross(f, r) da (0,0,-1) e a peca inteira renderiza de cabeca
+    # para baixo. O usuario viu na primeira olhada; o instrument_check tinha
+    # passado, porque testava consistencia da base e nunca a semantica dela.
+    #
+    # Inverter r JUNTO com u preserva cross(r, u) = f, entao a orientacao segue
+    # a mesma em todas as cameras - so deixa de estar de ponta-cabeca.
+    if float(np.dot(u, np.array([0.0, 0.0, 1.0]))) < 0.0:
+        u = -u
+        r = -r
     return r, u, f
 
 
