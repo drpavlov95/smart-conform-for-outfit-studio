@@ -10620,6 +10620,12 @@ static bool PathBSimV2Solve(
     // crossings grow 26% between pieces and 69% within a piece against the
     // plain host conform - on every scene, not just the one he reported.
     const std::vector<OuterCollider>* innerColliders,
+    // Garments worn OVER this one. The hanging standoff below is a body-gap
+    // floor, and a floor that ignores what is worn on top simply presses this
+    // cloth into it - measured, raising the floor globally costs garment-vs-
+    // garment on five of six live scenes while helping the body axis. The
+    // solve needs to see the ceiling as well as the floor.
+    const std::vector<OuterCollider>* outerColliders,
     std::vector<Vec3>& out,
     std::string& failReason)
 {
@@ -10716,6 +10722,14 @@ static bool PathBSimV2Solve(
     const float kHangFloor = g_allowHangFloor
         ? std::max(0.0f, EnvFloat("DRAPE_SHELL_HANG_FLOOR", 1.5f))
         : 0.0f;
+    // Quao perto a peca de cima precisa estar para contar como teto, e quanta
+    // folga fica entre as duas. Nao sao constantes ajustadas: a distancia e a
+    // mesma vizinhanca que o resto do pipeline usa para decidir cobertura, e a
+    // margem e a espessura de tecido que ja governa o contato entre camadas.
+    const float kOuterRoofNear = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_OUTER_ROOF_NEAR", 4.25f));
+    const float kOuterRoofMargin = std::max(0.0f,
+        EnvFloat("DRAPE_SHELL_OUTER_ROOF_MARGIN", 0.15f));
     // MATERIAL ANCHOR (2026-07-27). Which PIECE of the body the artist placed
     // this vertex against, as a triangle plus barycentric coordinates on the
     // REFERENCE body. The reference and morphed bodies share topology, so the
@@ -10797,8 +10811,32 @@ static bool PathBSimV2Solve(
         // Blacksmith -0.19 -> -0.39) in exchange for two fewer vampire verts.
         // The authored gap is exactly the memory this rule exists to stop using;
         // letting it back in through a min() brings its problems with it.
-        if (kHangFloor > 0.0f && hangingVert[i])
-            contactFloor[i] = std::max(kHangFloor, clearance);
+        if (kHangFloor > 0.0f && hangingVert[i]) {
+            // TETO DA CAMADA DE CIMA. O piso pede folga do corpo; se ha uma peca
+            // vestida por cima, a folga que este vertice pode reivindicar acaba
+            // onde ela comeca. Sem isto o piso empurra a peca de baixo para
+            // dentro da de cima - medido, subir o piso de 1.5 para 2.5 melhora
+            // caimento e o vao frontal e cobra roupa-contra-roupa em cinco das
+            // seis cenas vivas dele. Per-vertice de proposito: so o pano que
+            // esta REALMENTE sob outra peca e limitado, e a saia da frente, que
+            // nao esta sob nada, fica com a folga inteira.
+            float roof = kHangFloor;
+            if (outerColliders) {
+                for (const OuterCollider& oc : *outerColliders) {
+                    const BodyBVH& surf = oc.Current();
+                    if (!surf.valid) continue;
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nr{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(surf, baseVerts[i], cp, nr, d2)) continue;
+                    if (d2 > kOuterRoofNear * kOuterRoofNear) continue;
+                    float outerGap = 0.0f;
+                    if (!BVHSignedGap(morphedBody, cp, outerGap, nullptr)) continue;
+                    roof = std::min(roof, outerGap - kOuterRoofMargin);
+                }
+            }
+            contactFloor[i] = std::max(std::max(roof, clearance), authoredGap > 0.0f
+                ? std::min(authoredGap, clearance) : clearance);
+        }
     }
     // FEASIBILITY (review 2026-07-17): the radial floor against the nearest
     // point of the WHOLE body is provably infeasible in pinch corridors (a
@@ -15349,7 +15387,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
                                  drapeMask, /*allowPlumbClamp=*/true,
-                                 innerColliders,
+                                 innerColliders, outerColliders,
                                  shellCandidate, failReason))
                 return false;
             // OFF by default: the verdict that matters is taken after the whole
@@ -15371,7 +15409,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (!PathBSimV2Solve(baseVerts, profiles, *tris, rawDiff,
                                  g_refBodyBVH, *bodyBVH, exactSeamGroups,
                                  drapeMask, /*allowPlumbClamp=*/false,
-                                 innerColliders,
+                                 innerColliders, outerColliders,
                                  retry, retryReason))
                 return true;   // keep the first candidate; the gates judge it
             float retryWorst = 0.0f;
