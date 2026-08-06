@@ -9552,8 +9552,19 @@ static bool PathBIntegrityNoWorse(
     const PathBShellIntegrity& candidate,
     const PathBShellIntegrity& entry)
 {
-    // O teto de area e estiramento fica ABSOLUTO, e a tentativa de torna-lo
-    // relativo esta registrada aqui porque nao funcionou e a razao importa.
+    // TETO RELATIVO A ENTRADA, como as outras seis condicoes ja eram.
+    //
+    // Medido: na saia do Yarl o conform do HOST ja entrega worstAreaRatio 9.58,
+    // acima do teto absoluto de 8.0. Uma constante abaixo do que a propria
+    // entrada produz nao e um limite de qualidade, e uma reprovacao automatica
+    // de qualquer coisa que toque aquela malha - e foi ela que descartou a
+    // cauda inteira (flips 58 -> 16, auto-interseccao 611 -> 274, e todas as
+    // contagens melhores que o baseline) por maxArea=12.514.
+    //
+    // Na primeira tentativa eu reverti isto por medir "nao mudou nada". Nao
+    // mudou porque sozinho nao basta: 12.53 continua acima de 9.58. A conclusao
+    // que tirei na hora - "logo o baseline esta abaixo de 8" - estava errada, e
+    // a genealogia de area por estagio mostrou o contrario.
     //
     // Na saia do Yarl este portao descarta a cauda inteira - flips 58 -> 16,
     // auto-interseccao 611 -> 274, e todas as contagens melhores que o baseline
@@ -9569,10 +9580,12 @@ static bool PathBIntegrityNoWorse(
     //
     // O alvo verdadeiro e a cauda parar de esticar area 12x, nao o portao parar
     // de olhar.
+    const float kAreaCeil = std::max(8.0f, entry.worstAreaRatio);
+    const float kStretchCeil = std::max(8.0f, entry.worstStretch);
     return candidate.flips <= entry.flips &&
            candidate.collapsed <= entry.collapsed &&
-           candidate.worstAreaRatio <= 8.0f &&
-           candidate.worstStretch <= 8.0f &&
+           candidate.worstAreaRatio <= kAreaCeil + 1.0e-4f &&
+           candidate.worstStretch <= kStretchCeil + 1.0e-4f &&
            candidate.penetrations <= entry.penetrations &&
            candidate.worstPenetration <= entry.worstPenetration + 1.0e-4f &&
            candidate.bodyFacePenetrations <= entry.bodyFacePenetrations &&
@@ -22182,17 +22195,77 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     d.swap(nd);
                     weldD();
                 }
-                int hemMoved = 0;
+                // O SUAVIZADOR DE BARRA NAO PODE INFLAR AREA.
+                //
+                // Genealogia de worstAreaRatio por estagio na saia do Yarl: o
+                // panel flatten devolve a malha a 9.60, praticamente o nivel do
+                // proprio host (9.58), e este passe leva a 12.53. Sao esses 2.9
+                // que fazem o portao final de integridade descartar a cauda
+                // inteira e republicar o checkpoint do solve - a origem dos 526
+                // cruzamentos publicados no lugar de 274.
+                //
+                // O passe suaviza a barra e nao tem nada a dizer sobre area de
+                // triangulo, entao a correcao e por vertice e escalada, nao um
+                // veto: se mover este vertice estica alguma face incidente alem
+                // do que a malha ja tinha, aplica a maior fracao que nao estica.
+                // Barra continua suavizando onde da, e para de comprar isso com
+                // uma face esticada 12x.
+                std::vector<float> hemBaseArea(tris->size(), 0.0f);
+                std::vector<std::vector<uint32_t>> hemVertFaces(n);
+                for (uint32_t ti = 0; ti < (uint32_t)tris->size(); ++ti) {
+                    const auto& t = (*tris)[ti];
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    hemBaseArea[ti] = 0.5f * Len(Cross(
+                        Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                        Sub(baseVerts[t[2]], baseVerts[t[0]])));
+                    for (int k = 0; k < 3; ++k) hemVertFaces[t[k]].push_back(ti);
+                }
+                float hemCeil = 0.0f;
+                for (uint32_t ti = 0; ti < (uint32_t)tris->size(); ++ti) {
+                    if (hemBaseArea[ti] <= 1.0e-6f) continue;
+                    const auto& t = (*tris)[ti];
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    const float a = 0.5f * Len(Cross(
+                        Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                        Sub(finalVerts[t[2]], finalVerts[t[0]])));
+                    hemCeil = std::max(hemCeil, a / hemBaseArea[ti]);
+                }
+                auto hemWorstRatio = [&](size_t vi, const Vec3& cand) -> float {
+                    float worst = 0.0f;
+                    for (uint32_t ti : hemVertFaces[vi]) {
+                        if (hemBaseArea[ti] <= 1.0e-6f) continue;
+                        const auto& t = (*tris)[ti];
+                        Vec3 a = finalVerts[t[0]], b = finalVerts[t[1]], c = finalVerts[t[2]];
+                        if (t[0] == vi) a = cand; else if (t[1] == vi) b = cand; else c = cand;
+                        const float ar = 0.5f * Len(Cross(Sub(b, a), Sub(c, a)));
+                        worst = std::max(worst, ar / hemBaseArea[ti]);
+                    }
+                    return worst;
+                };
+                int hemMoved = 0, hemClamped = 0;
                 for (size_t i = 0; i < n; ++i) {
                     if (hw[i] <= 0.0f) continue;
                     Vec3 p = Add(baseVerts[i], d[i]);
                     BVHCollideVertex(*bodyBVH, p, 0.06f);
+                    if (hemWorstRatio(i, p) > hemCeil + 1.0e-4f) {
+                        float scale = 1.0f;
+                        const Vec3 from = finalVerts[i];
+                        for (int guard = 0; guard < 8; ++guard) {
+                            scale *= 0.5f;
+                            const Vec3 mid = Add(from, Scale(Sub(p, from), scale));
+                            if (hemWorstRatio(i, mid) <= hemCeil + 1.0e-4f) { p = mid; break; }
+                            if (guard == 7) p = from;
+                        }
+                        ++hemClamped;
+                    }
                     if (Len2(Sub(p, finalVerts[i])) > 1.0e-6f) ++hemMoved;
                     finalVerts[i] = p;
                 }
                 if (hemMoved > 0)
                     HLog("detour: hem-smooth shape='%s' hangVerts=%d moved=%d iters=%d cap=%.2f",
-                         shapeName.c_str(), nHang, hemMoved, kHemIters, kHemCap);
+                         shapeName.c_str(), nHang, hemMoved, kHemIters, kHemCap),
+                    HLog("detour: hem-smooth area-clamp shape='%s' clamped=%d ceil=%.2f",
+                         shapeName.c_str(), hemClamped, hemCeil);
             DrapeDumpStage(finalVerts, "02_hem_smooth", shapeName, bodyBVH);
             }
         }
