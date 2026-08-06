@@ -9552,6 +9552,23 @@ static bool PathBIntegrityNoWorse(
     const PathBShellIntegrity& candidate,
     const PathBShellIntegrity& entry)
 {
+    // O teto de area e estiramento fica ABSOLUTO, e a tentativa de torna-lo
+    // relativo esta registrada aqui porque nao funcionou e a razao importa.
+    //
+    // Na saia do Yarl este portao descarta a cauda inteira - flips 58 -> 16,
+    // auto-interseccao 611 -> 274, e todas as contagens melhores que o baseline
+    // (flip 19 -> 16, pen 46 -> 28, facePen 1109 -> 623) - porque maxArea=12.514
+    // passa de 8.0. Restaurar o checkpoint do solve e a origem dos 526
+    // cruzamentos publicados.
+    //
+    // Supus lasca autorada inflando a metrica (worstAreaRatio ja e conhecida por
+    // isso) e troquei o teto por max(8, entrada). Nao mudou nada: 526 igual. Ou
+    // seja, o BASELINE esta abaixo de 8 e os 12.5 sao degradacao real que a
+    // cauda produz. Nao e falso positivo, e afrouxar aqui seria trocar um
+    // defeito visivel por um invisivel.
+    //
+    // O alvo verdadeiro e a cauda parar de esticar area 12x, nao o portao parar
+    // de olhar.
     return candidate.flips <= entry.flips &&
            candidate.collapsed <= entry.collapsed &&
            candidate.worstAreaRatio <= 8.0f &&
@@ -24079,6 +24096,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // a physical checkpoint; repair toward that checkpoint rather than toward
     // base+raw.  The latter made a late topology repair a second, hidden
     // vanilla-conform force on free cloth.
+    DrapeDumpStage(finalVerts, "x1_before_fliprepair", shapeName, bodyBVH);
     if (pathBShellAccepted && tris &&
         pathBShellPublishedReference.size() == n &&
         EnvFloat("DRAPE_SHELL_FLIP_REPAIR", 1.0f) > 0.5f) {
@@ -24279,6 +24297,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // portao (Fine Clothes Body 0 -> 5@-0.09), o que e o resultado esperado
         // de reverter passes com base num numero errado.
         const bool guardLocks = EnvToggle("DRAPE_LINELOCK_SELF_GUARD", false);
+        DrapeDumpStage(finalVerts, "w4b_before_linelocks", shapeName, bodyBVH);
         const std::vector<Vec3> beforeLocks = finalVerts;
         const int lockSelfBefore = guardLocks ? countSelfCrossings(beforeLocks) : 0;
         applyLooseAuthoredLineLocks();
