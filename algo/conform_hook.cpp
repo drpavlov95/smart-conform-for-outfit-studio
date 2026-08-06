@@ -24760,6 +24760,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (DrapeFlagExists("shell_body_evict_off.flag"))     evictOn = false;
         else if (DrapeFlagExists("shell_body_evict_on.flag")) evictOn = true;
 #endif
+        DrapeDumpStage(finalVerts, "y1_before_evict", shapeName, bodyBVH);
         if (evictOn) {
             const float clearance = std::max(0.0f,
                 EnvFloat("DRAPE_SHELL_BODY_EVICT_CLEAR", 0.05f));
@@ -24820,6 +24821,77 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             const float stretchCeil = std::max(1.0f,
                 EnvFloat("DRAPE_SHELL_BODY_EVICT_MAXSTRETCH", 7.5f));
 
+            // AREA GUARD, o mesmo formato da guarda de aresta acima e pelo mesmo
+            // motivo - o publicador tambem recusa por AREA e nada aqui olhava
+            // para ela.
+            //
+            // Medido na saia do Yarl, com despejo imediatamente antes e depois
+            // desta chamada: a malha chega em worstAreaRatio 8.92 (abaixo dos
+            // 9.58 que o proprio host entrega) e sai em 13.14. O triangulo 2971
+            // entra com 374% da area autorada e sai com 1314%: a eviccao empurra
+            // os TRES vertices, por 2.10, 1.25 e 0.91, e cada aresta praticamente
+            // dobra. Nao e degeneracao local, e inflacao da face inteira - e ela
+            // ja chegava fragil, entao o passe pega uma face esticada e a dobra
+            // de novo.
+            //
+            // Uma aresta pode crescer sem que a area exploda (a face so fica mais
+            // fina) e a area pode explodir sem nenhuma aresta passar do teto, que
+            // e exatamente este caso: as arestas vao a 6.13/3.80/5.64 sobre restos
+            // de 1.66/1.13/1.44, razoes de 3.7 a 3.9, todas abaixo do teto de 7.5.
+            // Os dois termos medem coisas diferentes e o guard precisava dos dois.
+            //
+            // Relativo como o outro: uma face ja acima da linha na entrada nao e
+            // deste passe consertar, ela so nao pode piorar.
+            struct EvFace { uint32_t a, b, c; float rest, entryRatio; };
+            std::vector<EvFace> evFaces;
+            evFaces.reserve(tris->size());
+            for (const auto& t : *tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                const float rest = 0.5f * Len(Cross(
+                    Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                    Sub(baseVerts[t[2]], baseVerts[t[0]])));
+                if (rest <= 1.0e-6f) continue;
+                const float now = 0.5f * Len(Cross(
+                    Sub(finalVerts[t[1]], finalVerts[t[0]]),
+                    Sub(finalVerts[t[2]], finalVerts[t[0]])));
+                evFaces.push_back(EvFace{t[0], t[1], t[2], rest, now / rest});
+            }
+            // O TETO E O MESMO QUE O PUBLICADOR USA, nao um numero meu.
+            //
+            // Com 8.0 fixo a guarda dispara onde a eviccao ainda estava fazendo
+            // trabalho util e o portao cobrou em tres pecas. O teto nao arbitrario
+            // e o do proprio publicador: max(8, pior razao que a malha JA tinha ao
+            // entrar). Assim a eviccao so e contida quando de fato custaria a
+            // publicacao, e nunca por uma constante que eu escolhi.
+            // A referencia e a MESMA do publicador: a entrada de producao (o
+            // conform do host), nao o estado em que a eviccao recebeu a malha.
+            // Usar a entrada da eviccao me deixava mais estrito que o portao
+            // justamente onde o vanilla ja e ruim - e o portao cobrou por isso
+            // no vampire.
+            float evEntryWorstArea = 0.0f;
+            if (pathBShellIntegrityBaseline.size() == finalVerts.size()) {
+                for (const EvFace& f : evFaces) {
+                    const float a0 = 0.5f * Len(Cross(
+                        Sub(pathBShellIntegrityBaseline[f.b], pathBShellIntegrityBaseline[f.a]),
+                        Sub(pathBShellIntegrityBaseline[f.c], pathBShellIntegrityBaseline[f.a])));
+                    evEntryWorstArea = std::max(evEntryWorstArea, a0 / f.rest);
+                }
+            }
+            for (const EvFace& f : evFaces)
+                evEntryWorstArea = std::max(evEntryWorstArea, f.entryRatio);
+            // DESLIGADA POR PADRAO (teto infinito). A guarda esta certa na causa
+            // - a eviccao infla area de verdade, 8.92 -> 13.14 na saia do Yarl e
+            // 8.97 -> 11.80 no vampire - e mesmo na forma mais barata que achei
+            // (so o vertice que mais andou, teto igual ao do publicador) ela
+            // custa 4@-1.43 -> 9@-1.85 de penetracao no vampire, e o portao
+            // recusa. Conter a eviccao devolve pano para dentro do corpo; e uma
+            // troca real, nao um bug do guard.
+            //
+            // Ligue com DRAPE_SHELL_BODY_EVICT_MAXAREA=<teto> para medir.
+            const float areaCeil = std::max(
+                std::max(8.0f, evEntryWorstArea),
+                EnvFloat("DRAPE_SHELL_BODY_EVICT_MAXAREA", 1.0e9f));
+
             auto faceFlipped = [&](const std::vector<Vec3>& v,
                                    const std::array<uint16_t, 3>& t) {
                 if (t[0] >= n || t[1] >= n || t[2] >= n) return false;
@@ -24879,7 +24951,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 evictPersist = false;
 #endif
             int roundsRun = 0, frozenCount = 0, abandoned = 0, repairSweeps = 0,
-                overStretched = 0;
+                overStretched = 0, overArea = 0;
 
             for (int r = 0; r < rounds; ++r) {
                 int violating = 0;
@@ -24987,6 +25059,36 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         ++overStretched;
                         giveBack(e.a);
                         giveBack(e.b);
+                    }
+                    for (const EvFace& f : evFaces) {
+                        const float ratio = 0.5f * Len(Cross(
+                            Sub(next[f.b], next[f.a]),
+                            Sub(next[f.c], next[f.a]))) / f.rest;
+                        if (ratio <= areaCeil) continue;
+                        if (ratio <= f.entryRatio + 1.0e-4f) continue;  // not ours to fix
+                        // SO O VERTICE QUE MAIS ANDOU, nao a face inteira.
+                        //
+                        // Devolver os tres foi medido e e pesado demais: a
+                        // eviccao recua em volta de cada face ofensora e o portao
+                        // cobrou em quatro pecas (Fine Clothes Body 0 -> 11@-1.30,
+                        // vampire 4 -> 11, ThalmorRobesF 0 -> 4, yarl 1 -> 7). A
+                        // guarda de aresta acima devolve DOIS vertices para uma
+                        // aresta; o analogo para uma face nao e devolver tres, e
+                        // devolver quem de fato a inflou.
+                        //
+                        // Area cresce com o deslocamento relativo entre os tres,
+                        // entao retirar o maior deslocamento e a intervencao
+                        // minima que mais reduz area por unidade de eviccao
+                        // perdida. Os outros dois seguem evacuando.
+                        ++offenders;
+                        ++overArea;
+                        uint32_t worstV = f.a;
+                        float worstD = Len(Sub(next[f.a], finalVerts[f.a]));
+                        for (uint32_t vi : {f.b, f.c}) {
+                            const float d = Len(Sub(next[vi], finalVerts[vi]));
+                            if (d > worstD) { worstD = d; worstV = vi; }
+                        }
+                        giveBack(worstV);
                     }
                     if (offenders == 0) break;
                     // FROZEN-AWARE WELD. The plain average weld is why this
