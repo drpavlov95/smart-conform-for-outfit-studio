@@ -30,6 +30,33 @@ VIEWS = {
 }
 
 
+def view_basis(view):
+    """Base ORTONORMAL da camera a partir de (right, fwd).
+
+    `up` era a constante (0,0,1) em todo lugar, o que so funciona quando fwd e
+    horizontal. `debaixo` tem fwd=(0,-0.45,0.89): up nao e perpendicular a ele,
+    a projecao sai enviesada e a profundidade deixa de corresponder a posicao em
+    tela. O teste de instrumento pegou - esfera e toro, ambos fechados por
+    construcao, perdiam ~28% da silhueta so nessa vista.
+
+    Gram-Schmidt sobre o par que a tabela ja fornece: fwd manda, right e
+    ortogonalizado contra ele, e up sai do produto vetorial. Para toda vista
+    horizontal isso devolve exatamente (0,0,1) e nada muda.
+    """
+    right, fwd = VIEWS[view]
+    f = fwd / max(np.linalg.norm(fwd), 1e-12)
+    r = right - f * float(np.dot(right, f))
+    nr = np.linalg.norm(r)
+    if nr < 1e-9:                      # right paralelo a fwd: escolha qualquer
+        r = np.cross(f, np.array([0.0, 0.0, 1.0]))
+        nr = np.linalg.norm(r)
+        if nr < 1e-9:
+            r = np.array([1.0, 0.0, 0.0]); nr = 1.0
+    r = r / nr
+    u = np.cross(f, r)
+    return r, u, f
+
+
 def vertex_normals(verts, faces):
     n = np.zeros_like(verts)
     tri = verts[faces]
@@ -54,8 +81,7 @@ class Frame:
 def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25,
          cull=False, two_sided=False):
     """Rasterize one mesh into the frame. `color` is an (r,g,b) or per-vertex array."""
-    right, fwd = VIEWS[view]
-    up = np.array([0.0, 0.0, 1.0])
+    right, up, fwd = view_basis(view)
     vn = vertex_normals(verts, faces)
 
     sx = (verts @ right - center[0]) / half
@@ -80,11 +106,23 @@ def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25,
            (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
     keep = np.abs(area) > 1e-9
     if cull:
-        # Screen-space winding: drop faces turned away from the camera. If a
-        # dark region VANISHES under culling it was the reverse side of
-        # single-sided cloth seen through a gap, not an inverted face - two
-        # very different defects that look identical shaded.
-        keep &= (area > 0)
+        # Facing decided by the GEOMETRIC NORMAL against the view direction, not
+        # by screen-space winding.
+        #
+        # Winding was wrong in half the views and I showed him the results
+        # anyway. Two of the seven view bases here are left-handed, which flips
+        # the sign of the screen-space area, so `area > 0` kept the faces
+        # pointing AWAY from the camera: the renderer was drawing the inside of
+        # the mesh and hiding the surface. Self-tested on the closed body mesh,
+        # where every visible face must be front-facing: screen-space area
+        # scores 0.0% wrong in costas34 but 78.8% in perfil and 83.9% in frente,
+        # while the normal test scores 0.0% in all three.
+        #
+        # dot(n, fwd) < 0 is basis-independent and needs no handedness rule, so
+        # there is nothing left to get backwards.
+        tri3 = verts[faces]
+        gn = np.cross(tri3[:, 1] - tri3[:, 0], tri3[:, 2] - tri3[:, 0])
+        keep &= (gn @ fwd) < 0.0
     idx = np.nonzero(keep)[0]
 
     xmin = np.floor(np.minimum(np.minimum(a[:, 0], b[:, 0]), c[:, 0])).astype(int)
@@ -123,8 +161,7 @@ def draw(frame: Frame, verts, faces, color, view, center, half, light_fill=0.25,
 
 
 def frame_bounds(meshes, view, crop=None, pad=2.0):
-    right, fwd = VIEWS[view]
-    up = np.array([0.0, 0.0, 1.0])
+    right, up, fwd = view_basis(view)
     allv = np.concatenate([m[0] for m in meshes])
     if crop:
         sel = (allv[:, 2] >= crop[0]) & (allv[:, 2] <= crop[1])
