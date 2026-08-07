@@ -11700,8 +11700,43 @@ static bool PathBSimV2Solve(
         }
         return cnt ? acc / cnt : 0.0;
     };
+    // LARGURA POR ESTAGIO. A pergunta que o dZ nao responde: a largura nunca
+    // entra no painel, ou entra e algum estagio a remove? Mede a razao mediana
+    // das arestas que eram TRANSVERSAIS no autorado (quase horizontais), que e
+    // a direcao em que o refit a mao acomoda o corpo pesado.
+    std::vector<uint8_t> wIsTransverse(edges.size(), 0);
+    for (size_t ei = 0; ei < edges.size(); ++ei) {
+        const auto& e = edges[ei];
+        if (e.a >= n || e.b >= n) continue;
+        const Vec3 d = Sub(baseVerts[e.b], baseVerts[e.a]);
+        const float L = Len(d);
+        if (L > 1.0e-6f && std::fabs(d.z) / L < 0.4f) wIsTransverse[ei] = 1;
+    }
+    std::vector<std::vector<double>> wAcc(zN + 1, std::vector<double>(14, 0.0));
+    std::vector<double> wPrev(zN + 1, 0.0);
+    std::vector<float> wScratch;
+    auto wMedOf = [&](int slot) {
+        wScratch.clear();
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            if (!wIsTransverse[ei]) continue;
+            const auto& e = edges[ei];
+            if (invMass[e.a] <= 0.0f && invMass[e.b] <= 0.0f) continue;
+            if (slot < (int)zN &&
+                (zComp[e.a] != zTrack[slot] || zComp[e.b] != zTrack[slot]))
+                continue;
+            const float r0 = baseEdgeRest[ei];
+            if (r0 <= 1.0e-6f) continue;
+            wScratch.push_back(Len(Sub(x[e.a], x[e.b])) / r0);
+        }
+        if (wScratch.empty()) return 0.0;
+        std::sort(wScratch.begin(), wScratch.end());
+        return (double)wScratch[wScratch.size() / 2];
+    };
     auto zSnap = [&]() {
-        for (size_t c = 0; c <= zN; ++c) zPrev[c] = zMeanOf((int)c);
+        for (size_t c = 0; c <= zN; ++c) {
+            zPrev[c] = zMeanOf((int)c);
+            wPrev[c] = wMedOf((int)c);
+        }
     };
     auto zMark = [&](int stage) {
         if (!kZTrace || stage < 0 || stage >= 14) return;
@@ -11709,6 +11744,9 @@ static bool PathBSimV2Solve(
             const double now = zMeanOf((int)c);
             zAcc[c][stage] += now - zPrev[c];
             zPrev[c] = now;
+            const double w = wMedOf((int)c);
+            wAcc[c][stage] += w - wPrev[c];
+            wPrev[c] = w;
         }
     };
     int totalIters = 0;
@@ -13302,7 +13340,17 @@ static bool PathBSimV2Solve(
                 // sai na saida padrao - e diagnostico, nunca comportamento
                 fprintf(stderr, "ZTRACE passo=%d %s livres=%d %s\n",
                         step, who, verts, off ? buf : "(nada)");
+                int woff = 0;
+                for (int k = 0; k < 14; ++k)
+                    if (std::fabs(wAcc[c][k]) > 0.0005)
+                        woff += _snprintf_s(buf + woff, sizeof(buf) - woff,
+                                            _TRUNCATE, "%s%s %+.3f",
+                                            woff ? " | " : "", kZNames[k],
+                                            wAcc[c][k]);
+                fprintf(stderr, "WTRACE passo=%d %s livres=%d %s\n",
+                        step, who, verts, woff ? buf : "(nada)");
                 std::fill(zAcc[c].begin(), zAcc[c].end(), 0.0);
+                std::fill(wAcc[c].begin(), wAcc[c].end(), 0.0);
             }
         }
         HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d outerMoves=%d worstContact=%.4f worstFace=%.4f",
