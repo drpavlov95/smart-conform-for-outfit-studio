@@ -11641,6 +11641,37 @@ static bool PathBSimV2Solve(
     }
     int standoffMoves = 0;
     float worstStandoff = 0.0f;
+    // TRACE VERTICAL. Quem devolve a queda que a gravidade produz?
+    //
+    // Medido: o painel livre grande termina com deslocamento vertical medio de
+    // +0.06, enquanto o refit a mao dele chega a -1.32 e o proprio conform do
+    // host a -1.24. Dar largura ao painel (transferencia de metrica) move isso
+    // para -0.33 e nao resolve - ou seja a queda e um problema separado.
+    //
+    // Isto NAO muda nada: acumula, por estagio de uma iteracao, quanto o Z
+    // medio do pano LIVRE subiu ou desceu, e soma ao longo do passo de morph.
+    // A pergunta que ele responde e se a gravidade e fraca ou se alguma outra
+    // restricao esta desfazendo o que ela faz.
+    const bool kZTrace = EnvToggle("DRAPE_SHELL_ZTRACE", false);
+    static const char* const kZNames[14] = {
+        "gravidade", "estiramento", "limite de strain", "LRA", "dobra",
+        "solda de costura", "contato vertice", "camada de baixo",
+        "camada de cima", "sombra/hull", "prumo", "contato face",
+        "auto-colisao", "re-fixar presos"};
+    std::vector<double> zAcc(14, 0.0);
+    double zPrev = 0.0;
+    auto zMean = [&]() {
+        double acc = 0.0; int cnt = 0;
+        for (size_t i = 0; i < n; ++i)
+            if (invMass[i] > 0.0f) { acc += x[i].z; ++cnt; }
+        return cnt ? acc / cnt : 0.0;
+    };
+    auto zMark = [&](int slot) {
+        if (!kZTrace) return;
+        const double now = zMean();
+        if (slot >= 0 && slot < 14) zAcc[slot] += now - zPrev;
+        zPrev = now;
+    };
     int totalIters = 0;
     // CONTATO NAO TRANSLADA, CONTATO SEPARA.
     //
@@ -12426,6 +12457,7 @@ static bool PathBSimV2Solve(
         int loadsApplied = 0;
         int itersSinceLoad = 0;
         for (int iteration = 0; iteration < kMaxIters; ++iteration) {
+            if (kZTrace) zPrev = zMean();
             xPrev = x;
             const bool applyLoad = loadMode
                 ? (loadsApplied < loadSteps &&
@@ -12448,8 +12480,10 @@ static bool PathBSimV2Solve(
                 // (area) only weights how constraints share their corrections.
                 if (!kNoGravity && applyLoad) x[i].z -= gStep;
             }
+            zMark(0);
             PathBStretchJacobi(x, edges, invMass, stretchLambda,
                                stretchCompliance, tensionOnly, compressCompliance, boundaryVert);
+            zMark(1);
             // TENSION STRAIN LIMIT (review B2): real cloth stretches <10%,
             // then ROTATES into folds - the user's requirement from day one.
             // Compliant stretch alone let hem edges reach 1.85-2.5x rest
@@ -12471,6 +12505,7 @@ static bool PathBSimV2Solve(
                     }
                 }
             }
+            zMark(2);
             // LRA projection: a free vertex may never be farther from its
             // pinned anchor than the unstretched material path allows. The
             // anchor's CURRENT position is anchorTarget (this morph step's
@@ -12486,6 +12521,7 @@ static bool PathBSimV2Solve(
                     x[i] = Add(a, Scale(d, maxLen / len));
                 }
             }
+            zMark(3);
             if (bendGS)
                 PathBBendingColoredGS(x, hinges, hingeBatches, invMass, bendLambda,
                                       bendCompliance, analyticVariant, boundaryVert,
@@ -12493,7 +12529,9 @@ static bool PathBSimV2Solve(
             else
                 PathBBendingJacobi(x, hinges, invMass, bendLambda, bendCompliance,
                                    analyticVariant, boundaryVert);
+            zMark(4);
             PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            zMark(5);
             std::fill(vertGap.begin(), vertGap.end(), 1.0e9f);
             for (size_t i = 0; i < n && !kNoContact; ++i) {
                 if (invMass[i] <= 0.0f) continue;
@@ -12840,6 +12878,7 @@ static bool PathBSimV2Solve(
                 ++contactMoves;
                 if (traceContact) ++traceVertexContact[traceOffset + i];
             }
+            zMark(6);
             // LAYER CONTACT: the garments worn under this one, treated exactly
             // like the body, because that is what they are to this cloth - a
             // surface it may rest on and must not pass through. Same XPBD form
@@ -12877,6 +12916,7 @@ static bool PathBSimV2Solve(
                 }
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
+            zMark(7);
             for (size_t li = 0; li < outerCount; ++li) {
                 const BodyBVH& surf = (*outerColliders)[li].Current();
                 if (!surf.valid) continue;
@@ -12908,6 +12948,7 @@ static bool PathBSimV2Solve(
                 }
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
+            zMark(8);
             if (kNoContact) { /* ablation: contact disabled */ } else
             if (hullOn) {
                 int hullMoves = 0;
@@ -13044,6 +13085,7 @@ static bool PathBSimV2Solve(
             // budget here to spend. The same correction is applied after the
             // solve as a guarded transaction instead, where it can be rejected
             // rather than shipped broken.
+            zMark(9);
             if (kPlumbInSolve && plumbEnv.valid) {
                 plumbClamp(x);
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
@@ -13053,6 +13095,7 @@ static bool PathBSimV2Solve(
             // the body poke through triangle interiors in all three shipped
             // builds). Runs EVERY iteration, capped like vertex contact, with
             // a broad-phase skip from this iteration's vertex gaps.
+            zMark(10);
             {
                 std::fill(triActive.begin(), triActive.end(), (uint8_t)0);
                 for (size_t ti = 0; ti < tris.size(); ++ti) {
@@ -13074,6 +13117,7 @@ static bool PathBSimV2Solve(
             // Cloth against itself. Runs after the body contact so the body has
             // the last word on where cloth may not be, and is re-welded because
             // it is a per-vertex pass like the others.
+            zMark(11);
             if (selfCollideOn && (iteration % selfCollideEvery) == 0) {
                 PathBSelfCollide(x, baseVerts, tris, invMass, selfNearRing,
                                  selfThickness, kSelfRelax, selfLambda,
@@ -13122,6 +13166,7 @@ static bool PathBSimV2Solve(
             // established - measured as an INVERTED stiffness response (more
             // stiffness => residual further from rest). Giving it the last word
             // on shape tests whether it is weak or merely overruled.
+            zMark(12);
             if (bendLast) {
                 if (bendGS)
                     PathBBendingColoredGS(x, hinges, hingeBatches, invMass, bendLambda,
@@ -13132,6 +13177,7 @@ static bool PathBSimV2Solve(
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+            zMark(13);
             itersUsed = iteration + 1;
             maxMove = 0.0f;
             size_t maxMover = 0;
@@ -13197,6 +13243,20 @@ static bool PathBSimV2Solve(
                 if (Len2(nb) > 1e-18f && Dot(nb, nx) < 0.0f) ++stepFlips;
             }
             HLog("path-b-shell: flips-after-step=%d: %d", step, stepFlips);
+        }
+        if (kZTrace) {
+            char buf[640]; int off = 0;
+            for (int k = 0; k < 14; ++k)
+                if (std::fabs(zAcc[k]) > 0.0005)
+                    off += _snprintf_s(buf + off, sizeof(buf) - off, _TRUNCATE,
+                                       "%s%s %+.3f", off ? " | " : "", kZNames[k],
+                                       zAcc[k]);
+            HLog("path-b-shell: ZTRACE passo=%d dZ acumulado do pano livre: %s",
+                 step, off ? buf : "(nada)");
+            // o harness nao escreve no log do hook, entao o trace tambem sai
+            // na saida padrao - e diagnostico, nunca comportamento
+            fprintf(stderr, "ZTRACE passo=%d %s\n", step, off ? buf : "(nada)");
+            std::fill(zAcc.begin(), zAcc.end(), 0.0);
         }
         HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d outerMoves=%d worstContact=%.4f worstFace=%.4f",
              step, kMorphSteps, itersUsed, maxMove, stalled ? " STALLED" : "",
