@@ -10628,18 +10628,37 @@ static void PathBPolar3(const float M[9], float R[9]) {
     }
 }
 
-// Raiz quadrada de uma 2x2 simetrica positiva-definida, forma fechada:
-//   sqrt(A) = (A + sqrt(det A) I) / sqrt(tr A + 2 sqrt(det A))
-// E o tensor de estiramento puro S da decomposicao F = R S - o que queremos
-// transferir. A rotacao R do suporte nao e deformacao do material.
-static bool PathBSqrt2x2(float a, float b, float c, float& sa, float& sb, float& sc) {
-    const float det = a * c - b * b;
-    if (!(det > 1.0e-12f)) return false;
-    const float sd = std::sqrt(det);
-    const float t = a + c + 2.0f * sd;
-    if (!(t > 1.0e-12f)) return false;
-    const float inv = 1.0f / std::sqrt(t);
-    sa = (a + sd) * inv; sb = b * inv; sc = (c + sd) * inv;
+// Estiramentos PRINCIPAIS de C = F^T F em 2D, limitados e recompostos.
+//
+// S e o tensor de estiramento puro de F = R S - a rotacao do suporte nao e
+// deformacao do material, e por isso transferimos C, nunca F.
+//
+// Limitar sa, sb, sc um a um NAO limita estiramento nenhum: sao coeficientes
+// de uma matriz, e os estiramentos reais sao os autovalores. [[2.5, 0.5],
+// [0.5, 2.5]] tem autovalores 3.0 e 2.0 sem que nenhum coeficiente passe de
+// 2.5 - foi assim que o teto de 2.5 publicou razao 2.770 no log. O limite
+// tem de cair sobre os autovalores, e S se reconstroi depois.
+static bool PathBStretchClamp2x2(float a, float b, float c, float lo, float hi,
+                                 float& sa, float& sb, float& sc) {
+    const float m = 0.5f * (a + c);
+    const float h = 0.5f * (a - c);
+    const float d = std::sqrt(h * h + b * b);
+    const float l1 = m + d, l2 = m - d;
+    if (!(l2 > 1.0e-12f)) return false;             // C nao positiva-definida
+    const float s1 = ClampRange(std::sqrt(l1), lo, hi);
+    const float s2 = ClampRange(std::sqrt(l2), lo, hi);
+    float vx = 1.0f, vy = 0.0f;
+    if (std::fabs(b) > 1.0e-9f) {
+        vx = b; vy = l1 - a;
+        const float L = std::sqrt(vx * vx + vy * vy);
+        if (L > 1.0e-9f) { vx /= L; vy /= L; } else { vx = 1.0f; vy = 0.0f; }
+    } else if (c > a) {
+        vx = 0.0f; vy = 1.0f;
+    }
+    const float wx = -vy, wy = vx;
+    sa = s1 * vx * vx + s2 * wx * wx;
+    sb = s1 * vx * vy + s2 * wx * wy;
+    sc = s1 * vy * vy + s2 * wy * wy;
     return true;
 }
 
@@ -11740,6 +11759,11 @@ static bool PathBSimV2Solve(
         std::vector<std::array<double, 6>> Cm((size_t)M, {1,1,1,0,0,0});
         std::vector<double> Cw((size_t)M, 0.0);
         std::vector<uint8_t> seedM((size_t)M, 0);
+        // C medido do proprio triangulo, guardado antes de qualquer media em
+        // vertice: o modo localizado precisa do valor do triangulo APOIADO, e
+        // mediar nos vertices ja misturaria identidade nas bordas do suporte.
+        std::vector<std::array<double, 6>> triC(tris.size(), {1,1,1,0,0,0});
+        std::vector<uint8_t> triSupported(tris.size(), 0);
         for (size_t ti = 0; ti < tris.size(); ++ti) {
             const auto& t = tris[ti];
             if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
@@ -11775,6 +11799,8 @@ static bool PathBSimV2Solve(
                 C3[k] = c11*U[I[k]]*U[J[k]] + c22*V[I[k]]*V[J[k]] +
                         c12*(U[I[k]]*V[J[k]] + V[I[k]]*U[J[k]]) +
                         N[I[k]]*N[J[k]];
+            triC[ti] = {C3[0], C3[1], C3[2], C3[3], C3[4], C3[5]};
+            triSupported[ti] = 1;
             const double wA = 0.5 * twoA;
             for (int k = 0; k < 3; ++k) {
                 const uint32_t mi = mnode[t[k]];
@@ -11877,8 +11903,22 @@ static bool PathBSimV2Solve(
             return {it, std::sqrt(rs / std::max(rs0, 1.0e-30))};
         };
 
+        // METRICA LOCALIZADA (A/B contra a propagacao harmonica).
+        //
+        // A harmonica resolve DeltaC = 0 com o strain dos suportes como
+        // Dirichlet e NENHUM prior no pano livre. Ela sabe suavizar; nao sabe
+        // que pano livre deveria ter liberdade para nao herdar por inteiro a
+        // mudanca intrinseca do suporte. Entao ela faz o que foi pedida e
+        // espalha o strain do corpo pelo painel todo.
+        //
+        // O modo localizado nao propaga nada: triangulo APOIADO usa o strain
+        // que mediu, triangulo livre pede identidade - "meu material prefere
+        // o padrao autorado". Quem concilia os dois e o proprio embedding
+        // global, que ainda tem de honrar ancoras maiores. A pergunta e se ele
+        // ja distribui sozinho o alargamento necessario.
+        const bool kLocalized = EnvToggle("DRAPE_MATERIAL_LOCALIZED", false);
         int harmIt = 0; double harmRes = 0.0;
-        for (int q = 0; q < 6; ++q) {
+        for (int q = 0; kLocalized ? false : q < 6; ++q) {
             std::vector<double> xv((size_t)M, 0.0), fv((size_t)M, 0.0);
             for (uint32_t m = 0; m < M; ++m) {
                 fv[m] = Cm[m][q];
@@ -11909,20 +11949,22 @@ static bool PathBSimV2Solve(
             const Vec3 uu = Scale(e1, 1.0f / ul);
             const Vec3 vv = Cross(nr, uu);
             std::array<double, 6> C{};
-            for (int k = 0; k < 3; ++k)
-                for (int q = 0; q < 6; ++q) C[q] += Cm[mnode[t[k]]][q] / 3.0;
+            if (kLocalized) {
+                C = triSupported[ti] ? triC[ti]
+                                     : std::array<double, 6>{1,1,1,0,0,0};
+            } else {
+                for (int k = 0; k < 3; ++k)
+                    for (int q = 0; q < 6; ++q) C[q] += Cm[mnode[t[k]]][q] / 3.0;
+            }
             auto quad = [&](const Vec3& a, const Vec3& b) {
                 return (float)(C[0]*a.x*b.x + C[1]*a.y*b.y + C[2]*a.z*b.z +
                                C[3]*(a.x*b.y + a.y*b.x) + C[4]*(a.x*b.z + a.z*b.x) +
                                C[5]*(a.y*b.z + a.z*b.y));
             };
             float sa = 1.0f, sb = 0.0f, sc = 1.0f;
-            if (PathBSqrt2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv), sa, sb, sc)) {
-                const float lo = kMetricMin, hi = kMetricMax;
-                sa = ClampRange(sa, lo, hi); sc = ClampRange(sc, lo, hi);
-                sb = ClampRange(sb, -0.5f * hi, 0.5f * hi);
-                if (sa * sc - sb * sb < 0.05f) { sa = 1.0f; sb = 0.0f; sc = 1.0f; ++degen; }
-            } else {
+            if (!PathBStretchClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
+                                      kMetricMin, kMetricMax, sa, sb, sc)) {
+                sa = 1.0f; sb = 0.0f; sc = 1.0f;
                 ++degen;   // C nao positiva-definida: cai para ARAP puro
             }
             auto apply2 = [&](const Vec3& e) {
@@ -12175,15 +12217,15 @@ static bool PathBSimV2Solve(
         for (size_t ti = 0; ti < tris.size(); ++ti)
             if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badNew;
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
-             "razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
+             "modo=%s razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
              "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
-             M, seeds, harmIt, harmRes, rMin, rMax, rN ? rSum / rN : 1.0,
+             M, seeds, harmIt, harmRes, kLocalized ? "localizado" : "harmonico", rMin, rMax, rN ? rSum / rN : 1.0,
              globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
              badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
-                "razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
+                "modo=%s razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
                 "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
-                M, seeds, harmIt, harmRes, rMin, rMax, rN ? rSum / rN : 1.0,
+                M, seeds, harmIt, harmRes, kLocalized ? "localizado" : "harmonico", rMin, rMax, rN ? rSum / rN : 1.0,
                 globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
                 badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
 
