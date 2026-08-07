@@ -11658,19 +11658,58 @@ static bool PathBSimV2Solve(
         "solda de costura", "contato vertice", "camada de baixo",
         "camada de cima", "sombra/hull", "prumo", "contato face",
         "auto-colisao", "re-fixar presos"};
-    std::vector<double> zAcc(14, 0.0);
-    double zPrev = 0.0;
-    auto zMean = [&]() {
+    // POR COMPONENTE CONECTADO, nao so a media global. A media mistura corpete,
+    // mangas e paineis; a cadeia so vale se ela aparecer NOS PAINEIS que falham.
+    std::vector<int> zComp(n, -1);
+    std::vector<int> zTrack;          // ids de componente acompanhados
+    if (kZTrace) {
+        std::vector<int> par(n);
+        for (size_t i = 0; i < n; ++i) par[i] = (int)i;
+        std::function<int(int)> fr = [&](int a) {
+            while (par[a] != a) { par[a] = par[par[a]]; a = par[a]; }
+            return a;
+        };
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            par[fr(t[0])] = fr(t[1]);
+            par[fr(t[1])] = fr(t[2]);
+        }
+        std::unordered_map<int, int> freeCount;
+        for (size_t i = 0; i < n; ++i) {
+            zComp[i] = fr((int)i);
+            if (invMass[i] > 0.0f) ++freeCount[zComp[i]];
+        }
+        std::vector<std::pair<int, int>> byFree(freeCount.begin(), freeCount.end());
+        std::sort(byFree.begin(), byFree.end(),
+                  [](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+                      if (a.second != b.second) return a.second > b.second;
+                      return a.first < b.first;
+                  });
+        for (size_t k = 0; k < byFree.size() && k < 4; ++k)
+            zTrack.push_back(byFree[k].first);
+    }
+    const size_t zN = zTrack.size();
+    std::vector<std::vector<double>> zAcc(zN + 1, std::vector<double>(14, 0.0));
+    std::vector<double> zPrev(zN + 1, 0.0);
+    auto zMeanOf = [&](int slot) {           // slot zN = malha inteira
         double acc = 0.0; int cnt = 0;
-        for (size_t i = 0; i < n; ++i)
-            if (invMass[i] > 0.0f) { acc += x[i].z; ++cnt; }
+        for (size_t i = 0; i < n; ++i) {
+            if (invMass[i] <= 0.0f) continue;
+            if (slot < (int)zN && zComp[i] != zTrack[slot]) continue;
+            acc += x[i].z; ++cnt;
+        }
         return cnt ? acc / cnt : 0.0;
     };
-    auto zMark = [&](int slot) {
-        if (!kZTrace) return;
-        const double now = zMean();
-        if (slot >= 0 && slot < 14) zAcc[slot] += now - zPrev;
-        zPrev = now;
+    auto zSnap = [&]() {
+        for (size_t c = 0; c <= zN; ++c) zPrev[c] = zMeanOf((int)c);
+    };
+    auto zMark = [&](int stage) {
+        if (!kZTrace || stage < 0 || stage >= 14) return;
+        for (size_t c = 0; c <= zN; ++c) {
+            const double now = zMeanOf((int)c);
+            zAcc[c][stage] += now - zPrev[c];
+            zPrev[c] = now;
+        }
     };
     int totalIters = 0;
     // CONTATO NAO TRANSLADA, CONTATO SEPARA.
@@ -12457,7 +12496,7 @@ static bool PathBSimV2Solve(
         int loadsApplied = 0;
         int itersSinceLoad = 0;
         for (int iteration = 0; iteration < kMaxIters; ++iteration) {
-            if (kZTrace) zPrev = zMean();
+            if (kZTrace) zSnap();
             xPrev = x;
             const bool applyLoad = loadMode
                 ? (loadsApplied < loadSteps &&
@@ -13245,18 +13284,26 @@ static bool PathBSimV2Solve(
             HLog("path-b-shell: flips-after-step=%d: %d", step, stepFlips);
         }
         if (kZTrace) {
-            char buf[640]; int off = 0;
-            for (int k = 0; k < 14; ++k)
-                if (std::fabs(zAcc[k]) > 0.0005)
-                    off += _snprintf_s(buf + off, sizeof(buf) - off, _TRUNCATE,
-                                       "%s%s %+.3f", off ? " | " : "", kZNames[k],
-                                       zAcc[k]);
-            HLog("path-b-shell: ZTRACE passo=%d dZ acumulado do pano livre: %s",
-                 step, off ? buf : "(nada)");
-            // o harness nao escreve no log do hook, entao o trace tambem sai
-            // na saida padrao - e diagnostico, nunca comportamento
-            fprintf(stderr, "ZTRACE passo=%d %s\n", step, off ? buf : "(nada)");
-            std::fill(zAcc.begin(), zAcc.end(), 0.0);
+            for (size_t c = 0; c <= zN; ++c) {
+                int verts = 0;
+                for (size_t i = 0; i < n; ++i)
+                    if (invMass[i] > 0.0f &&
+                        (c >= zN || zComp[i] == zTrack[c])) ++verts;
+                char buf[640]; int off = 0;
+                for (int k = 0; k < 14; ++k)
+                    if (std::fabs(zAcc[c][k]) > 0.0005)
+                        off += _snprintf_s(buf + off, sizeof(buf) - off, _TRUNCATE,
+                                           "%s%s %+.3f", off ? " | " : "",
+                                           kZNames[k], zAcc[c][k]);
+                const char* who = (c >= zN) ? "TODA A MALHA" : "componente";
+                HLog("path-b-shell: ZTRACE passo=%d %s livres=%d: %s",
+                     step, who, verts, off ? buf : "(nada)");
+                // o harness nao escreve no log do hook, entao o trace tambem
+                // sai na saida padrao - e diagnostico, nunca comportamento
+                fprintf(stderr, "ZTRACE passo=%d %s livres=%d %s\n",
+                        step, who, verts, off ? buf : "(nada)");
+                std::fill(zAcc[c].begin(), zAcc[c].end(), 0.0);
+            }
         }
         HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d outerMoves=%d worstContact=%.4f worstFace=%.4f",
              step, kMorphSteps, itersUsed, maxMove, stalled ? " STALLED" : "",
