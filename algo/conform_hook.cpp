@@ -11641,6 +11641,273 @@ static bool PathBSimV2Solve(
     }
     int standoffMoves = 0;
     float worstStandoff = 0.0f;
+
+    // =====================================================================
+    // FASE 1 - ADAPTACAO MATERIAL  (DRAPE_MATERIAL_ADAPT_V0)
+    // =====================================================================
+    // O solve atual pede ao MESMO relaxamento que mude o TAMANHO INTRINSECO
+    // da peca e que a DRAPEIE, e as duas responsabilidades brigam. Medido no
+    // painel grande da saia, variacao acumulada da largura transversal quando
+    // a metrica e injetada dentro do solve:
+    //
+    //     estiramento        +1.264      poe largura
+    //     limite de strain   -2.275      tira largura
+    //     solda de costura   +1.476      poe largura de novo
+    //
+    // Tres termos grandes se anulando, e a solda - cujo trabalho e so manter
+    // gemeos coincidentes - virando o segundo maior mecanismo de largura da
+    // roupa. Do lado vertical a mesma assinatura: limite de strain +5.68 contra
+    // contato -3.43, com a gravidade em -0.61 no meio.
+    //
+    // Entao as duas perguntas passam a ser respondidas separadamente:
+    //
+    //   FASE 1  "qual seria a geometria desta roupa se ela tivesse sido
+    //            confeccionada para este corpo?"   - sem gravidade, sem
+    //            contato, sem buckling
+    //   FASE 2  "como essa roupa cai?"             - o solve de sempre, com a
+    //            geometria da fase 1 como repouso
+    //
+    // O que se transfere e METRICA, nunca POSICAO: os suportes dizem quanto o
+    // material precisa acomodar, jamais onde o vertice livre deve ficar.
+    bool materialAdapt = EnvToggle("DRAPE_MATERIAL_ADAPT_V0", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("material_adapt_on.flag")) materialAdapt = true;
+#endif
+    std::vector<Vec3> adaptedRest;
+    if (materialAdapt && !tris.empty()) {
+        // ---- 1) tensor de deformacao SEM ROTACAO, por triangulo suportado ----
+        // C = F^T F no frame tangente autorado, levantado para 3D. C e simetrico
+        // e nao carrega rotacao, entao media-lo entre triangulos vizinhos nao
+        // transporta o giro do suporte para dentro do material - que era o
+        // defeito da formulacao anterior, que difundia F 3x3 em world space.
+        std::vector<Vec3> support(n);
+        for (size_t i = 0; i < n; ++i) support[i] = Add(baseVerts[i], raw[i]);
+        // por vertice: soma dos C dos triangulos suportados incidentes
+        std::vector<std::array<double, 6>> Cv(n, {0,0,0,0,0,0});  // xx yy zz xy xz yz
+        std::vector<double> Cw(n, 0.0);
+        std::vector<uint8_t> seed(n, 0);
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            if (!fixed[t[0]] || !fixed[t[1]] || !fixed[t[2]]) continue;
+            const Vec3 e1 = Sub(baseVerts[t[1]], baseVerts[t[0]]);
+            const Vec3 e2 = Sub(baseVerts[t[2]], baseVerts[t[0]]);
+            Vec3 nr = Cross(e1, e2);
+            const float twoA = Len(nr);
+            if (twoA < 1.0e-9f) continue;
+            nr = Scale(nr, 1.0f / twoA);
+            float ul = Len(e1);
+            if (ul < 1.0e-9f) continue;
+            const Vec3 uu = Scale(e1, 1.0f / ul);
+            const Vec3 vv = Cross(nr, uu);
+            const float a11 = Dot(e1, uu), a21 = Dot(e1, vv);
+            const float a12 = Dot(e2, uu), a22 = Dot(e2, vv);
+            const float det = a11 * a22 - a12 * a21;
+            if (std::fabs(det) < 1.0e-9f) continue;
+            const Vec3 f1 = Sub(support[t[1]], support[t[0]]);
+            const Vec3 f2 = Sub(support[t[2]], support[t[0]]);
+            const float g11 = Dot(f1, f1), g12 = Dot(f1, f2), g22 = Dot(f2, f2);
+            const float i11 =  a22 / det, i12 = -a12 / det;
+            const float i21 = -a21 / det, i22 =  a11 / det;
+            const float c11 = i11*(g11*i11 + g12*i21) + i21*(g12*i11 + g22*i21);
+            const float c12 = i11*(g11*i12 + g12*i22) + i21*(g12*i12 + g22*i22);
+            const float c22 = i12*(g11*i12 + g12*i22) + i22*(g12*i12 + g22*i22);
+            // levanta: C3 = c11 u(x)u + c12 (u(x)v + v(x)u) + c22 v(x)v + n(x)n
+            const float U[3] = {uu.x, uu.y, uu.z};
+            const float V[3] = {vv.x, vv.y, vv.z};
+            const float N[3] = {nr.x, nr.y, nr.z};
+            double C3[6];
+            const int I[6] = {0,1,2,0,0,1}, J[6] = {0,1,2,1,2,2};
+            for (int k = 0; k < 6; ++k)
+                C3[k] = c11*U[I[k]]*U[J[k]] + c22*V[I[k]]*V[J[k]] +
+                        c12*(U[I[k]]*V[J[k]] + V[I[k]]*U[J[k]]) +
+                        N[I[k]]*N[J[k]];
+            const double wA = 0.5 * twoA;
+            for (int k = 0; k < 3; ++k) {
+                const uint16_t vi = t[k];
+                for (int q = 0; q < 6; ++q) Cv[vi][q] += C3[q] * wA;
+                Cw[vi] += wA;
+                seed[vi] = 1;
+            }
+        }
+        int seeds = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!seed[i] || Cw[i] <= 0.0) { seed[i] = 0; continue; }
+            for (int q = 0; q < 6; ++q) Cv[i][q] /= Cw[i];
+            ++seeds;
+        }
+        // identidade onde nao ha semente
+        for (size_t i = 0; i < n; ++i)
+            if (!seed[i]) Cv[i] = {1,1,1,0,0,0};
+
+        // ---- 2) extensao harmonica pelo grafo MATERIAL ----
+        // Pesos vindos do comprimento AUTORADO, e iteracao ate convergir - nao
+        // um numero de aneis. Subdividir a mesma roupa muda o numero de passos
+        // e nao o campo resultante, que era o vicio da difusao anterior.
+        // Gemeos de costura entram como o mesmo no material: eles sao o mesmo
+        // ponto do tecido e nao podem receber metricas diferentes para serem
+        // reconciliados tarde pela solda.
+        std::vector<std::vector<std::pair<uint32_t, double>>> madj(n);
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            const auto& e = edges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            const double L = std::max((double)baseEdgeRest[ei], 1.0e-4);
+            madj[e.a].push_back({e.b, 1.0 / L});
+            madj[e.b].push_back({e.a, 1.0 / L});
+        }
+        for (const auto& grp : exactSeamGroups)
+            for (uint32_t a : grp)
+                for (uint32_t b : grp)
+                    if (a != b && a < n && b < n)
+                        madj[a].push_back({b, 1.0e3});   // mesmo ponto material
+        const int kMaxHarm = 20000;
+        const double kHarmEps = 1.0e-5;
+        int harmIters = 0;
+        for (; harmIters < kMaxHarm; ++harmIters) {
+            double worst = 0.0;
+            std::vector<std::array<double, 6>> nx = Cv;
+            for (size_t i = 0; i < n; ++i) {
+                if (seed[i] || madj[i].empty()) continue;
+                std::array<double, 6> acc{};
+                double wsum = 0.0;
+                for (const auto& lk : madj[i]) {
+                    for (int q = 0; q < 6; ++q) acc[q] += Cv[lk.first][q] * lk.second;
+                    wsum += lk.second;
+                }
+                if (wsum <= 0.0) continue;
+                for (int q = 0; q < 6; ++q) {
+                    const double v2 = acc[q] / wsum;
+                    worst = std::max(worst, std::fabs(v2 - Cv[i][q]));
+                    nx[i][q] = v2;
+                }
+            }
+            Cv.swap(nx);
+            if (worst < kHarmEps) break;
+        }
+
+        // ---- 3) comprimento-alvo por aresta ----
+        // razao = sqrt(d^T C d) / |d| com d a direcao AUTORADA: anisotropico por
+        // construcao, entao alargar e alongar deixam de ser a mesma coisa.
+        std::vector<float> targetLen(edges.size(), 0.0f);
+        double rMin = 1e9, rMax = -1e9, rSum = 0.0; int rN = 0;
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            const auto& e = edges[ei];
+            const float L0 = baseEdgeRest[ei];
+            targetLen[ei] = L0;
+            if (e.a >= n || e.b >= n || L0 <= 1.0e-6f) continue;
+            const Vec3 d = Sub(baseVerts[e.b], baseVerts[e.a]);
+            const double D[3] = {d.x, d.y, d.z};
+            double q = 0.0;
+            for (int c = 0; c < 2; ++c) {
+                const std::array<double, 6>& C = (c == 0) ? Cv[e.a] : Cv[e.b];
+                q += 0.5 * (C[0]*D[0]*D[0] + C[1]*D[1]*D[1] + C[2]*D[2]*D[2] +
+                            2.0*(C[3]*D[0]*D[1] + C[4]*D[0]*D[2] + C[5]*D[1]*D[2]));
+            }
+            if (!(q > 0.0)) continue;
+            const double ratio = std::sqrt(q) / L0;
+            if (!std::isfinite(ratio)) continue;
+            const double rc = ClampRange((float)ratio, kMetricMin, kMetricMax);
+            targetLen[ei] = (float)(L0 * rc);
+            rMin = std::min(rMin, rc); rMax = std::max(rMax, rc);
+            rSum += rc; ++rN;
+        }
+
+        // ---- 4) REALIZAR a metrica: posicoes que a satisfazem ----
+        // Sem gravidade, sem contato, sem buckling. Ancoras presas ao suporte,
+        // gemeos soldados, e uma barreira de orientacao: a metrica nao pode ser
+        // obtida colapsando ou invertendo triangulo.
+        adaptedRest = baseVerts;
+        for (size_t i = 0; i < n; ++i)
+            if (fixed[i]) adaptedRest[i] = support[i];
+        std::vector<Vec3> triNrm0(tris.size());
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            const auto& t = tris[ti];
+            triNrm0[ti] = (t[0] < n && t[1] < n && t[2] < n)
+                ? Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                        Sub(baseVerts[t[2]], baseVerts[t[0]]))
+                : Vec3{0.0f, 0.0f, 1.0f};
+        }
+        std::vector<std::vector<uint32_t>> vFaces(n);
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti)
+            for (int k = 0; k < 3; ++k)
+                if (tris[ti][k] < n) vFaces[tris[ti][k]].push_back(ti);
+        auto faceBad = [&](uint32_t ti, const std::vector<Vec3>& V) {
+            const auto& t = tris[ti];
+            const Vec3 nn = Cross(Sub(V[t[1]], V[t[0]]), Sub(V[t[2]], V[t[0]]));
+            const float a0 = Len(triNrm0[ti]), a1 = Len(nn);
+            if (a0 <= 1.0e-9f) return false;
+            return Dot(triNrm0[ti], nn) <= 0.0f || a1 < 0.10f * a0;
+        };
+        const int kRealizeIters = (int)ClampRange(
+            EnvFloat("DRAPE_MATERIAL_ADAPT_ITERS", 300.0f), 10.0f, 4000.0f);
+        int rejected = 0;
+        for (int it = 0; it < kRealizeIters; ++it) {
+            std::vector<Vec3> prev = adaptedRest;
+            for (size_t ei = 0; ei < edges.size(); ++ei) {
+                const auto& e = edges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                const float want = targetLen[ei];
+                if (want <= 1.0e-6f) continue;
+                const float wa = fixed[e.a] ? 0.0f : 1.0f;
+                const float wb = fixed[e.b] ? 0.0f : 1.0f;
+                const float ws = wa + wb;
+                if (ws <= 0.0f) continue;
+                Vec3 d = Sub(adaptedRest[e.b], adaptedRest[e.a]);
+                const float L = Len(d);
+                if (L <= 1.0e-9f) continue;
+                const Vec3 corr = Scale(d, ((L - want) / L) / ws * 0.5f);
+                adaptedRest[e.a] = Add(adaptedRest[e.a], Scale(corr, wa));
+                adaptedRest[e.b] = Sub(adaptedRest[e.b], Scale(corr, wb));
+            }
+            for (const auto& grp : exactSeamGroups) {
+                Vec3 m{0.0f, 0.0f, 0.0f}; int c = 0;
+                for (uint32_t vi : grp) if (vi < n) { m = Add(m, adaptedRest[vi]); ++c; }
+                if (c < 2) continue;
+                m = Scale(m, 1.0f / (float)c);
+                for (uint32_t vi : grp) if (vi < n) adaptedRest[vi] = m;
+            }
+            // barreira de orientacao: quem inverteu ou colapsou uma face volta
+            for (size_t i = 0; i < n; ++i) {
+                if (fixed[i]) { adaptedRest[i] = support[i]; continue; }
+                bool bad = false;
+                for (uint32_t ti : vFaces[i]) if (faceBad(ti, adaptedRest)) { bad = true; break; }
+                if (!bad) continue;
+                float sc = 1.0f;
+                for (int g = 0; g < 6 && bad; ++g) {
+                    sc *= 0.5f;
+                    adaptedRest[i] = Add(prev[i], Scale(Sub(adaptedRest[i], prev[i]), sc));
+                    bad = false;
+                    for (uint32_t ti : vFaces[i]) if (faceBad(ti, adaptedRest)) { bad = true; break; }
+                }
+                if (bad) { adaptedRest[i] = prev[i]; ++rejected; }
+            }
+        }
+        int flips = 0;
+        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti)
+            if (faceBad(ti, adaptedRest)) ++flips;
+        HLog("path-b-shell: FASE1 sementes=%d harmonicas=%d razao[%.3f..%.3f med~%.3f] "
+             "realiza=%d rejeitados=%d facesRuins=%d",
+             seeds, harmIters, rMin, rMax, rN ? rSum / rN : 1.0,
+             kRealizeIters, rejected, flips);
+        fprintf(stderr, "FASE1 sementes=%d harmonicas=%d razao[%.3f..%.3f med=%.3f] "
+                "rejeitados=%d facesRuins=%d\n", seeds, harmIters, rMin, rMax,
+                rN ? rSum / rN : 1.0, rejected, flips);
+
+        // ---- 5) a fase 2 passa a repousar NESTA geometria ----
+        for (size_t ei = 0; ei < edges.size(); ++ei) {
+            const auto& e = edges[ei];
+            if (e.a >= n || e.b >= n) continue;
+            baseEdgeRest[ei] = Len(Sub(adaptedRest[e.a], adaptedRest[e.b]));
+        }
+        for (auto& h : hinges)
+            h.restAngle = PathBSignedDihedral(PathBHingeLocal(adaptedRest, h));
+        x = adaptedRest;
+        if (EnvFloat("DRAPE_STAGE_DUMP", 0.0f) > 0.5f) {
+            PathBDumpTris(baseVerts, tris, "drape_fase00_base.obj");
+            PathBDumpTris(adaptedRest, tris, "drape_fase01_rest.obj");
+        }
+    }
+
     // TRACE VERTICAL. Quem devolve a queda que a gravidade produz?
     //
     // Medido: o painel livre grande termina com deslocamento vertical medio de
