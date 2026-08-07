@@ -12223,6 +12223,33 @@ static bool PathBSimV2Solve(
         std::vector<std::vector<float>> layerLambda(layerCount,
                                                     std::vector<float>(n, 0.0f));
         int layerMoves = 0;
+        // FICAR POR BAIXO DO QUE SE VESTE POR CIMA.
+        //
+        // Este e o lado que faltava. O solve ja tratava a peca de BAIXO como
+        // superficie ("fique do lado de fora"); a de CIMA nunca foi contato,
+        // so um limite estatico no piso de folga. Medido, e a mesma parede que
+        // barra os dois unicos caminhos que melhoram o que ele ve:
+        //
+        //   subir o piso de folga  caimento e vao melhoram, portao cobra
+        //                          roupa-contra-roupa em 5 de 6 cenas
+        //   admitir a calca        83@-3.11 -> 0 de penetracao no Yarl, e
+        //                          roupa-contra-roupa 63/271 -> 238/1601
+        //
+        // Nos dois casos o pano se afasta do corpo, que e o que se quer, e
+        // atravessa a peca de cima, porque nada lhe diz que ela esta la.
+        //
+        // Expresso em ESPACO DE FOLGA-AO-CORPO, e nao como "dentro da
+        // superficie": a peca de cima e uma casca aberta e "dentro" dela nao
+        // significa nada num cinto ou numa capa. A folga ao corpo, sim - e a
+        // mesma formulacao que o tuck de camadas do fim do pipeline ja usa.
+        // XPBD unilateral como todo o resto: so puxa para dentro, nunca empurra
+        // para fora, e o residuo fica na compliance em vez de numa disputa.
+        const bool kOuterContact = EnvToggle("DRAPE_SHELL_OUTER_CONTACT", false);
+        const size_t outerCount =
+            (kOuterContact && outerColliders) ? outerColliders->size() : 0;
+        std::vector<std::vector<float>> outerLambda(outerCount,
+                                                    std::vector<float>(n, 0.0f));
+        int outerMoves = 0;
         int contactMoves = 0;
         int faceContactMoves = 0;
         int shadowMoves = 0;
@@ -12722,6 +12749,37 @@ static bool PathBSimV2Solve(
                 }
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
+            for (size_t li = 0; li < outerCount; ++li) {
+                const BodyBVH& surf = (*outerColliders)[li].Current();
+                if (!surf.valid) continue;
+                std::vector<float>& lam = outerLambda[li];
+                for (size_t i = 0; i < n; ++i) {
+                    if (invMass[i] <= 0.0f) continue;
+                    if (authoredGapArr[i] < -0.1f) continue;   // autorado-dentro
+                    Vec3 cp{0.0f, 0.0f, 0.0f}, nr{0.0f, 0.0f, 1.0f};
+                    float d2 = 0.0f;
+                    if (!BVHClosestPoint(surf, x[i], cp, nr, d2)) continue;
+                    if (d2 > kOuterRoofNear * kOuterRoofNear) continue;
+                    float outerGap = 0.0f, myGap = 0.0f;
+                    Vec3 bn{0.0f, 0.0f, 1.0f};
+                    if (!BVHSignedGap(body, cp, outerGap, nullptr) ||
+                        !BVHSignedGap(body, x[i], myGap, &bn))
+                        continue;
+                    const float Cv = (outerGap - kOuterRoofMargin) - myGap;
+                    if (Cv >= 0.0f) { lam[i] = 0.0f; continue; }
+                    const float w = invMass[i];
+                    const float denom = w + kLayerAlpha;
+                    if (denom <= 1.0e-30f) continue;
+                    float dl = (-Cv - kLayerAlpha * lam[i]) / denom;
+                    const float projected = std::max(lam[i] + dl, 0.0f);
+                    dl = projected - lam[i];
+                    lam[i] = projected;
+                    if (dl <= 0.0f) continue;
+                    x[i] = Sub(x[i], Scale(bn, w * dl));
+                    ++outerMoves;
+                }
+                PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
+            }
             if (kNoContact) { /* ablation: contact disabled */ } else
             if (hullOn) {
                 int hullMoves = 0;
@@ -13012,9 +13070,9 @@ static bool PathBSimV2Solve(
             }
             HLog("path-b-shell: flips-after-step=%d: %d", step, stepFlips);
         }
-        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d worstContact=%.4f worstFace=%.4f",
+        HLog("path-b-shell: step=%d/%d iters=%d maxMove=%.4f%s contactMoves=%d faceMoves=%d shadowMoves=%d outerMoves=%d worstContact=%.4f worstFace=%.4f",
              step, kMorphSteps, itersUsed, maxMove, stalled ? " STALLED" : "",
-             contactMoves, faceContactMoves, shadowMoves, worstContact,
+             contactMoves, faceContactMoves, shadowMoves, outerMoves, worstContact,
              worstFaceContact);
     }
     if (kAuthoredStandoff)
@@ -15336,12 +15394,34 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         EnvFloat("DRAPE_SHELL_AUTO_FREE_FRAC", 0.10f), 0.0f, 1.0f);
     const bool autoHasCloth = kAutoFreeFrac > 0.0f &&
         originalPreset == DRAPE_PRESET_AUTO && shellFreeFrac >= kAutoFreeFrac;
+    // O NOME NAO DECIDE FISICA. Medido na sessao viva dele, calca do Yarl:
+    //
+    //     Clothes   SHELL                 livre= 588/1777   pen= 0
+    //     Pants     legacy(out-of-scope)  livre= 557/575    pen=21@3.11
+    //
+    // A calca fica com 21 vertices a 3.11 unidades DENTRO do corpo e nao chega
+    // ao solver, porque o preset foi adivinhado do nome ("pants" -> Tubular) e
+    // Tubular esta fora do escopo. Ao mesmo tempo a mascara geometrica - a
+    // mesma que o solver usa para saber o que e pano solto - diz que 557 dos
+    // 575 vertices dela sao livres. Duas classificacoes se contradizendo, e
+    // quem decide e a que veio do nome do arquivo.
+    //
+    // O teste geometrico ja existe logo acima para AUTO e diz a coisa certa;
+    // ele so estava preso a um rotulo. Uma calca REALMENTE justa continua fora
+    // por construcao - a fracao livre dela e baixa e a condicao nao dispara -,
+    // entao isto nao passa a simular manga colada: passa a simular o que a
+    // geometria mostra ser pano solto, com qualquer nome.
+    const float kTubularFreeFrac = ClampRange(
+        EnvFloat("DRAPE_SHELL_TUBULAR_FREE_FRAC", 0.0f), 0.0f, 1.0f);
+    const bool tubularHasCloth = kTubularFreeFrac > 0.0f &&
+        originalPreset == DRAPE_PRESET_TUBULAR && shellFreeFrac >= kTubularFreeFrac;
     const bool pathBShellScoped =
         (originalPreset == DRAPE_PRESET_FITTED_CLOTH ||
          originalPreset == DRAPE_PRESET_LOOSE_DRAPED ||
-         autoHasCloth);
-    if (pathBShellRequested && autoHasCloth)
-        HLog("path-b-shell: AUTO preset admitted by geometry shape='%s' free=%d/%zu (%.0f%%)",
+         autoHasCloth || tubularHasCloth);
+    if (pathBShellRequested && (autoHasCloth || tubularHasCloth))
+        HLog("path-b-shell: %s preset admitted by geometry shape='%s' free=%d/%zu (%.0f%%)",
+             autoHasCloth ? "AUTO" : "TUBULAR",
              shapeName.c_str(), shellFreeVerts, n, shellFreeFrac * 100.0f);
     if (pathBShellRequested && pathBShellScoped) {
         const auto started = std::chrono::steady_clock::now();
