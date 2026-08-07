@@ -10600,6 +10600,49 @@ static thread_local bool g_allowPlumbClamp = true;
 // no garment can come out of the ladder worse than it used to.
 static thread_local bool g_allowHangFloor = true;
 
+
+// Decomposicao polar 3x3 por iteracao de Newton (Higham): R <- (R + R^-T)/2.
+// Converge em poucas iteracoes para matrizes bem condicionadas e nao precisa de
+// SVD nem de biblioteca externa. Usada para achar a rotacao livre de cada
+// triangulo no passo local-global da adaptacao material.
+static void PathBPolar3(const float M[9], float R[9]) {
+    for (int k = 0; k < 9; ++k) R[k] = M[k];
+    for (int it = 0; it < 24; ++it) {
+        const float det =
+            R[0]*(R[4]*R[8]-R[5]*R[7]) - R[1]*(R[3]*R[8]-R[5]*R[6]) +
+            R[2]*(R[3]*R[7]-R[4]*R[6]);
+        if (std::fabs(det) < 1.0e-12f) break;
+        const float id = 1.0f / det;
+        // (R^-1)^T
+        const float T[9] = {
+            (R[4]*R[8]-R[5]*R[7])*id, (R[5]*R[6]-R[3]*R[8])*id, (R[3]*R[7]-R[4]*R[6])*id,
+            (R[2]*R[7]-R[1]*R[8])*id, (R[0]*R[8]-R[2]*R[6])*id, (R[1]*R[6]-R[0]*R[7])*id,
+            (R[1]*R[5]-R[2]*R[4])*id, (R[2]*R[3]-R[0]*R[5])*id, (R[0]*R[4]-R[1]*R[3])*id};
+        float diff = 0.0f;
+        for (int k = 0; k < 9; ++k) {
+            const float nv = 0.5f * (R[k] + T[k]);
+            diff += std::fabs(nv - R[k]);
+            R[k] = nv;
+        }
+        if (diff < 1.0e-7f) break;
+    }
+}
+
+// Raiz quadrada de uma 2x2 simetrica positiva-definida, forma fechada:
+//   sqrt(A) = (A + sqrt(det A) I) / sqrt(tr A + 2 sqrt(det A))
+// E o tensor de estiramento puro S da decomposicao F = R S - o que queremos
+// transferir. A rotacao R do suporte nao e deformacao do material.
+static bool PathBSqrt2x2(float a, float b, float c, float& sa, float& sb, float& sc) {
+    const float det = a * c - b * b;
+    if (!(det > 1.0e-12f)) return false;
+    const float sd = std::sqrt(det);
+    const float t = a + c + 2.0f * sd;
+    if (!(t > 1.0e-12f)) return false;
+    const float inv = 1.0f / std::sqrt(t);
+    sa = (a + sd) * inv; sb = b * inv; sc = (c + sd) * inv;
+    return true;
+}
+
 static bool PathBSimV2Solve(
     const std::vector<Vec3>& baseVerts,
     const std::vector<VertexBoneProfile>* profiles,
@@ -11645,47 +11688,58 @@ static bool PathBSimV2Solve(
     // =====================================================================
     // FASE 1 - ADAPTACAO MATERIAL  (DRAPE_MATERIAL_ADAPT_V0)
     // =====================================================================
-    // O solve atual pede ao MESMO relaxamento que mude o TAMANHO INTRINSECO
-    // da peca e que a DRAPEIE, e as duas responsabilidades brigam. Medido no
-    // painel grande da saia, variacao acumulada da largura transversal quando
-    // a metrica e injetada dentro do solve:
-    //
-    //     estiramento        +1.264      poe largura
-    //     limite de strain   -2.275      tira largura
-    //     solda de costura   +1.476      poe largura de novo
-    //
-    // Tres termos grandes se anulando, e a solda - cujo trabalho e so manter
-    // gemeos coincidentes - virando o segundo maior mecanismo de largura da
-    // roupa. Do lado vertical a mesma assinatura: limite de strain +5.68 contra
-    // contato -3.43, com a gravidade em -0.61 no meio.
-    //
-    // Entao as duas perguntas passam a ser respondidas separadamente:
+    // Duas perguntas separadas, porque no solve unico elas brigavam - medido no
+    // painel grande, largura transversal acumulada: estiramento +1.264, limite
+    // de strain -2.275, solda de costura +1.476, tres termos grandes se
+    // anulando.
     //
     //   FASE 1  "qual seria a geometria desta roupa se ela tivesse sido
-    //            confeccionada para este corpo?"   - sem gravidade, sem
-    //            contato, sem buckling
-    //   FASE 2  "como essa roupa cai?"             - o solve de sempre, com a
-    //            geometria da fase 1 como repouso
+    //            confeccionada para este corpo?" - sem gravidade, sem contato
+    //   FASE 2  "como essa roupa cai?"
     //
-    // O que se transfere e METRICA, nunca POSICAO: os suportes dizem quanto o
-    // material precisa acomodar, jamais onde o vertice livre deve ficar.
+    // Transfere-se METRICA, nunca POSICAO.
+    //
+    // v1 conserta os dois defeitos numericos da v0: a extensao harmonica era um
+    // Jacobi que batia no teto de 20000 varreduras sem convergir, e a metrica
+    // era realizada por projecao independente de arestas, que entregava 31 faces
+    // invertidas. Agora sao um sistema linear resolvido por gradiente conjugado
+    // ate RESIDUO, e um passo local-global com rotacao livre por triangulo e
+    // busca de linha que recusa qualquer atualizacao que cruze area zero.
     bool materialAdapt = EnvToggle("DRAPE_MATERIAL_ADAPT_V0", false);
 #if !defined(DRAPE_HARNESS_BUILD)
     if (DrapeFlagExists("material_adapt_on.flag")) materialAdapt = true;
 #endif
     std::vector<Vec3> adaptedRest;
     if (materialAdapt && !tris.empty()) {
-        // ---- 1) tensor de deformacao SEM ROTACAO, por triangulo suportado ----
-        // C = F^T F no frame tangente autorado, levantado para 3D. C e simetrico
-        // e nao carrega rotacao, entao media-lo entre triangulos vizinhos nao
-        // transporta o giro do suporte para dentro do material - que era o
-        // defeito da formulacao anterior, que difundia F 3x3 em world space.
+        // ---- NO MATERIAL: gemeos de costura sao UM grau de liberdade ----
+        // Eles sao o mesmo ponto do tecido. Colapsa-los aqui torna a equivalencia
+        // exata por construcao, em vez de algo a reconciliar tarde pela solda -
+        // que era justamente o passe virando o segundo maior mecanismo de
+        // largura da roupa.
+        std::vector<uint32_t> mnode(n);
+        for (size_t i = 0; i < n; ++i) mnode[i] = (uint32_t)i;
+        for (const auto& grp : exactSeamGroups) {
+            uint32_t canon = 0xFFFFFFFFu;
+            for (uint32_t vi : grp) if (vi < n) canon = std::min(canon, vi);
+            if (canon == 0xFFFFFFFFu) continue;
+            for (uint32_t vi : grp) if (vi < n) mnode[vi] = canon;
+        }
+        std::vector<uint32_t> pack(n, 0xFFFFFFFFu);
+        uint32_t M = 0;
+        for (size_t i = 0; i < n; ++i)
+            if (mnode[i] == (uint32_t)i) pack[i] = M++;
+        for (size_t i = 0; i < n; ++i) mnode[i] = pack[mnode[i]];
+
         std::vector<Vec3> support(n);
         for (size_t i = 0; i < n; ++i) support[i] = Add(baseVerts[i], raw[i]);
-        // por vertice: soma dos C dos triangulos suportados incidentes
-        std::vector<std::array<double, 6>> Cv(n, {0,0,0,0,0,0});  // xx yy zz xy xz yz
-        std::vector<double> Cw(n, 0.0);
-        std::vector<uint8_t> seed(n, 0);
+
+        // ---- 1) tensor de deformacao SEM ROTACAO, por triangulo suportado ----
+        // C = F^T F no frame tangente autorado, levantado para 3D. Simetrico e
+        // sem rotacao, entao mediar C entre vizinhos nao transporta o giro do
+        // suporte para dentro do material.
+        std::vector<std::array<double, 6>> Cm((size_t)M, {1,1,1,0,0,0});
+        std::vector<double> Cw((size_t)M, 0.0);
+        std::vector<uint8_t> seedM((size_t)M, 0);
         for (size_t ti = 0; ti < tris.size(); ++ti) {
             const auto& t = tris[ti];
             if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
@@ -11696,7 +11750,7 @@ static bool PathBSimV2Solve(
             const float twoA = Len(nr);
             if (twoA < 1.0e-9f) continue;
             nr = Scale(nr, 1.0f / twoA);
-            float ul = Len(e1);
+            const float ul = Len(e1);
             if (ul < 1.0e-9f) continue;
             const Vec3 uu = Scale(e1, 1.0f / ul);
             const Vec3 vv = Cross(nr, uu);
@@ -11712,188 +11766,427 @@ static bool PathBSimV2Solve(
             const float c11 = i11*(g11*i11 + g12*i21) + i21*(g12*i11 + g22*i21);
             const float c12 = i11*(g11*i12 + g12*i22) + i21*(g12*i12 + g22*i22);
             const float c22 = i12*(g11*i12 + g12*i22) + i22*(g12*i12 + g22*i22);
-            // levanta: C3 = c11 u(x)u + c12 (u(x)v + v(x)u) + c22 v(x)v + n(x)n
             const float U[3] = {uu.x, uu.y, uu.z};
             const float V[3] = {vv.x, vv.y, vv.z};
             const float N[3] = {nr.x, nr.y, nr.z};
-            double C3[6];
             const int I[6] = {0,1,2,0,0,1}, J[6] = {0,1,2,1,2,2};
+            double C3[6];
             for (int k = 0; k < 6; ++k)
                 C3[k] = c11*U[I[k]]*U[J[k]] + c22*V[I[k]]*V[J[k]] +
                         c12*(U[I[k]]*V[J[k]] + V[I[k]]*U[J[k]]) +
                         N[I[k]]*N[J[k]];
             const double wA = 0.5 * twoA;
             for (int k = 0; k < 3; ++k) {
-                const uint16_t vi = t[k];
-                for (int q = 0; q < 6; ++q) Cv[vi][q] += C3[q] * wA;
-                Cw[vi] += wA;
-                seed[vi] = 1;
+                const uint32_t mi = mnode[t[k]];
+                if (!seedM[mi]) { Cm[mi] = {0,0,0,0,0,0}; seedM[mi] = 1; }
+                for (int q = 0; q < 6; ++q) Cm[mi][q] += C3[q] * wA;
+                Cw[mi] += wA;
             }
         }
         int seeds = 0;
-        for (size_t i = 0; i < n; ++i) {
-            if (!seed[i] || Cw[i] <= 0.0) { seed[i] = 0; continue; }
-            for (int q = 0; q < 6; ++q) Cv[i][q] /= Cw[i];
+        for (uint32_t m = 0; m < M; ++m) {
+            if (!seedM[m]) continue;
+            if (Cw[m] <= 0.0) { seedM[m] = 0; Cm[m] = {1,1,1,0,0,0}; continue; }
+            for (int q = 0; q < 6; ++q) Cm[m][q] /= Cw[m];
             ++seeds;
         }
-        // identidade onde nao ha semente
-        for (size_t i = 0; i < n; ++i)
-            if (!seed[i]) Cv[i] = {1,1,1,0,0,0};
 
-        // ---- 2) extensao harmonica pelo grafo MATERIAL ----
-        // Pesos vindos do comprimento AUTORADO, e iteracao ate convergir - nao
-        // um numero de aneis. Subdividir a mesma roupa muda o numero de passos
-        // e nao o campo resultante, que era o vicio da difusao anterior.
-        // Gemeos de costura entram como o mesmo no material: eles sao o mesmo
-        // ponto do tecido e nao podem receber metricas diferentes para serem
-        // reconciliados tarde pela solda.
-        std::vector<std::vector<std::pair<uint32_t, double>>> madj(n);
-        for (size_t ei = 0; ei < edges.size(); ++ei) {
-            const auto& e = edges[ei];
-            if (e.a >= n || e.b >= n) continue;
-            const double L = std::max((double)baseEdgeRest[ei], 1.0e-4);
-            madj[e.a].push_back({e.b, 1.0 / L});
-            madj[e.b].push_back({e.a, 1.0 / L});
-        }
-        for (const auto& grp : exactSeamGroups)
-            for (uint32_t a : grp)
-                for (uint32_t b : grp)
-                    if (a != b && a < n && b < n)
-                        madj[a].push_back({b, 1.0e3});   // mesmo ponto material
-        const int kMaxHarm = 20000;
-        const double kHarmEps = 1.0e-5;
-        int harmIters = 0;
-        for (; harmIters < kMaxHarm; ++harmIters) {
-            double worst = 0.0;
-            std::vector<std::array<double, 6>> nx = Cv;
-            for (size_t i = 0; i < n; ++i) {
-                if (seed[i] || madj[i].empty()) continue;
-                std::array<double, 6> acc{};
-                double wsum = 0.0;
-                for (const auto& lk : madj[i]) {
-                    for (int q = 0; q < 6; ++q) acc[q] += Cv[lk.first][q] * lk.second;
-                    wsum += lk.second;
-                }
-                if (wsum <= 0.0) continue;
-                for (int q = 0; q < 6; ++q) {
-                    const double v2 = acc[q] / wsum;
-                    worst = std::max(worst, std::fabs(v2 - Cv[i][q]));
-                    nx[i][q] = v2;
-                }
+        // ---- 2) LAPLACIANO COTANGENTE do mesh autorado ----
+        // Discretizacao ciente de area e de angulo, nao 1/comprimento: e a forma
+        // padrao e correta de um Laplaciano em superficie triangulada, e nao
+        // muda de significado se a roupa for subdividida.
+        std::unordered_map<uint64_t, double> wmap;
+        auto addW = [&](uint32_t a, uint32_t b, double w) {
+            if (a == b) return;
+            const uint64_t key = a < b ? ((uint64_t)a << 32) | b
+                                       : ((uint64_t)b << 32) | a;
+            wmap[key] += w;
+        };
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            for (int k = 0; k < 3; ++k) {
+                const Vec3& O = baseVerts[t[k]];
+                const Vec3 A = Sub(baseVerts[t[(k+1)%3]], O);
+                const Vec3 B = Sub(baseVerts[t[(k+2)%3]], O);
+                const float cr = Len(Cross(A, B));
+                if (cr < 1.0e-9f) continue;
+                double cot = Dot(A, B) / cr;
+                cot = ClampRange((float)cot, 0.001f, 1.0e3f);   // mantem SPD
+                addW(mnode[t[(k+1)%3]], mnode[t[(k+2)%3]], 0.5 * cot);
             }
-            Cv.swap(nx);
-            if (worst < kHarmEps) break;
+        }
+        std::vector<std::vector<std::pair<uint32_t, double>>> L((size_t)M);
+        std::vector<double> Ldiag((size_t)M, 0.0);
+        for (const auto& kv : wmap) {
+            const uint32_t a = (uint32_t)(kv.first >> 32);
+            const uint32_t b = (uint32_t)(kv.first & 0xFFFFFFFFu);
+            L[a].push_back({b, kv.second});
+            L[b].push_back({a, kv.second});
+            Ldiag[a] += kv.second;
+            Ldiag[b] += kv.second;
         }
 
-        // ---- 3) comprimento-alvo por aresta ----
-        // razao = sqrt(d^T C d) / |d| com d a direcao AUTORADA: anisotropico por
-        // construcao, entao alargar e alongar deixam de ser a mesma coisa.
-        std::vector<float> targetLen(edges.size(), 0.0f);
-        double rMin = 1e9, rMax = -1e9, rSum = 0.0; int rN = 0;
-        for (size_t ei = 0; ei < edges.size(); ++ei) {
-            const auto& e = edges[ei];
-            const float L0 = baseEdgeRest[ei];
-            targetLen[ei] = L0;
-            if (e.a >= n || e.b >= n || L0 <= 1.0e-6f) continue;
-            const Vec3 d = Sub(baseVerts[e.b], baseVerts[e.a]);
-            const double D[3] = {d.x, d.y, d.z};
-            double q = 0.0;
-            for (int c = 0; c < 2; ++c) {
-                const std::array<double, 6>& C = (c == 0) ? Cv[e.a] : Cv[e.b];
-                q += 0.5 * (C[0]*D[0]*D[0] + C[1]*D[1]*D[1] + C[2]*D[2]*D[2] +
-                            2.0*(C[3]*D[0]*D[1] + C[4]*D[0]*D[2] + C[5]*D[1]*D[2]));
+        // gradiente conjugado no subsistema dos nos LIVRES (Dirichlet nas
+        // sementes). Convergencia definida pelo RESIDUO do sistema.
+        auto cgSolve = [&](std::vector<double>& xv, const std::vector<double>& fixedVal,
+                           const std::vector<double>& extraRhs, int maxIt,
+                           double tol) -> std::pair<int, double> {
+            std::vector<double> r((size_t)M, 0.0), pv((size_t)M, 0.0), Ap((size_t)M, 0.0);
+            auto applyA = [&](const std::vector<double>& in, std::vector<double>& out) {
+                for (uint32_t m = 0; m < M; ++m) {
+                    if (seedM[m]) { out[m] = 0.0; continue; }
+                    double acc = Ldiag[m] * in[m];
+                    for (const auto& lk : L[m])
+                        if (!seedM[lk.first]) acc -= lk.second * in[lk.first];
+                    out[m] = acc;
+                }
+            };
+            for (uint32_t m = 0; m < M; ++m) {
+                if (seedM[m]) { xv[m] = fixedVal[m]; r[m] = 0.0; continue; }
+                double rhs = extraRhs.empty() ? 0.0 : extraRhs[m];
+                for (const auto& lk : L[m])
+                    if (seedM[lk.first]) rhs += lk.second * fixedVal[lk.first];
+                double ax = Ldiag[m] * xv[m];
+                for (const auto& lk : L[m])
+                    if (!seedM[lk.first]) ax -= lk.second * xv[lk.first];
+                r[m] = rhs - ax;
             }
-            if (!(q > 0.0)) continue;
-            const double ratio = std::sqrt(q) / L0;
-            if (!std::isfinite(ratio)) continue;
-            const double rc = ClampRange((float)ratio, kMetricMin, kMetricMax);
-            targetLen[ei] = (float)(L0 * rc);
-            rMin = std::min(rMin, rc); rMax = std::max(rMax, rc);
-            rSum += rc; ++rN;
+            pv = r;
+            double rs = 0.0;
+            for (uint32_t m = 0; m < M; ++m) rs += r[m] * r[m];
+            const double rs0 = rs;
+            int it = 0;
+            for (; it < maxIt && rs > tol * tol * std::max(rs0, 1.0e-30); ++it) {
+                applyA(pv, Ap);
+                double pAp = 0.0;
+                for (uint32_t m = 0; m < M; ++m) pAp += pv[m] * Ap[m];
+                if (std::fabs(pAp) < 1.0e-30) break;
+                const double al = rs / pAp;
+                double rs2 = 0.0;
+                for (uint32_t m = 0; m < M; ++m) {
+                    if (seedM[m]) continue;
+                    xv[m] += al * pv[m];
+                    r[m] -= al * Ap[m];
+                    rs2 += r[m] * r[m];
+                }
+                const double beta = rs2 / std::max(rs, 1.0e-30);
+                for (uint32_t m = 0; m < M; ++m)
+                    if (!seedM[m]) pv[m] = r[m] + beta * pv[m];
+                rs = rs2;
+            }
+            return {it, std::sqrt(rs / std::max(rs0, 1.0e-30))};
+        };
+
+        int harmIt = 0; double harmRes = 0.0;
+        for (int q = 0; q < 6; ++q) {
+            std::vector<double> xv((size_t)M, 0.0), fv((size_t)M, 0.0);
+            for (uint32_t m = 0; m < M; ++m) {
+                fv[m] = Cm[m][q];
+                xv[m] = seedM[m] ? Cm[m][q] : (q < 3 ? 1.0 : 0.0);
+            }
+            const auto rr = cgSolve(xv, fv, {}, 3000, 1.0e-8);
+            harmIt = std::max(harmIt, rr.first);
+            harmRes = std::max(harmRes, rr.second);
+            for (uint32_t m = 0; m < M; ++m) Cm[m][q] = xv[m];
         }
 
-        // ---- 4) REALIZAR a metrica: posicoes que a satisfazem ----
-        // Sem gravidade, sem contato, sem buckling. Ancoras presas ao suporte,
-        // gemeos soldados, e uma barreira de orientacao: a metrica nao pode ser
-        // obtida colapsando ou invertendo triangulo.
-        adaptedRest = baseVerts;
+        // ---- 3) alvo por triangulo: S = sqrt(C_2D) no frame tangente ----
+        struct TriTarget { Vec3 T1, T2, A1, A2; float w0, w1, w2; uint8_t ok; };
+        std::vector<TriTarget> tgt(tris.size());
+        double rMin = 1e9, rMax = -1e9, rSum = 0.0; int rN = 0, degen = 0, noTgt = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            tgt[ti].ok = 0;
+            const auto& t = tris[ti];
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const Vec3 e1 = Sub(baseVerts[t[1]], baseVerts[t[0]]);
+            const Vec3 e2 = Sub(baseVerts[t[2]], baseVerts[t[0]]);
+            Vec3 nr = Cross(e1, e2);
+            const float twoA = Len(nr);
+            if (twoA < 1.0e-9f) continue;
+            nr = Scale(nr, 1.0f / twoA);
+            const float ul = Len(e1);
+            if (ul < 1.0e-9f) continue;
+            const Vec3 uu = Scale(e1, 1.0f / ul);
+            const Vec3 vv = Cross(nr, uu);
+            std::array<double, 6> C{};
+            for (int k = 0; k < 3; ++k)
+                for (int q = 0; q < 6; ++q) C[q] += Cm[mnode[t[k]]][q] / 3.0;
+            auto quad = [&](const Vec3& a, const Vec3& b) {
+                return (float)(C[0]*a.x*b.x + C[1]*a.y*b.y + C[2]*a.z*b.z +
+                               C[3]*(a.x*b.y + a.y*b.x) + C[4]*(a.x*b.z + a.z*b.x) +
+                               C[5]*(a.y*b.z + a.z*b.y));
+            };
+            float sa = 1.0f, sb = 0.0f, sc = 1.0f;
+            if (PathBSqrt2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv), sa, sb, sc)) {
+                const float lo = kMetricMin, hi = kMetricMax;
+                sa = ClampRange(sa, lo, hi); sc = ClampRange(sc, lo, hi);
+                sb = ClampRange(sb, -0.5f * hi, 0.5f * hi);
+                if (sa * sc - sb * sb < 0.05f) { sa = 1.0f; sb = 0.0f; sc = 1.0f; ++degen; }
+            } else {
+                ++degen;   // C nao positiva-definida: cai para ARAP puro
+            }
+            auto apply2 = [&](const Vec3& e) {
+                const float p = Dot(e, uu), q2 = Dot(e, vv);
+                const float np = sa * p + sb * q2, nq = sb * p + sc * q2;
+                return Add(Scale(uu, np), Scale(vv, nq));
+            };
+            tgt[ti].T1 = apply2(e1);
+            tgt[ti].T2 = apply2(e2);
+            tgt[ti].A1 = e1;
+            tgt[ti].A2 = e2;
+            auto cotOf = [&](int k) {
+                const Vec3& O = baseVerts[t[k]];
+                const Vec3 A = Sub(baseVerts[t[(k+1)%3]], O);
+                const Vec3 B = Sub(baseVerts[t[(k+2)%3]], O);
+                const float cr = Len(Cross(A, B));
+                if (cr < 1.0e-9f) return 0.001f;
+                return ClampRange(Dot(A, B) / cr, 0.001f, 1.0e3f);
+            };
+            tgt[ti].w0 = 0.5f * cotOf(2);   // aresta 0-1, angulo oposto em 2
+            tgt[ti].w1 = 0.5f * cotOf(0);   // aresta 1-2
+            tgt[ti].w2 = 0.5f * cotOf(1);   // aresta 2-0
+            tgt[ti].ok = 1;
+            const double rr = Len(tgt[ti].T1) / std::max(Len(e1), 1.0e-6f);
+            rMin = std::min(rMin, rr); rMax = std::max(rMax, rr);
+            rSum += rr; ++rN;
+        }
+
+        for (size_t ti = 0; ti < tgt.size(); ++ti) if (!tgt[ti].ok) ++noTgt;
+
+        // ---- 4) realizacao local-global, preservando orientacao ----
+        // local  : rotacao livre por triangulo (decomposicao polar)
+        // global : minimos quadrados nas posicoes, ancoras Dirichlet
+        // e uma busca de linha que recusa qualquer passo que cruze area zero.
+        // O caminho comeca no ESTADO AUTORADO, que tem zero faces invertidas, e
+        // caminha ate o suporte morphado. Chutar os fixos direto no destino
+        // enquanto os livres ficam para tras JA NASCE com faces invertidas - e
+        // uma busca de linha so consegue nao piorar o que recebeu. A invariante
+        // (zero flips novos) e uma propriedade do caminho, nao do passo final.
+        std::vector<uint8_t> anchorM((size_t)M, 0);
+        std::vector<Vec3> anchorA((size_t)M, Vec3{0,0,0});   // autorado
+        std::vector<Vec3> anchorB((size_t)M, Vec3{0,0,0});   // suporte morphado
         for (size_t i = 0; i < n; ++i)
-            if (fixed[i]) adaptedRest[i] = support[i];
+            if (fixed[i]) {
+                anchorM[mnode[i]] = 1;
+                anchorA[mnode[i]] = baseVerts[i];
+                anchorB[mnode[i]] = support[i];
+            }
+        std::vector<Vec3> mp((size_t)M, Vec3{0,0,0});
+        std::vector<int> mc((size_t)M, 0);
+        for (size_t i = 0; i < n; ++i) {
+            mp[mnode[i]] = Add(mp[mnode[i]], baseVerts[i]); ++mc[mnode[i]];
+        }
+        for (uint32_t m = 0; m < M; ++m) if (mc[m]) mp[m] = Scale(mp[m], 1.0f / mc[m]);
+        std::vector<Vec3> anchorP = anchorA;
+
         std::vector<Vec3> triNrm0(tris.size());
         for (size_t ti = 0; ti < tris.size(); ++ti) {
             const auto& t = tris[ti];
             triNrm0[ti] = (t[0] < n && t[1] < n && t[2] < n)
                 ? Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
                         Sub(baseVerts[t[2]], baseVerts[t[0]]))
-                : Vec3{0.0f, 0.0f, 1.0f};
+                : Vec3{0,0,1};
         }
-        std::vector<std::vector<uint32_t>> vFaces(n);
-        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti)
-            for (int k = 0; k < 3; ++k)
-                if (tris[ti][k] < n) vFaces[tris[ti][k]].push_back(ti);
-        auto faceBad = [&](uint32_t ti, const std::vector<Vec3>& V) {
+        // Face RUIM = invertida em relacao ao autorado, ou reduzida a menos de
+        // um decimo da area autorada.
+        auto isBad = [&](const std::vector<Vec3>& V, size_t ti,
+                         bool byNode) -> bool {
             const auto& t = tris[ti];
-            const Vec3 nn = Cross(Sub(V[t[1]], V[t[0]]), Sub(V[t[2]], V[t[0]]));
+            if (t[0] >= n || t[1] >= n || t[2] >= n) return false;
+            const uint32_t i0 = byNode ? mnode[t[0]] : t[0];
+            const uint32_t i1 = byNode ? mnode[t[1]] : t[1];
+            const uint32_t i2 = byNode ? mnode[t[2]] : t[2];
+            const Vec3 nn = Cross(Sub(V[i1], V[i0]), Sub(V[i2], V[i0]));
             const float a0 = Len(triNrm0[ti]), a1 = Len(nn);
             if (a0 <= 1.0e-9f) return false;
             return Dot(triNrm0[ti], nn) <= 0.0f || a1 < 0.10f * a0;
         };
-        const int kRealizeIters = (int)ClampRange(
-            EnvFloat("DRAPE_MATERIAL_ADAPT_ITERS", 300.0f), 10.0f, 4000.0f);
-        int rejected = 0;
-        for (int it = 0; it < kRealizeIters; ++it) {
-            std::vector<Vec3> prev = adaptedRest;
-            for (size_t ei = 0; ei < edges.size(); ++ei) {
-                const auto& e = edges[ei];
-                if (e.a >= n || e.b >= n) continue;
-                const float want = targetLen[ei];
-                if (want <= 1.0e-6f) continue;
-                const float wa = fixed[e.a] ? 0.0f : 1.0f;
-                const float wb = fixed[e.b] ? 0.0f : 1.0f;
-                const float ws = wa + wb;
-                if (ws <= 0.0f) continue;
-                Vec3 d = Sub(adaptedRest[e.b], adaptedRest[e.a]);
-                const float L = Len(d);
-                if (L <= 1.0e-9f) continue;
-                const Vec3 corr = Scale(d, ((L - want) / L) / ws * 0.5f);
-                adaptedRest[e.a] = Add(adaptedRest[e.a], Scale(corr, wa));
-                adaptedRest[e.b] = Sub(adaptedRest[e.b], Scale(corr, wb));
-            }
-            for (const auto& grp : exactSeamGroups) {
-                Vec3 m{0.0f, 0.0f, 0.0f}; int c = 0;
-                for (uint32_t vi : grp) if (vi < n) { m = Add(m, adaptedRest[vi]); ++c; }
-                if (c < 2) continue;
-                m = Scale(m, 1.0f / (float)c);
-                for (uint32_t vi : grp) if (vi < n) adaptedRest[vi] = m;
-            }
-            // barreira de orientacao: quem inverteu ou colapsou uma face volta
-            for (size_t i = 0; i < n; ++i) {
-                if (fixed[i]) { adaptedRest[i] = support[i]; continue; }
-                bool bad = false;
-                for (uint32_t ti : vFaces[i]) if (faceBad(ti, adaptedRest)) { bad = true; break; }
-                if (!bad) continue;
-                float sc = 1.0f;
-                for (int g = 0; g < 6 && bad; ++g) {
-                    sc *= 0.5f;
-                    adaptedRest[i] = Add(prev[i], Scale(Sub(adaptedRest[i], prev[i]), sc));
-                    bad = false;
-                    for (uint32_t ti : vFaces[i]) if (faceBad(ti, adaptedRest)) { bad = true; break; }
-                }
-                if (bad) { adaptedRest[i] = prev[i]; ++rejected; }
-            }
+        // Faces que o proprio support do host ja entrega ruins nao estao sob
+        // nossa jurisdicao - 5 delas sequer tem vertice livre, a geometria sai
+        // inteira do offset. Travar a continuacao nelas seria deixar o embedding
+        // refem de um defeito que nao criamos. Contam separado, e a invariante
+        // que vale para nos e: nenhuma face NOVA.
+        std::vector<uint8_t> hostBad(tris.size(), 0);
+        int badSupport = 0, badSupportRigid = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            if (!isBad(support, ti, false)) continue;
+            hostBad[ti] = 1;
+            ++badSupport;
+            const auto& t = tris[ti];
+            if (fixed[t[0]] && fixed[t[1]] && fixed[t[2]]) ++badSupportRigid;
         }
-        int flips = 0;
-        for (uint32_t ti = 0; ti < (uint32_t)tris.size(); ++ti)
-            if (faceBad(ti, adaptedRest)) ++flips;
-        HLog("path-b-shell: FASE1 sementes=%d harmonicas=%d razao[%.3f..%.3f med~%.3f] "
-             "realiza=%d rejeitados=%d facesRuins=%d",
-             seeds, harmIters, rMin, rMax, rN ? rSum / rN : 1.0,
-             kRealizeIters, rejected, flips);
-        fprintf(stderr, "FASE1 sementes=%d harmonicas=%d razao[%.3f..%.3f med=%.3f] "
-                "rejeitados=%d facesRuins=%d\n", seeds, harmIters, rMin, rMax,
-                rN ? rSum / rN : 1.0, rejected, flips);
+        auto badCount = [&](const std::vector<Vec3>& V) {
+            int bad = 0;
+            for (size_t ti = 0; ti < tris.size(); ++ti)
+                if (!hostBad[ti] && isBad(V, ti, true)) ++bad;
+            return bad;
+        };
+        const int kOuter = (int)ClampRange(
+            EnvFloat("DRAPE_MATERIAL_ADAPT_ITERS", 8.0f), 1.0f, 200.0f);
+        const int kLoad = (int)ClampRange(
+            EnvFloat("DRAPE_MATERIAL_ADAPT_LOAD", 8.0f), 1.0f, 64.0f);
+        int rejected = 0, globIt = 0; double globRes = 0.0; int stalled = -1;
+        std::vector<TriTarget> cur = tgt;
+        // Passo de carga ADAPTATIVO. Se um trecho do caminho nao admite avanco
+        // sem inverter face, o certo e andar mais devagar ali, nao desistir do
+        // caminho nem afrouxar a invariante. Falhar so quando nem o menor passo
+        // passa - e ai reportar ate onde a peca chegou, honestamente.
+        float done = 0.0f;
+        float dt = 1.0f / (float)kLoad;
+        const float dtMin = dt / 64.0f;
+        std::vector<Vec3> safe = mp;
+        while (done < 1.0f - 1.0e-4f && dt >= dtMin) {
+        const float tt = std::min(1.0f, done + dt);
+        safe = mp;
+        const int base0 = badCount(mp);
+        for (uint32_t m = 0; m < M; ++m)
+            if (anchorM[m])
+                anchorP[m] = Add(anchorA[m], Scale(Sub(anchorB[m], anchorA[m]), tt));
+        for (size_t ti = 0; ti < tgt.size(); ++ti) {
+            if (!tgt[ti].ok) continue;
+            cur[ti].T1 = Add(tgt[ti].A1, Scale(Sub(tgt[ti].T1, tgt[ti].A1), tt));
+            cur[ti].T2 = Add(tgt[ti].A2, Scale(Sub(tgt[ti].T2, tgt[ti].A2), tt));
+        }
+        // A CONDICAO DE CONTORNO NAO SE NEGOCIA. Amortecer o passo inteiro
+        // amortece tambem as ancoras, e elas ficam devendo o deslocamento a cada
+        // recuo - o que so aparece no fim, como um salto. Aqui elas vao exatas
+        // para a carga tt, e quem a busca de linha freia e o pano livre, que e
+        // o unico que tem liberdade para isso.
+        for (uint32_t m = 0; m < M; ++m) if (anchorM[m]) mp[m] = anchorP[m];
+        for (int outer = 0; outer < kOuter; ++outer) {
+            // LOCAL: rotacao por triangulo
+            std::vector<std::array<float, 9>> Rt(tris.size());
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                for (int k = 0; k < 9; ++k) Rt[ti][k] = (k % 4 == 0) ? 1.0f : 0.0f;
+                if (!tgt[ti].ok) continue;
+                const auto& t = tris[ti];
+                const Vec3 p1 = Sub(mp[mnode[t[1]]], mp[mnode[t[0]]]);
+                const Vec3 p2 = Sub(mp[mnode[t[2]]], mp[mnode[t[0]]]);
+                const Vec3 q1 = cur[ti].T1, q2 = cur[ti].T2;
+                const Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                const float P[3][3] = {{p1.x,p2.x,np.x},{p1.y,p2.y,np.y},{p1.z,p2.z,np.z}};
+                const float Q[3][3] = {{q1.x,q2.x,nq.x},{q1.y,q2.y,nq.y},{q1.z,q2.z,nq.z}};
+                float Mx[9];
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b)
+                        Mx[a*3+b] = P[a][0]*Q[b][0] + P[a][1]*Q[b][1] + P[a][2]*Q[b][2];
+                PathBPolar3(Mx, Rt[ti].data());
+            }
+            // GLOBAL: um sistema laplaciano por coordenada
+            std::vector<std::vector<double>> rhs(3, std::vector<double>((size_t)M, 0.0));
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                if (!tgt[ti].ok) continue;
+                const auto& t = tris[ti];
+                const float* R = Rt[ti].data();
+                const Vec3 T[3] = {cur[ti].T1, cur[ti].T2,
+                                   Sub(cur[ti].T2, cur[ti].T1)};
+                const float W[3] = {tgt[ti].w0, tgt[ti].w2, tgt[ti].w1};
+                const int A[3] = {0, 0, 1}, Bv[3] = {1, 2, 2};
+                for (int k = 0; k < 3; ++k) {
+                    const Vec3 d = T[k];
+                    const Vec3 rd{R[0]*d.x + R[1]*d.y + R[2]*d.z,
+                                  R[3]*d.x + R[4]*d.y + R[5]*d.z,
+                                  R[6]*d.x + R[7]*d.y + R[8]*d.z};
+                    const uint32_t ma = mnode[t[A[k]]], mb = mnode[t[Bv[k]]];
+                    const double w = W[k];
+                    rhs[0][ma] -= w * rd.x; rhs[0][mb] += w * rd.x;
+                    rhs[1][ma] -= w * rd.y; rhs[1][mb] += w * rd.y;
+                    rhs[2][ma] -= w * rd.z; rhs[2][mb] += w * rd.z;
+                }
+            }
+            std::vector<Vec3> cand = mp;
+            for (int c = 0; c < 3; ++c) {
+                std::vector<double> xv((size_t)M), fv((size_t)M);
+                for (uint32_t m = 0; m < M; ++m) {
+                    const float pv2 = (c == 0) ? mp[m].x : (c == 1 ? mp[m].y : mp[m].z);
+                    const float av = (c == 0) ? anchorP[m].x
+                                              : (c == 1 ? anchorP[m].y : anchorP[m].z);
+                    xv[m] = pv2; fv[m] = av;
+                }
+                std::vector<uint8_t> savedSeed = seedM;
+                seedM = anchorM;
+                const auto rr = cgSolve(xv, fv, rhs[c], 2000, 1.0e-7);
+                seedM = savedSeed;
+                globIt = std::max(globIt, rr.first);
+                globRes = std::max(globRes, rr.second);
+                for (uint32_t m = 0; m < M; ++m) {
+                    if (c == 0) cand[m].x = (float)xv[m];
+                    else if (c == 1) cand[m].y = (float)xv[m];
+                    else cand[m].z = (float)xv[m];
+                }
+            }
+            // BUSCA DE LINHA: dentro do trecho o passo so pode MELHORAR. Levar
+            // as ancoras para tt pode inverter face; sao estas iteracoes que
+            // consertam isso, e por isso o teste e contra o estado atual, nao
+            // contra o inicio do trecho - o trecho inteiro e que responde por
+            // voltar ao nivel de base0.
+            const int nowBad = badCount(mp);
+            float alpha = 1.0f;
+            std::vector<Vec3> test((size_t)M);
+            bool taken = false;
+            for (int ls = 0; ls < 10; ++ls) {
+                for (uint32_t m = 0; m < M; ++m)
+                    test[m] = anchorM[m] ? anchorP[m]
+                                         : Add(mp[m], Scale(Sub(cand[m], mp[m]), alpha));
+                if (badCount(test) <= nowBad) { mp = test; taken = true; break; }
+                alpha *= 0.5f;
+            }
+            if (!taken) { ++rejected; break; }
+        }
+        const int after = badCount(mp);
+        if (after > base0) {          // o trecho nao passou: recua e encurta
+            mp = safe;
+            dt *= 0.5f;
+            if (stalled < 0 && dt < dtMin) stalled = (int)(done * 100.0f);
+        } else {
+            done = tt;
+            if (dt < 1.0f / (float)kLoad) dt *= 1.5f;   // recupera velocidade
+        }
+        }
+        if (done < 1.0f - 1.0e-4f && stalled < 0) stalled = (int)(done * 100.0f);
+        adaptedRest.assign(n, Vec3{0,0,0});
+        for (size_t i = 0; i < n; ++i) adaptedRest[i] = mp[mnode[i]];
+        // Quanto o no material se afasta do suporte de cada membro fixo: se
+        // dois gemeos de costura recebem offsets DIFERENTES do host, um no so
+        // nao consegue honrar os dois, e reimpor cada suporte depois do solve
+        // reintroduz um estado que a busca de linha nunca viu.
+        int badPre = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti)
+            if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badPre;
+        float twinMax = 0.0f;
+        int anchorsOff = 0, mixedGroups = 0;
+        for (size_t i = 0; i < n; ++i)
+            if (fixed[i]) {
+                const float dv = Len(Sub(support[i], mp[mnode[i]]));
+                twinMax = std::max(twinMax, dv);
+                if (dv > 0.01f) ++anchorsOff;
+            }
+        for (const auto& grp : exactSeamGroups) {
+            float worst = 0.0f;
+            for (uint32_t a : grp)
+                for (uint32_t b : grp)
+                    if (a < n && b < n && fixed[a] && fixed[b])
+                        worst = std::max(worst, Len(Sub(support[a], support[b])));
+            if (worst > 0.01f) ++mixedGroups;
+        }
+        for (size_t i = 0; i < n; ++i) if (fixed[i]) adaptedRest[i] = support[i];
 
-        // ---- 5) a fase 2 passa a repousar NESTA geometria ----
+        int badNew = 0;
+        for (size_t ti = 0; ti < tris.size(); ++ti)
+            if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badNew;
+        HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
+             "razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
+             "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
+             M, seeds, harmIt, harmRes, rMin, rMax, rN ? rSum / rN : 1.0,
+             globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
+             badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
+        fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
+                "razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
+                "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
+                M, seeds, harmIt, harmRes, rMin, rMax, rN ? rSum / rN : 1.0,
+                globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
+                badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
+
         for (size_t ei = 0; ei < edges.size(); ++ei) {
             const auto& e = edges[ei];
             if (e.a >= n || e.b >= n) continue;
@@ -11907,7 +12200,7 @@ static bool PathBSimV2Solve(
             PathBDumpTris(adaptedRest, tris, "drape_fase01_rest.obj");
         }
     }
-
+
     // TRACE VERTICAL. Quem devolve a queda que a gravidade produz?
     //
     // Medido: o painel livre grande termina com deslocamento vertical medio de
