@@ -11494,6 +11494,18 @@ static bool PathBSimV2Solve(
         vertEdges[e.a].push_back((uint32_t)ei);
         vertEdges[e.b].push_back((uint32_t)ei);
     }
+    // TRANSFERENCIA DE METRICA (spike). 0 = desligado: a metrica de repouso
+    // segue sendo a autorada, ou seja a da roupa MAGRA.
+    const float kMetricTransfer = ClampRange(
+        EnvFloat("DRAPE_SHELL_METRIC_TRANSFER", 0.0f), 0.0f, 1.0f);
+    const int kMetricDiffuse = (int)ClampRange(
+        EnvFloat("DRAPE_SHELL_METRIC_DIFFUSE", 24.0f), 0.0f, 400.0f);
+    // Limites de sanidade, nao ajuste fino: um gradiente mal condicionado numa
+    // vizinhanca degenerada nao pode virar um comprimento de repouso absurdo.
+    const float kMetricMin = std::max(0.1f,
+        EnvFloat("DRAPE_SHELL_METRIC_MIN", 0.7f));
+    const float kMetricMax = std::max(kMetricMin,
+        EnvFloat("DRAPE_SHELL_METRIC_MAX", 2.5f));
     static constexpr int kMorphSteps = 6;
     const int kMaxIters = (int)EnvFloat("DRAPE_SHELL_MAX_ITERS", 600.0f);
     const float kEps = std::max(1.0e-4f, EnvFloat("DRAPE_SHELL_EPS", 0.01f));
@@ -12123,6 +12135,122 @@ static bool PathBSimV2Solve(
             if (gradedRest && rest > 1.0e-6f && targetEdgeRest[ei] > 1.0e-6f)
                 rest *= std::exp(t * std::log(targetEdgeRest[ei] / rest));
             edges[ei].rest = rest;
+        }
+        // TRANSFERENCIA DE METRICA, NAO DE POSICAO.
+        //
+        // Medido nos quatro NIFs de mesma topologia (1777 verts): quem falha
+        // sao os paineis livres, e falham de um jeito especifico - nao ALARGAM
+        // e nao DESCEM.
+        //
+        //   componente  erro/refit  horiz refit  horiz host  horiz nosso  dZ nosso
+        //   corpete 648       0.68        1.700       1.711        1.935     -1.22
+        //   painel  388       2.30        1.130       1.151        1.019     +0.12
+        //   mangas  208       0.19        1.442       1.458        1.507     -0.63
+        //   painel  202       2.13        1.072       1.142        1.004     -0.14
+        //
+        // Corpete e mangas recebem deformacao material de verdade e caem a
+        // 0.19-0.68 do refit feito a mao. Os paineis livres ficam em 1.02 e
+        // 1.00 - a metrica da roupa MAGRA - enquanto os suportes acima deles
+        // alargaram muito. E uma cortina de 1m pendurada numa barra que virou
+        // 1.8m com ordem de nao esticar: ela resolve girando, abrindo e
+        // contornando o corpo, que e exatamente o que se ve na tela.
+        //
+        // Entao o corpo passa a informar QUANTO o material precisa acomodar, e
+        // nao ONDE o vertice livre deve ficar. Nos vertices presos mede-se o
+        // GRADIENTE DE DEFORMACAO entre a vizinhanca autorada e a do suporte,
+        // ele e difundido pela topologia ate o pano livre, e o repouso de cada
+        // aresta passa a ser o comprimento autorado levado por esse gradiente.
+        // Anisotropico por construcao: |F u| depende da direcao da aresta,
+        // entao alargar e alongar deixam de ser a mesma coisa.
+        //
+        // A POSICAO do pano livre continua decidida so por estrutura,
+        // gravidade, contato e dobra. Nada aqui le a pose do host.
+        if (kMetricTransfer > 0.0f) {
+            std::vector<std::array<float, 9>> Fv(n, {1,0,0, 0,1,0, 0,0,1});
+            std::vector<uint8_t> haveF(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                if (!fixed[i] || vertNeighbors[i].size() < 3) continue;
+                float D[9] = {0,0,0, 0,0,0, 0,0,0};
+                float Q[9] = {0,0,0, 0,0,0, 0,0,0};
+                for (uint32_t j : vertNeighbors[i]) {
+                    if (j >= n) continue;
+                    const Vec3 dv = Sub(baseVerts[j], baseVerts[i]);
+                    const Vec3 qv = Sub(anchorTarget[j], anchorTarget[i]);
+                    const float dd[3] = {dv.x, dv.y, dv.z};
+                    const float qq[3] = {qv.x, qv.y, qv.z};
+                    for (int r2 = 0; r2 < 3; ++r2)
+                        for (int c2 = 0; c2 < 3; ++c2) {
+                            D[r2 * 3 + c2] += dd[r2] * dd[c2];
+                            Q[r2 * 3 + c2] += qq[r2] * dd[c2];
+                        }
+                }
+                const float reg = 1.0e-3f * (D[0] + D[4] + D[8]) + 1.0e-9f;
+                D[0] += reg; D[4] += reg; D[8] += reg;
+                const float det =
+                    D[0]*(D[4]*D[8]-D[5]*D[7]) - D[1]*(D[3]*D[8]-D[5]*D[6]) +
+                    D[2]*(D[3]*D[7]-D[4]*D[6]);
+                if (std::fabs(det) < 1.0e-12f) continue;
+                const float idet = 1.0f / det;
+                const float Di[9] = {
+                    (D[4]*D[8]-D[5]*D[7])*idet, (D[2]*D[7]-D[1]*D[8])*idet,
+                    (D[1]*D[5]-D[2]*D[4])*idet,
+                    (D[5]*D[6]-D[3]*D[8])*idet, (D[0]*D[8]-D[2]*D[6])*idet,
+                    (D[2]*D[3]-D[0]*D[5])*idet,
+                    (D[3]*D[7]-D[4]*D[6])*idet, (D[1]*D[6]-D[0]*D[7])*idet,
+                    (D[0]*D[4]-D[1]*D[3])*idet};
+                std::array<float, 9> Fi{};
+                bool finite = true;
+                for (int r2 = 0; r2 < 3; ++r2)
+                    for (int c2 = 0; c2 < 3; ++c2) {
+                        Fi[r2 * 3 + c2] =
+                            Q[r2*3+0]*Di[0*3+c2] + Q[r2*3+1]*Di[1*3+c2] +
+                            Q[r2*3+2]*Di[2*3+c2];
+                        if (!std::isfinite(Fi[r2 * 3 + c2])) finite = false;
+                    }
+                if (!finite) continue;
+                Fv[i] = Fi;
+                haveF[i] = 1;
+            }
+            for (int it = 0; it < kMetricDiffuse; ++it) {
+                std::vector<std::array<float, 9>> nx = Fv;
+                for (size_t i = 0; i < n; ++i) {
+                    if (haveF[i] || vertNeighbors[i].empty()) continue;
+                    std::array<float, 9> acc{};
+                    int cnt = 0;
+                    for (uint32_t j : vertNeighbors[i]) {
+                        if (j >= n) continue;
+                        for (int k = 0; k < 9; ++k) acc[k] += Fv[j][k];
+                        ++cnt;
+                    }
+                    if (cnt == 0) continue;
+                    for (int k = 0; k < 9; ++k) nx[i][k] = acc[k] / (float)cnt;
+                }
+                Fv.swap(nx);
+            }
+            int retuned = 0;
+            for (size_t ei = 0; ei < edges.size(); ++ei) {
+                const auto& e = edges[ei];
+                if (e.a >= n || e.b >= n) continue;
+                if (fixed[e.a] && fixed[e.b]) continue;
+                const float len0 = baseEdgeRest[ei];
+                if (len0 <= 1.0e-6f) continue;
+                const Vec3 dv = Sub(baseVerts[e.b], baseVerts[e.a]);
+                std::array<float, 9> Fm{};
+                for (int k = 0; k < 9; ++k)
+                    Fm[k] = 0.5f * (Fv[e.a][k] + Fv[e.b][k]);
+                const Vec3 fd{Fm[0]*dv.x + Fm[1]*dv.y + Fm[2]*dv.z,
+                              Fm[3]*dv.x + Fm[4]*dv.y + Fm[5]*dv.z,
+                              Fm[6]*dv.x + Fm[7]*dv.y + Fm[8]*dv.z};
+                const float ratio = Len(fd) / len0;
+                if (!std::isfinite(ratio)) continue;
+                const float want = ClampRange(ratio, kMetricMin, kMetricMax);
+                const float use = 1.0f + (want - 1.0f) * kMetricTransfer * t;
+                edges[ei].rest = len0 * use;
+                if (std::fabs(use - 1.0f) > 0.01f) ++retuned;
+            }
+            if (step == kMorphSteps)
+                HLog("path-b-shell: metric-transfer arestas=%d/%zu forca=%.2f difusao=%d",
+                     retuned, edges.size(), kMetricTransfer, kMetricDiffuse);
         }
         // A fully supported edge can take its metric from the support pose.
         // Do not do this for a fixed/free edge: its free endpoint's raw pose
