@@ -12162,6 +12162,8 @@ static bool PathBSimV2Solve(
         const int kLoad = (int)ClampRange(
             EnvFloat("DRAPE_MATERIAL_ADAPT_LOAD", 8.0f), 1.0f, 64.0f);
         int rejected = 0, globIt = 0; double globRes = 0.0; int stalled = -1;
+        int reflections = 0, worstOnPath = 0;
+        const bool kPathFree = EnvToggle("DRAPE_MATERIAL_PATH_FREE", false);
         std::vector<TriTarget> cur = tgt;
         // Passo de carga ADAPTATIVO. Se um trecho do caminho nao admite avanco
         // sem inverter face, o certo e andar mais devagar ali, nao desistir do
@@ -12207,6 +12209,16 @@ static bool PathBSimV2Solve(
                     for (int b = 0; b < 3; ++b)
                         Mx[a*3+b] = P[a][0]*Q[b][0] + P[a][1]*Q[b][1] + P[a][2]*Q[b][2];
                 PathBPolar3(Mx, Rt[ti].data());
+                {   // a iteracao de Newton converge para o fator ortogonal com
+                    // o MESMO sinal de determinante da entrada. Se o triangulo
+                    // inverteu, det(P Q^T) < 0 e o que sai e uma REFLEXAO: o
+                    // passo local passaria a pedir a configuracao invertida.
+                    const float* R = Rt[ti].data();
+                    const float dR = R[0]*(R[4]*R[8]-R[5]*R[7])
+                                   - R[1]*(R[3]*R[8]-R[5]*R[6])
+                                   + R[2]*(R[3]*R[7]-R[4]*R[6]);
+                    if (dR < 0.0f) ++reflections;
+                }
             }
             // GLOBAL: um sistema laplaciano por coordenada
             std::vector<std::vector<double>> rhs(3, std::vector<double>((size_t)M, 0.0));
@@ -12270,7 +12282,17 @@ static bool PathBSimV2Solve(
             if (!taken) { ++rejected; break; }
         }
         const int after = badCount(mp);
-        if (after > base0) {          // o trecho nao passou: recua e encurta
+        if (kPathFree) {
+            // O CAMINHO deixa de ser a invariante; so o DESTINO e. A guarda
+            // monotona por trecho proibe atravessar qualquer estado dobrado -
+            // e resistir ao alargamento enquanto as ancoras abrem parece exigir
+            // exatamente uma dobra transitoria. O refit a mao chega a 1.130 sem
+            // dobra, entao o estado final existe; a duvida e se o vale ate ele
+            // passa por um vale pior. Aqui o passo avanca sempre, e a limpeza
+            // fica para o reparo em carga cheia.
+            done = tt;
+            worstOnPath = std::max(worstOnPath, after);
+        } else if (after > base0) {   // o trecho nao passou: recua e encurta
             mp = safe;
             dt *= 0.5f;
             if (stalled < 0 && dt < dtMin) stalled = (int)(done * 100.0f);
@@ -12278,6 +12300,83 @@ static bool PathBSimV2Solve(
             done = tt;
             if (dt < 1.0f / (float)kLoad) dt *= 1.5f;   // recupera velocidade
         }
+        }
+        // REPARO EM CARGA CHEIA. Mesmo passo local-global, agora sem avancar
+        // carga nenhuma: so pode melhorar, e roda ate parar de melhorar.
+        int repairFrom = -1, repairIt = 0;
+        if (kPathFree) {
+            repairFrom = badCount(mp);
+            for (int rep = 0; rep < kOuter * 8; ++rep) {
+                const int before = badCount(mp);
+                if (before == 0) break;
+                std::vector<std::array<float, 9>> Rt(tris.size());
+                for (size_t ti = 0; ti < tris.size(); ++ti) {
+                    for (int k = 0; k < 9; ++k) Rt[ti][k] = (k % 4 == 0) ? 1.0f : 0.0f;
+                    if (!tgt[ti].ok) continue;
+                    const auto& t = tris[ti];
+                    const Vec3 p1 = Sub(mp[mnode[t[1]]], mp[mnode[t[0]]]);
+                    const Vec3 p2 = Sub(mp[mnode[t[2]]], mp[mnode[t[0]]]);
+                    const Vec3 q1 = cur[ti].T1, q2 = cur[ti].T2;
+                    const Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                    const float P[3][3] = {{p1.x,p2.x,np.x},{p1.y,p2.y,np.y},{p1.z,p2.z,np.z}};
+                    const float Q[3][3] = {{q1.x,q2.x,nq.x},{q1.y,q2.y,nq.y},{q1.z,q2.z,nq.z}};
+                    float Mx[9];
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b)
+                            Mx[a*3+b] = P[a][0]*Q[b][0] + P[a][1]*Q[b][1] + P[a][2]*Q[b][2];
+                    PathBPolar3(Mx, Rt[ti].data());
+                }
+                std::vector<std::vector<double>> rhs(3, std::vector<double>((size_t)M, 0.0));
+                for (size_t ti = 0; ti < tris.size(); ++ti) {
+                    if (!tgt[ti].ok) continue;
+                    const auto& t = tris[ti];
+                    const float* R = Rt[ti].data();
+                    const Vec3 Tv[3] = {cur[ti].T1, cur[ti].T2, Sub(cur[ti].T2, cur[ti].T1)};
+                    const float W[3] = {tgt[ti].w0, tgt[ti].w2, tgt[ti].w1};
+                    const int A[3] = {0, 0, 1}, Bv[3] = {1, 2, 2};
+                    for (int k = 0; k < 3; ++k) {
+                        const Vec3 d = Tv[k];
+                        const Vec3 rd{R[0]*d.x + R[1]*d.y + R[2]*d.z,
+                                      R[3]*d.x + R[4]*d.y + R[5]*d.z,
+                                      R[6]*d.x + R[7]*d.y + R[8]*d.z};
+                        const uint32_t ma = mnode[t[A[k]]], mb = mnode[t[Bv[k]]];
+                        const double w = W[k];
+                        rhs[0][ma] -= w * rd.x; rhs[0][mb] += w * rd.x;
+                        rhs[1][ma] -= w * rd.y; rhs[1][mb] += w * rd.y;
+                        rhs[2][ma] -= w * rd.z; rhs[2][mb] += w * rd.z;
+                    }
+                }
+                std::vector<Vec3> cand = mp;
+                for (int c = 0; c < 3; ++c) {
+                    std::vector<double> xv((size_t)M), fv((size_t)M);
+                    for (uint32_t m = 0; m < M; ++m) {
+                        xv[m] = (c == 0) ? mp[m].x : (c == 1 ? mp[m].y : mp[m].z);
+                        fv[m] = (c == 0) ? anchorP[m].x
+                                         : (c == 1 ? anchorP[m].y : anchorP[m].z);
+                    }
+                    std::vector<uint8_t> savedSeed = seedM;
+                    seedM = anchorM;
+                    cgSolve(xv, fv, rhs[c], 2000, 1.0e-7);
+                    seedM = savedSeed;
+                    for (uint32_t m = 0; m < M; ++m) {
+                        if (c == 0) cand[m].x = (float)xv[m];
+                        else if (c == 1) cand[m].y = (float)xv[m];
+                        else cand[m].z = (float)xv[m];
+                    }
+                }
+                float alpha = 1.0f;
+                std::vector<Vec3> test((size_t)M);
+                bool moved = false;
+                for (int ls = 0; ls < 10; ++ls) {
+                    for (uint32_t m = 0; m < M; ++m)
+                        test[m] = anchorM[m] ? anchorP[m]
+                                             : Add(mp[m], Scale(Sub(cand[m], mp[m]), alpha));
+                    if (badCount(test) < before) { mp = test; moved = true; break; }
+                    alpha *= 0.5f;
+                }
+                ++repairIt;
+                if (!moved) break;
+            }
         }
         if (done < 1.0f - 1.0e-4f && stalled < 0) stalled = (int)(done * 100.0f);
         adaptedRest.assign(n, Vec3{0,0,0});
@@ -12312,17 +12411,19 @@ static bool PathBSimV2Solve(
             if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badNew;
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
              "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
-             "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
+             "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
              M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
-             globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
+             globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
+             badNew,
              badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
                 "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
-                "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
+                "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
                 M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
-                globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
+                globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
+             badNew,
                 badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
 
         for (size_t ei = 0; ei < edges.size(); ++ei) {
