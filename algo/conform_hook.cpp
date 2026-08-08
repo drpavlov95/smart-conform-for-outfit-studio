@@ -10638,16 +10638,13 @@ static void PathBPolar3(const float M[9], float R[9]) {
 // [0.5, 2.5]] tem autovalores 3.0 e 2.0 sem que nenhum coeficiente passe de
 // 2.5 - foi assim que o teto de 2.5 publicou razao 2.770 no log. O limite
 // tem de cair sobre os autovalores, e S se reconstroi depois.
-static bool PathBStretchClamp2x2(float a, float b, float c, float lo, float hi,
-                                 float& sa, float& sb, float& sc) {
+static void PathBSymEigen2x2(float a, float b, float c, float& l1, float& l2,
+                             float& vx, float& vy) {
     const float m = 0.5f * (a + c);
     const float h = 0.5f * (a - c);
     const float d = std::sqrt(h * h + b * b);
-    const float l1 = m + d, l2 = m - d;
-    if (!(l2 > 1.0e-12f)) return false;             // C nao positiva-definida
-    const float s1 = ClampRange(std::sqrt(l1), lo, hi);
-    const float s2 = ClampRange(std::sqrt(l2), lo, hi);
-    float vx = 1.0f, vy = 0.0f;
+    l1 = m + d; l2 = m - d;
+    vx = 1.0f; vy = 0.0f;
     if (std::fabs(b) > 1.0e-9f) {
         vx = b; vy = l1 - a;
         const float L = std::sqrt(vx * vx + vy * vy);
@@ -10655,11 +10652,48 @@ static bool PathBStretchClamp2x2(float a, float b, float c, float lo, float hi,
     } else if (c > a) {
         vx = 0.0f; vy = 1.0f;
     }
+}
+
+static bool PathBStretchClamp2x2(float a, float b, float c, float lo, float hi,
+                                 float& sa, float& sb, float& sc) {
+    float l1, l2, vx, vy;
+    PathBSymEigen2x2(a, b, c, l1, l2, vx, vy);
+    if (!(l2 > 1.0e-12f)) return false;             // C nao positiva-definida
+    const float s1 = ClampRange(std::sqrt(l1), lo, hi);
+    const float s2 = ClampRange(std::sqrt(l2), lo, hi);
     const float wx = -vy, wy = vx;
     sa = s1 * vx * vx + s2 * wx * wx;
     sb = s1 * vx * vy + s2 * wx * wy;
     sc = s1 * vy * vy + s2 * wy * wy;
     return true;
+}
+
+// DEFORMACAO LOGARITMICA. C = F^T F guarda o estiramento multiplicativamente,
+// entao "nao deformado" e o tensor identidade e mediar identidade com outra
+// coisa nao da o meio-termo certo. Em log-strain E = log(sqrt(C)) a metrica
+// autorada vira exatamente ZERO, os estiramentos principais somam em vez de
+// multiplicar, e "preferir a metrica autorada" passa a ser simplesmente uma
+// preferencia por norma pequena - que e o que um termo elastico sabe exprimir.
+static bool PathBLogStrain2x2(float a, float b, float c, float& e1, float& e2,
+                              float& vx, float& vy) {
+    float l1, l2;
+    PathBSymEigen2x2(a, b, c, l1, l2, vx, vy);
+    if (!(l2 > 1.0e-12f)) return false;
+    e1 = 0.5f * std::log(l1);
+    e2 = 0.5f * std::log(l2);
+    return true;
+}
+
+static void PathBExpClamp2x2(float a, float b, float c, float lo, float hi,
+                             float& sa, float& sb, float& sc) {
+    float l1, l2, vx, vy;
+    PathBSymEigen2x2(a, b, c, l1, l2, vx, vy);
+    const float s1 = ClampRange(std::exp(l1), lo, hi);
+    const float s2 = ClampRange(std::exp(l2), lo, hi);
+    const float wx = -vy, wy = vx;
+    sa = s1 * vx * vx + s2 * wx * wx;
+    sb = s1 * vx * vy + s2 * wx * wy;
+    sc = s1 * vy * vy + s2 * wy * wy;
 }
 
 static bool PathBSimV2Solve(
@@ -11756,13 +11790,19 @@ static bool PathBSimV2Solve(
         // C = F^T F no frame tangente autorado, levantado para 3D. Simetrico e
         // sem rotacao, entao mediar C entre vizinhos nao transporta o giro do
         // suporte para dentro do material.
-        std::vector<std::array<double, 6>> Cm((size_t)M, {1,1,1,0,0,0});
+        // O elemento neutro depende da representacao: em C ele e a identidade,
+        // em log-strain ele e o zero.
+        const bool kScreened = EnvToggle("DRAPE_MATERIAL_SCREENED", false);
+        const std::array<double, 6> kNeutral = kScreened
+            ? std::array<double, 6>{0,0,0,0,0,0}
+            : std::array<double, 6>{1,1,1,0,0,0};
+        std::vector<std::array<double, 6>> Cm((size_t)M, kNeutral);
         std::vector<double> Cw((size_t)M, 0.0);
         std::vector<uint8_t> seedM((size_t)M, 0);
         // C medido do proprio triangulo, guardado antes de qualquer media em
         // vertice: o modo localizado precisa do valor do triangulo APOIADO, e
         // mediar nos vertices ja misturaria identidade nas bordas do suporte.
-        std::vector<std::array<double, 6>> triC(tris.size(), {1,1,1,0,0,0});
+        std::vector<std::array<double, 6>> triC(tris.size(), kNeutral);
         std::vector<uint8_t> triSupported(tris.size(), 0);
         for (size_t ti = 0; ti < tris.size(); ++ti) {
             const auto& t = tris[ti];
@@ -11795,10 +11835,25 @@ static bool PathBSimV2Solve(
             const float N[3] = {nr.x, nr.y, nr.z};
             const int I[6] = {0,1,2,0,0,1}, J[6] = {0,1,2,1,2,2};
             double C3[6];
-            for (int k = 0; k < 6; ++k)
-                C3[k] = c11*U[I[k]]*U[J[k]] + c22*V[I[k]]*V[J[k]] +
-                        c12*(U[I[k]]*V[J[k]] + V[I[k]]*U[J[k]]) +
-                        N[I[k]]*N[J[k]];
+            if (kScreened) {
+                // E = log(sqrt(C)) nas direcoes principais do proprio plano do
+                // triangulo, levantado para 3D. O autovalor na direcao normal e
+                // log(1) = 0, entao nao existe termo n(x)n: a metrica autorada
+                // e o tensor NULO, e nada mais.
+                float le1, le2, vx, vy;
+                if (!PathBLogStrain2x2(c11, c12, c22, le1, le2, vx, vy)) continue;
+                const float A3[3] = {vx*U[0] + vy*V[0], vx*U[1] + vy*V[1],
+                                     vx*U[2] + vy*V[2]};
+                const float B3[3] = {-vy*U[0] + vx*V[0], -vy*U[1] + vx*V[1],
+                                     -vy*U[2] + vx*V[2]};
+                for (int k = 0; k < 6; ++k)
+                    C3[k] = le1*A3[I[k]]*A3[J[k]] + le2*B3[I[k]]*B3[J[k]];
+            } else {
+                for (int k = 0; k < 6; ++k)
+                    C3[k] = c11*U[I[k]]*U[J[k]] + c22*V[I[k]]*V[J[k]] +
+                            c12*(U[I[k]]*V[J[k]] + V[I[k]]*U[J[k]]) +
+                            N[I[k]]*N[J[k]];
+            }
             triC[ti] = {C3[0], C3[1], C3[2], C3[3], C3[4], C3[5]};
             triSupported[ti] = 1;
             const double wA = 0.5 * twoA;
@@ -11812,7 +11867,7 @@ static bool PathBSimV2Solve(
         int seeds = 0;
         for (uint32_t m = 0; m < M; ++m) {
             if (!seedM[m]) continue;
-            if (Cw[m] <= 0.0) { seedM[m] = 0; Cm[m] = {1,1,1,0,0,0}; continue; }
+            if (Cw[m] <= 0.0) { seedM[m] = 0; Cm[m] = kNeutral; continue; }
             for (int q = 0; q < 6; ++q) Cm[m][q] /= Cw[m];
             ++seeds;
         }
@@ -11852,8 +11907,35 @@ static bool PathBSimV2Solve(
             Ldiag[b] += kv.second;
         }
 
+        // MASSA POR NO (area de Voronoi baricentrica). O Laplaciano cotangente e
+        // adimensional; a massa tem unidade de area. So com as duas juntas o
+        // termo de screening ganha uma UNIDADE DE COMPRIMENTO de verdade -
+        // (L + M/lambda^2) - e subdividir a mesma superficie deixa de mudar o
+        // comportamento, que era a armadilha do "difunda 200 vezes".
+        std::vector<double> nodeArea((size_t)M, 0.0);
+        double totalArea = 0.0;
+        for (const auto& t : tris) {
+            if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+            const double a = 0.5 * Len(Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                             Sub(baseVerts[t[2]], baseVerts[t[0]])));
+            totalArea += a;
+            for (int k = 0; k < 3; ++k) nodeArea[mnode[t[k]]] += a / 3.0;
+        }
+        // COMPRIMENTO DE DECAIMENTO, em fracao do tamanho caracteristico da
+        // PROPRIA peca (sqrt da area autorada). Nao e contagem de aneis nem
+        // numero de iteracoes: e invariante a subdivisao e a escala, entao vale
+        // igual para uma manga pequena e para uma capa inteira.
+        const float kScreenFrac = ClampRange(
+            EnvFloat("DRAPE_SCREEN_LENGTH_FRAC", 0.25f), 0.01f, 100.0f);
+        const double lambda = kScreenFrac * std::sqrt(std::max(totalArea, 1.0e-9));
+        const double screenMu = 1.0 / std::max(lambda * lambda, 1.0e-12);
+
         // gradiente conjugado no subsistema dos nos LIVRES (Dirichlet nas
         // sementes). Convergencia definida pelo RESIDUO do sistema.
+        // `screen` liga o termo elastico que puxa para a metrica autorada; e
+        // uma PREFERENCIA, nunca uma condicao dura - foi exatamente por ser dura
+        // que o modo localizado nao conseguiu completar a carga.
+        std::vector<double> screen;
         auto cgSolve = [&](std::vector<double>& xv, const std::vector<double>& fixedVal,
                            const std::vector<double>& extraRhs, int maxIt,
                            double tol) -> std::pair<int, double> {
@@ -11861,7 +11943,7 @@ static bool PathBSimV2Solve(
             auto applyA = [&](const std::vector<double>& in, std::vector<double>& out) {
                 for (uint32_t m = 0; m < M; ++m) {
                     if (seedM[m]) { out[m] = 0.0; continue; }
-                    double acc = Ldiag[m] * in[m];
+                    double acc = (Ldiag[m] + (screen.empty() ? 0.0 : screen[m])) * in[m];
                     for (const auto& lk : L[m])
                         if (!seedM[lk.first]) acc -= lk.second * in[lk.first];
                     out[m] = acc;
@@ -11872,7 +11954,7 @@ static bool PathBSimV2Solve(
                 double rhs = extraRhs.empty() ? 0.0 : extraRhs[m];
                 for (const auto& lk : L[m])
                     if (seedM[lk.first]) rhs += lk.second * fixedVal[lk.first];
-                double ax = Ldiag[m] * xv[m];
+                double ax = (Ldiag[m] + (screen.empty() ? 0.0 : screen[m])) * xv[m];
                 for (const auto& lk : L[m])
                     if (!seedM[lk.first]) ax -= lk.second * xv[lk.first];
                 r[m] = rhs - ax;
@@ -11916,13 +11998,22 @@ static bool PathBSimV2Solve(
         // o padrao autorado". Quem concilia os dois e o proprio embedding
         // global, que ainda tem de honrar ancoras maiores. A pergunta e se ele
         // ja distribui sozinho o alargamento necessario.
+        //
+        // E o SCREENED e o meio-termo que os dois extremos mostraram faltar:
+        // o suporte continua Dirichlet, mas o pano livre ganha um termo
+        // elastico que o puxa de volta para log-strain zero. A solucao decide
+        // o compromisso; ninguem escolhe uma fracao a mao.
         const bool kLocalized = EnvToggle("DRAPE_MATERIAL_LOCALIZED", false);
+        if (kScreened) {
+            screen.assign((size_t)M, 0.0);
+            for (uint32_t m = 0; m < M; ++m) screen[m] = screenMu * nodeArea[m];
+        }
         int harmIt = 0; double harmRes = 0.0;
         for (int q = 0; kLocalized ? false : q < 6; ++q) {
             std::vector<double> xv((size_t)M, 0.0), fv((size_t)M, 0.0);
             for (uint32_t m = 0; m < M; ++m) {
                 fv[m] = Cm[m][q];
-                xv[m] = seedM[m] ? Cm[m][q] : (q < 3 ? 1.0 : 0.0);
+                xv[m] = seedM[m] ? Cm[m][q] : kNeutral[q];
             }
             const auto rr = cgSolve(xv, fv, {}, 3000, 1.0e-8);
             harmIt = std::max(harmIt, rr.first);
@@ -11950,8 +12041,7 @@ static bool PathBSimV2Solve(
             const Vec3 vv = Cross(nr, uu);
             std::array<double, 6> C{};
             if (kLocalized) {
-                C = triSupported[ti] ? triC[ti]
-                                     : std::array<double, 6>{1,1,1,0,0,0};
+                C = triSupported[ti] ? triC[ti] : kNeutral;
             } else {
                 for (int k = 0; k < 3; ++k)
                     for (int q = 0; q < 6; ++q) C[q] += Cm[mnode[t[k]]][q] / 3.0;
@@ -11962,8 +12052,12 @@ static bool PathBSimV2Solve(
                                C[5]*(a.y*b.z + a.z*b.y));
             };
             float sa = 1.0f, sb = 0.0f, sc = 1.0f;
-            if (!PathBStretchClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
-                                      kMetricMin, kMetricMax, sa, sb, sc)) {
+            if (kScreened) {
+                // volta de log-strain para estiramento no plano DESTE triangulo
+                PathBExpClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
+                                 kMetricMin, kMetricMax, sa, sb, sc);
+            } else if (!PathBStretchClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
+                                             kMetricMin, kMetricMax, sa, sb, sc)) {
                 sa = 1.0f; sb = 0.0f; sc = 1.0f;
                 ++degen;   // C nao positiva-definida: cai para ARAP puro
             }
@@ -12217,15 +12311,17 @@ static bool PathBSimV2Solve(
         for (size_t ti = 0; ti < tris.size(); ++ti)
             if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badNew;
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
-             "modo=%s razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
+             "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
              "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
-             M, seeds, harmIt, harmRes, kLocalized ? "localizado" : "harmonico", rMin, rMax, rN ? rSum / rN : 1.0,
+             M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
+             kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
              globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
              badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
-                "modo=%s razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
+                "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
                 "arap=%d semAlvo=%d facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
-                M, seeds, harmIt, harmRes, kLocalized ? "localizado" : "harmonico", rMin, rMax, rN ? rSum / rN : 1.0,
+                M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
+             kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
                 globIt, globRes, rejected, done * 100.0f, degen, noTgt, badNew,
                 badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
 
