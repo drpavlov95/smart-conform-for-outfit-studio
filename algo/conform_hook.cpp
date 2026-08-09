@@ -12538,7 +12538,7 @@ static bool PathBSimV2Solve(
         }
 
         // ---- 3) alvo por triangulo: S = sqrt(C_2D) no frame tangente ----
-        struct TriTarget { Vec3 T1, T2, A1, A2; float w0, w1, w2; uint8_t ok; };
+        struct TriTarget { Vec3 T1, T2, A1, A2, G1, G2; float w0, w1, w2; uint8_t ok; };
         std::vector<TriTarget> tgt(tris.size());
         double rMin = 1e9, rMax = -1e9, rSum = 0.0; int rN = 0, degen = 0, noTgt = 0;
         const bool kWarpClamp = !EnvToggle("DRAPE_MATERIAL_WARP_NOCLAMP", false);
@@ -12683,6 +12683,10 @@ static bool PathBSimV2Solve(
             }
             tgt[ti].A1 = e1;
             tgt[ti].A2 = e2;
+            if (kWarp) {
+                tgt[ti].G1 = Sub(warpY[t[1]], warpY[t[0]]);
+                tgt[ti].G2 = Sub(warpY[t[2]], warpY[t[0]]);
+            }
             auto cotOf = [&](int k) {
                 const Vec3& O = baseVerts[t[k]];
                 const Vec3 A = Sub(baseVerts[t[(k+1)%3]], O);
@@ -12826,6 +12830,9 @@ static bool PathBSimV2Solve(
             EnvFloat("DRAPE_MATERIAL_ADAPT_LOAD", 8.0f), 1.0f, 64.0f);
         int rejected = 0, globIt = 0; double globRes = 0.0; int stalled = -1;
         int reflections = 0, worstOnPath = 0;
+        double stageWit = 0.0;
+        const bool kHomotopy = kWarp &&
+            EnvToggle("DRAPE_MATERIAL_WARP_HOMOTOPY", false);
         const bool kPathFree = EnvToggle("DRAPE_MATERIAL_PATH_FREE", false);
         const bool kOrientBarrier = EnvToggle("DRAPE_MATERIAL_ORIENT_BARRIER", false);
         std::vector<TriTarget> cur = tgt;
@@ -12844,10 +12851,83 @@ static bool PathBSimV2Solve(
         for (uint32_t m = 0; m < M; ++m)
             if (anchorM[m])
                 anchorP[m] = Add(anchorA[m], Scale(Sub(anchorB[m], anchorA[m]), tt));
+        if (kHomotopy) {
+            // HOMOTOPIA QUE PRESERVA A TESTEMUNHA.
+            //
+            // A continuacao antiga interpolava a ARESTA-ALVO FINAL,
+            // T(t) = lerp(A, T_final, t), enquanto as ancoras caminhavam. Isso
+            // nao e a metrica de superficie nenhuma: no meio do caminho as
+            // ancoras estao quase no autorado e o material ja pede quase o
+            // Heavy final, e nada garante que exista estado saudavel ali. Nao ha
+            // motivo para o solver conseguir atravessar.
+            //
+            // O warp e LINEAR, entao a familia Y_t = X + t u existe de graca, e
+            // cada estagio ganha a sua propria testemunha. A aresta de Y_t e
+            // lerp(e, g, t) - porque aresta e funcao linear das posicoes - e dai
+            // se deriva C_t, S_t e o alvo daquele estagio. Metrica e ancoras
+            // passam a percorrer A MESMA familia de deformacoes realizaveis.
+            //
+            // Y_t NAO e usado como ponto de partida: cada passo comeca na
+            // solucao do passo anterior. Y_t so serve de testemunha diagnostica.
+            for (size_t ti = 0; ti < tgt.size(); ++ti) {
+                if (!tgt[ti].ok) continue;
+                const Vec3 e1 = tgt[ti].A1, e2 = tgt[ti].A2;
+                const Vec3 g1 = Add(e1, Scale(Sub(tgt[ti].G1, e1), tt));
+                const Vec3 g2 = Add(e2, Scale(Sub(tgt[ti].G2, e2), tt));
+                Vec3 nr = Cross(e1, e2);
+                const float twoA = Len(nr);
+                const float ul = Len(e1);
+                if (twoA < 1.0e-9f || ul < 1.0e-9f) continue;
+                nr = Scale(nr, 1.0f / twoA);
+                const Vec3 uu = Scale(e1, 1.0f / ul);
+                const Vec3 vv = Cross(nr, uu);
+                const float a11 = Dot(e1, uu), a21 = Dot(e1, vv);
+                const float a12 = Dot(e2, uu), a22 = Dot(e2, vv);
+                const float det = a11 * a22 - a12 * a21;
+                if (std::fabs(det) < 1.0e-9f) continue;
+                const float G11 = Dot(g1, g1), G12 = Dot(g1, g2), G22 = Dot(g2, g2);
+                const float i11 =  a22 / det, i12 = -a12 / det;
+                const float i21 = -a21 / det, i22 =  a11 / det;
+                const float c11 = i11*(G11*i11 + G12*i21) + i21*(G12*i11 + G22*i21);
+                const float c12 = i11*(G11*i12 + G12*i22) + i21*(G12*i12 + G22*i22);
+                const float c22 = i12*(G11*i12 + G12*i22) + i22*(G12*i12 + G22*i22);
+                float l1, l2, vx, vy;
+                PathBSymEigen2x2(c11, c12, c22, l1, l2, vx, vy);
+                if (!(l2 > 1.0e-12f) || !std::isfinite(l1) || !std::isfinite(l2)) continue;
+                float s1 = ClampRange(std::sqrt(l1), 1.0e-3f, 1.0e3f);
+                float s2 = ClampRange(std::sqrt(l2), 1.0e-3f, 1.0e3f);
+                if (kWarpClamp) {
+                    s1 = ClampRange(s1, kMetricMin, kMetricMax);
+                    s2 = ClampRange(s2, kMetricMin, kMetricMax);
+                }
+                const float wx = -vy, wy = vx;
+                const float sa = s1*vx*vx + s2*wx*wx;
+                const float sb = s1*vx*vy + s2*wx*wy;
+                const float sc = s1*vy*vy + s2*wy*wy;
+                auto ap = [&](const Vec3& e) {
+                    const float pq = Dot(e, uu), qq = Dot(e, vv);
+                    return Add(Scale(uu, sa*pq + sb*qq), Scale(vv, sb*pq + sc*qq));
+                };
+                cur[ti].T1 = ap(e1);
+                cur[ti].T2 = ap(e2);
+                // testemunha DO ESTAGIO: Gram de Y_t contra o Gram do alvo_t
+                const double gy[3] = {G11, G12, G22};
+                const double gt[3] = {Dot(cur[ti].T1, cur[ti].T1),
+                                      Dot(cur[ti].T1, cur[ti].T2),
+                                      Dot(cur[ti].T2, cur[ti].T2)};
+                double num = 0.0, den = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    num += (gy[k] - gt[k]) * (gy[k] - gt[k]);
+                    den += gy[k] * gy[k];
+                }
+                if (den > 1.0e-18) stageWit = std::max(stageWit, std::sqrt(num / den));
+            }
+        } else {
         for (size_t ti = 0; ti < tgt.size(); ++ti) {
             if (!tgt[ti].ok) continue;
             cur[ti].T1 = Add(tgt[ti].A1, Scale(Sub(tgt[ti].T1, tgt[ti].A1), tt));
             cur[ti].T2 = Add(tgt[ti].A2, Scale(Sub(tgt[ti].T2, tgt[ti].A2), tt));
+        }
         }
         // A CONDICAO DE CONTORNO NAO SE NEGOCIA. Amortecer o passo inteiro
         // amortece tambem as ancoras, e elas ficam devendo o deslocamento a cada
@@ -13101,18 +13181,22 @@ static bool PathBSimV2Solve(
             if (!hostBad[ti] && isBad(adaptedRest, ti, false)) ++badNew;
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
              "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
-             "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
+             "homotopia=%s testemunhaEstagio=%.2e arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
              M, seeds, harmIt, harmRes, kWarp ? "warp" : kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
-             globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
+             globIt, globRes, rejected, done * 100.0f,
+             kHomotopy ? "testemunha" : "lerp", stageWit,
+             degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
              badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
                 "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
-                "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
+                "homotopia=%s testemunhaEstagio=%.2e arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
                 M, seeds, harmIt, harmRes, kWarp ? "warp" : kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
-                globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
+                globIt, globRes, rejected, done * 100.0f,
+             kHomotopy ? "testemunha" : "lerp", stageWit,
+             degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
                 badPre, twinMax, anchorsOff, mixedGroups, badSupport, badSupportRigid);
 
