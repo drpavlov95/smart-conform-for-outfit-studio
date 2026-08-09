@@ -12006,6 +12006,7 @@ static bool PathBSimV2Solve(
         // costurada. A pergunta que o painel responde deixa de ser "quanto a
         // roupa toda cresceu" e passa a ser "o que prende voce ficou de que
         // tamanho".
+        const bool kWarp = EnvToggle("DRAPE_MATERIAL_WARP", false);
         const bool kAffine = EnvToggle("DRAPE_MATERIAL_AFFINE", false);
         const bool kFrontier = EnvToggle("DRAPE_MATERIAL_AFFINE_FRONTIER", false);
         std::vector<int> triRegion(tris.size(), -1);
@@ -12352,7 +12353,7 @@ static bool PathBSimV2Solve(
             for (uint32_t m = 0; m < M; ++m) screen[m] = screenMu * nodeArea[m];
         }
         int harmIt = 0; double harmRes = 0.0;
-        for (int q = 0; (kLocalized || kAffine) ? false : q < 6; ++q) {
+        for (int q = 0; (kLocalized || kAffine || kWarp) ? false : q < 6; ++q) {
             std::vector<double> xv((size_t)M, 0.0), fv((size_t)M, 0.0);
             for (uint32_t m = 0; m < M; ++m) {
                 fv[m] = Cm[m][q];
@@ -12362,6 +12363,171 @@ static bool PathBSimV2Solve(
             harmIt = std::max(harmIt, rr.first);
             harmRes = std::max(harmRes, rr.second);
             for (uint32_t m = 0; m < M; ++m) Cm[m][q] = xv[m];
+        }
+
+        // ---- 2b) WARP DE GRADUACAO (DRAPE_MATERIAL_WARP) -------------------
+        //
+        // Inversao de ordem. Ate aqui todas as tentativas inventaram um campo
+        // de METRICA e torceram para existir superficie que o realizasse -
+        // difusao, screened, afim constante, afim de fronteira. Aqui se
+        // constroi primeiro um MAPA de deformacao, e a metrica e extraida dele.
+        // Compatibilidade deixa de ser algo a impor depois: vem da construcao,
+        // porque medir F de um mapa que existe nunca pede o impossivel.
+        //
+        //     X autorado -> warp suave Y -> F por triangulo -> F = R S -> S
+        //
+        // Y NAO e a posicao final da roupa. E um oraculo de graduacao, que
+        // responde apenas "quanto material uma deformacao suave e realizavel
+        // precisaria acrescentar aqui". Onde o pano termina continua sendo
+        // decisao da Fase 2. A rotacao e a pose de Y sao descartadas junto com
+        // R - so a mudanca intrinseca sobrevive.
+        //
+        // Energia: biharmonica com Dirichlet DURO em dois conjuntos e nenhum
+        // coeficiente livre.
+        //
+        //     min u^T (L M^-1 L) u,   u = suporte - base   nos nos apoiados
+        //                             u = 0                na borda ABERTA
+        //
+        // A borda aberta do material - bainha de saia, punho de manga, barra de
+        // capa - nao esta presa a nada, e dizer que ela nao se move e geometria,
+        // nao parametro. No apoiado o suporte manda (um decote e as duas coisas).
+        // O flare que o afim constante nao conseguia expressar nasce sozinho
+        // disso: topo puxado, barra parada.
+        //
+        // Biharmonica e nao Laplaciana porque o alvo e o GRADIENTE de u; o campo
+        // precisa ser uma ordem mais suave do que a grandeza que vamos medir.
+        // L M^-1 L e a forma FEM consistente - L ao quadrado sem a massa seria
+        // dependente de resolucao.
+        std::vector<Vec3> warpY;
+        int warpIt = 0; double warpRes = 0.0;
+        int warpBad = 0, warpOpen = 0, warpDir = 0;
+        double warpSMin = 0.0, warpSMax = 0.0, warpSMed = 1.0;
+        if (kWarp) {
+            // borda ABERTA: par de nos materiais que so aparece em um triangulo.
+            // Gemeos de costura ja foram fundidos, entao costura conta como
+            // interior - o que e correto, ela esta presa ao outro painel.
+            std::unordered_map<uint64_t, int> edgeUse;
+            for (const auto& t : tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = mnode[t[k]], b = mnode[t[(k + 1) % 3]];
+                    if (a == b) continue;
+                    if (a > b) std::swap(a, b);
+                    ++edgeUse[((uint64_t)a << 32) | b];
+                }
+            }
+            std::vector<uint8_t> openNode((size_t)M, 0);
+            for (const auto& kv : edgeUse) {
+                if (kv.second != 1) continue;
+                openNode[(uint32_t)(kv.first >> 32)] = 1;
+                openNode[(uint32_t)(kv.first & 0xFFFFFFFFu)] = 1;
+            }
+
+            std::vector<uint8_t> dir((size_t)M, 0);
+            std::vector<Vec3> uval((size_t)M, Vec3{0, 0, 0});
+            for (size_t i = 0; i < n; ++i)
+                if (fixed[i]) { dir[mnode[i]] = 1; uval[mnode[i]] = raw[i]; }
+            for (uint32_t m = 0; m < M; ++m) {
+                if (openNode[m]) ++warpOpen;
+                if (!dir[m] && openNode[m]) { dir[m] = 1; uval[m] = Vec3{0, 0, 0}; }
+                if (dir[m]) ++warpDir;
+            }
+
+            auto applyL = [&](const std::vector<double>& in, std::vector<double>& out) {
+                for (uint32_t m = 0; m < M; ++m) {
+                    double acc = Ldiag[m] * in[m];
+                    for (const auto& lk : L[m]) acc -= lk.second * in[lk.first];
+                    out[m] = acc;
+                }
+            };
+            std::vector<double> tmp((size_t)M), tmp2((size_t)M);
+            auto applyK = [&](const std::vector<double>& in, std::vector<double>& out) {
+                applyL(in, tmp);
+                for (uint32_t m = 0; m < M; ++m)
+                    tmp[m] /= std::max(nodeArea[m], 1.0e-9);
+                applyL(tmp, out);
+            };
+
+            std::vector<double> full((size_t)M), rhs((size_t)M), xv((size_t)M);
+            std::vector<double> r((size_t)M), pv((size_t)M), Ap((size_t)M);
+            std::vector<Vec3> uSol((size_t)M, Vec3{0, 0, 0});
+            for (int c = 0; c < 3; ++c) {
+                for (uint32_t m = 0; m < M; ++m)
+                    full[m] = dir[m] ? (c == 0 ? uval[m].x : (c == 1 ? uval[m].y : uval[m].z))
+                                     : 0.0;
+                applyK(full, rhs);
+                for (uint32_t m = 0; m < M; ++m) {
+                    xv[m] = 0.0;
+                    r[m] = dir[m] ? 0.0 : -rhs[m];
+                }
+                pv = r;
+                double rs = 0.0;
+                for (uint32_t m = 0; m < M; ++m) rs += r[m] * r[m];
+                const double rs0 = rs;
+                int it = 0;
+                for (; it < 8000 && rs > 1.0e-16 * std::max(rs0, 1.0e-30); ++it) {
+                    for (uint32_t m = 0; m < M; ++m) tmp2[m] = dir[m] ? 0.0 : pv[m];
+                    applyK(tmp2, Ap);
+                    for (uint32_t m = 0; m < M; ++m) if (dir[m]) Ap[m] = 0.0;
+                    double pAp = 0.0;
+                    for (uint32_t m = 0; m < M; ++m) pAp += pv[m] * Ap[m];
+                    if (std::fabs(pAp) < 1.0e-30) break;
+                    const double al = rs / pAp;
+                    double rs2 = 0.0;
+                    for (uint32_t m = 0; m < M; ++m) {
+                        if (dir[m]) continue;
+                        xv[m] += al * pv[m];
+                        r[m] -= al * Ap[m];
+                        rs2 += r[m] * r[m];
+                    }
+                    const double beta = rs2 / std::max(rs, 1.0e-30);
+                    for (uint32_t m = 0; m < M; ++m)
+                        if (!dir[m]) pv[m] = r[m] + beta * pv[m];
+                    rs = rs2;
+                }
+                warpIt = std::max(warpIt, it);
+                warpRes = std::max(warpRes, std::sqrt(rs / std::max(rs0, 1.0e-30)));
+                for (uint32_t m = 0; m < M; ++m) {
+                    const double v = dir[m]
+                        ? (c == 0 ? uval[m].x : (c == 1 ? uval[m].y : uval[m].z))
+                        : xv[m];
+                    if (c == 0) uSol[m].x = (float)v;
+                    else if (c == 1) uSol[m].y = (float)v;
+                    else uSol[m].z = (float)v;
+                }
+            }
+
+            warpY.assign(n, Vec3{0, 0, 0});
+            for (size_t i = 0; i < n; ++i)
+                warpY[i] = Add(baseVerts[i], uSol[mnode[i]]);
+
+            // O oraculo precisa ser LOCALMENTE injetivo, nao globalmente:
+            // auto-intersecao de Y nao corrompe metrica nenhuma, porque S sai
+            // do F local. So inversao/colapso contam.
+            std::vector<float> stretches;
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                const auto& t = tris[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                const Vec3 e1 = Sub(baseVerts[t[1]], baseVerts[t[0]]);
+                const Vec3 e2 = Sub(baseVerts[t[2]], baseVerts[t[0]]);
+                const Vec3 g1 = Sub(warpY[t[1]], warpY[t[0]]);
+                const Vec3 g2 = Sub(warpY[t[2]], warpY[t[0]]);
+                const Vec3 an = Cross(e1, e2), gn = Cross(g1, g2);
+                const float a0 = Len(an), a1 = Len(gn);
+                if (a0 <= 1.0e-9f) continue;
+                if (Dot(an, gn) <= 0.0f || a1 < 0.10f * a0) ++warpBad;
+                stretches.push_back(std::sqrt(a1 / a0));
+            }
+            if (!stretches.empty()) {
+                std::sort(stretches.begin(), stretches.end());
+                warpSMin = stretches.front();
+                warpSMax = stretches.back();
+                warpSMed = stretches[stretches.size() / 2];
+            }
+            fprintf(stderr, "  WARP nos=%u dirichlet=%d (borda aberta=%d) CG it=%d res=%.2e "
+                    "facesRuinsNoWarp=%d raizArea[%.3f..%.3f med=%.3f]\n",
+                    M, warpDir, warpOpen, warpIt, warpRes, warpBad,
+                    warpSMin, warpSMax, warpSMed);
         }
 
         // ---- 3) alvo por triangulo: S = sqrt(C_2D) no frame tangente ----
@@ -12383,7 +12549,34 @@ static bool PathBSimV2Solve(
             const Vec3 uu = Scale(e1, 1.0f / ul);
             const Vec3 vv = Cross(nr, uu);
             std::array<double, 6> C{};
-            if (kLocalized) {
+            if (kWarp) {
+                // C = F^T F medido do warp, no frame tangente autorado. Mesma
+                // conta do laco de sementes, com Y no lugar do suporte e valendo
+                // para TODO triangulo, nao so os apoiados.
+                const float a11 = Dot(e1, uu), a21 = Dot(e1, vv);
+                const float a12 = Dot(e2, uu), a22 = Dot(e2, vv);
+                const float det = a11 * a22 - a12 * a21;
+                const Vec3 g1 = Sub(warpY[t[1]], warpY[t[0]]);
+                const Vec3 g2 = Sub(warpY[t[2]], warpY[t[0]]);
+                if (std::fabs(det) > 1.0e-9f) {
+                    const float g11 = Dot(g1, g1), g12 = Dot(g1, g2), g22 = Dot(g2, g2);
+                    const float i11 =  a22 / det, i12 = -a12 / det;
+                    const float i21 = -a21 / det, i22 =  a11 / det;
+                    const float c11 = i11*(g11*i11 + g12*i21) + i21*(g12*i11 + g22*i21);
+                    const float c12 = i11*(g11*i12 + g12*i22) + i21*(g12*i12 + g22*i22);
+                    const float c22 = i12*(g11*i12 + g12*i22) + i22*(g12*i12 + g22*i22);
+                    const float U[3] = {uu.x, uu.y, uu.z};
+                    const float V3[3] = {vv.x, vv.y, vv.z};
+                    const float N3[3] = {nr.x, nr.y, nr.z};
+                    const int I[6] = {0,1,2,0,0,1}, J[6] = {0,1,2,1,2,2};
+                    for (int k = 0; k < 6; ++k)
+                        C[k] = c11*U[I[k]]*U[J[k]] + c22*V3[I[k]]*V3[J[k]] +
+                               c12*(U[I[k]]*V3[J[k]] + V3[I[k]]*U[J[k]]) +
+                               N3[I[k]]*N3[J[k]];
+                } else {
+                    C = {1,1,1,0,0,0};
+                }
+            } else if (kLocalized) {
                 C = triSupported[ti] ? triC[ti] : kNeutral;
             } else {
                 for (int k = 0; k < 3; ++k)
@@ -12395,7 +12588,13 @@ static bool PathBSimV2Solve(
                                C[5]*(a.y*b.z + a.z*b.y));
             };
             float sa = 1.0f, sb = 0.0f, sc = 1.0f;
-            if (kScreened) {
+            if (kWarp) {
+                if (!PathBStretchClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
+                                          kMetricMin, kMetricMax, sa, sb, sc)) {
+                    sa = 1.0f; sb = 0.0f; sc = 1.0f;
+                    ++degen;
+                }
+            } else if (kScreened) {
                 // volta de log-strain para estiramento no plano DESTE triangulo
                 PathBExpClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
                                  kMetricMin, kMetricMax, sa, sb, sc);
@@ -12408,7 +12607,7 @@ static bool PathBSimV2Solve(
             // aresta autorada sob o S da regiao, isto e, a peca inteira sob uma
             // transformacao linear de R^3.
             auto apply2 = [&](const Vec3& e) {
-                if (kAffine) {
+                if (kAffine && !kWarp) {
                     const int rg = triRegion[ti] >= 0 ? triRegion[ti] : regionCount;
                     const auto& S3 = regionS[rg];
                     return Vec3{(float)(S3[0]*e.x + S3[1]*e.y + S3[2]*e.z),
@@ -12817,7 +13016,7 @@ static bool PathBSimV2Solve(
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
              "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
              "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
-             M, seeds, harmIt, harmRes, kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
+             M, seeds, harmIt, harmRes, kWarp ? "warp" : kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
              globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
@@ -12825,7 +13024,7 @@ static bool PathBSimV2Solve(
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
                 "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
                 "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
-                M, seeds, harmIt, harmRes, kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
+                M, seeds, harmIt, harmRes, kWarp ? "warp" : kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
                 globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
