@@ -10628,6 +10628,92 @@ static void PathBPolar3(const float M[9], float R[9]) {
     }
 }
 
+// Rotacao PROPRIA mais proxima de M, por SVD (Jacobi em M^T M).
+//
+// A decomposicao polar por Newton converge para o fator ortogonal com o mesmo
+// sinal de determinante da entrada: se det(M) < 0 ela devolve uma REFLEXAO, e
+// usar isso como "rotacao" faz o passo local pedir a configuracao invertida.
+// A rotacao propria mais proxima troca o sinal da direcao singular MENOS
+// significativa - e e justamente o residuo grande que ela deixa que empurra o
+// triangulo de volta para fora da dobra.
+static void PathBNearestRotation3(const float M[9], float R[9]) {
+    double S[3][3] = {};                      // S = M^T M, simetrica PSD
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k)
+                S[i][j] += (double)M[k*3+i] * M[k*3+j];
+
+    double V[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    for (int sweep = 0; sweep < 12; ++sweep) {
+        double off = 0.0;
+        for (int i = 0; i < 3; ++i)
+            for (int j = i + 1; j < 3; ++j) off += S[i][j] * S[i][j];
+        if (off < 1.0e-18) break;
+        for (int p = 0; p < 2; ++p) {
+            for (int q = p + 1; q < 3; ++q) {
+                if (std::fabs(S[p][q]) < 1.0e-18) continue;
+                const double theta = (S[q][q] - S[p][p]) / (2.0 * S[p][q]);
+                const double t = (theta >= 0.0 ? 1.0 : -1.0) /
+                                 (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+                const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+                for (int k = 0; k < 3; ++k) {
+                    const double skp = S[k][p], skq = S[k][q];
+                    S[k][p] = c * skp - s * skq;
+                    S[k][q] = s * skp + c * skq;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double spk = S[p][k], sqk = S[q][k];
+                    S[p][k] = c * spk - s * sqk;
+                    S[q][k] = s * spk + c * sqk;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double vkp = V[k][p], vkq = V[k][q];
+                    V[k][p] = c * vkp - s * vkq;
+                    V[k][q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+
+    double sig[3] = {std::sqrt(std::max(S[0][0], 0.0)),
+                     std::sqrt(std::max(S[1][1], 0.0)),
+                     std::sqrt(std::max(S[2][2], 0.0))};
+    int smallest = 0;
+    for (int i = 1; i < 3; ++i) if (sig[i] < sig[smallest]) smallest = i;
+
+    double U[3][3] = {};                      // U = M V diag(1/sigma)
+    for (int i = 0; i < 3; ++i) {
+        if (sig[i] > 1.0e-9) {
+            for (int k = 0; k < 3; ++k) {
+                double acc = 0.0;
+                for (int j = 0; j < 3; ++j) acc += (double)M[k*3+j] * V[j][i];
+                U[k][i] = acc / sig[i];
+            }
+        } else {                              // direcao degenerada: completa a base
+            const int a = (i + 1) % 3, b = (i + 2) % 3;
+            U[0][i] = U[1][a]*U[2][b] - U[2][a]*U[1][b];
+            U[1][i] = U[2][a]*U[0][b] - U[0][a]*U[2][b];
+            U[2][i] = U[0][a]*U[1][b] - U[1][a]*U[0][b];
+        }
+    }
+
+    double det = U[0][0]*(U[1][1]*U[2][2]-U[1][2]*U[2][1])
+               - U[0][1]*(U[1][0]*U[2][2]-U[1][2]*U[2][0])
+               + U[0][2]*(U[1][0]*U[2][1]-U[1][1]*U[2][0]);
+    double detV = V[0][0]*(V[1][1]*V[2][2]-V[1][2]*V[2][1])
+                - V[0][1]*(V[1][0]*V[2][2]-V[1][2]*V[2][0])
+                + V[0][2]*(V[1][0]*V[2][1]-V[1][1]*V[2][0]);
+    if (det * detV < 0.0)
+        for (int k = 0; k < 3; ++k) U[k][smallest] = -U[k][smallest];
+
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            double acc = 0.0;
+            for (int k = 0; k < 3; ++k) acc += U[i][k] * V[j][k];
+            R[i*3+j] = (float)acc;
+        }
+}
+
 // Estiramentos PRINCIPAIS de C = F^T F em 2D, limitados e recompostos.
 //
 // S e o tensor de estiramento puro de F = R S - a rotacao do suporte nao e
@@ -12157,6 +12243,31 @@ static bool PathBSimV2Solve(
                 if (!hostBad[ti] && isBad(V, ti, true)) ++bad;
             return bad;
         };
+        // CONTAGEM E UM PENHASCO. Aceitar "o maior passo que nao aumenta a
+        // contagem" estaciona faces exatamente na borda do limiar, e dali
+        // qualquer passo seguinte - por menor que seja - derruba alguma para o
+        // outro lado. Foi assim que o reparo rejeitou ate alpha=1/512.
+        //
+        // Mesma licao de sempre neste projeto: veto binario e a forma errada;
+        // o que guia otimizacao e uma medida CONTINUA. Aqui, quanto cada face
+        // ruim esta abaixo do limiar, ao quadrado - zero exatamente quando
+        // nenhuma esta.
+        auto badEnergy = [&](const std::vector<Vec3>& V) {
+            double e = 0.0;
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                if (hostBad[ti]) continue;
+                const auto& t = tris[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                const float a0 = Len(triNrm0[ti]);
+                if (a0 <= 1.0e-9f) continue;
+                const Vec3 nn = Cross(Sub(V[mnode[t[1]]], V[mnode[t[0]]]),
+                                      Sub(V[mnode[t[2]]], V[mnode[t[0]]]));
+                // area com SINAL, em fracao da autorada: negativa se virou
+                const double q = Dot(triNrm0[ti], nn) / ((double)a0 * a0);
+                if (q < 0.10) { const double d = 0.10 - q; e += d * d; }
+            }
+            return e;
+        };
         const int kOuter = (int)ClampRange(
             EnvFloat("DRAPE_MATERIAL_ADAPT_ITERS", 8.0f), 1.0f, 200.0f);
         const int kLoad = (int)ClampRange(
@@ -12164,6 +12275,7 @@ static bool PathBSimV2Solve(
         int rejected = 0, globIt = 0; double globRes = 0.0; int stalled = -1;
         int reflections = 0, worstOnPath = 0;
         const bool kPathFree = EnvToggle("DRAPE_MATERIAL_PATH_FREE", false);
+        const bool kOrientBarrier = EnvToggle("DRAPE_MATERIAL_ORIENT_BARRIER", false);
         std::vector<TriTarget> cur = tgt;
         // Passo de carga ADAPTATIVO. Se um trecho do caminho nao admite avanco
         // sem inverter face, o certo e andar mais devagar ali, nao desistir do
@@ -12201,23 +12313,32 @@ static bool PathBSimV2Solve(
                 const Vec3 p1 = Sub(mp[mnode[t[1]]], mp[mnode[t[0]]]);
                 const Vec3 p2 = Sub(mp[mnode[t[2]]], mp[mnode[t[0]]]);
                 const Vec3 q1 = cur[ti].T1, q2 = cur[ti].T2;
-                const Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                // BARREIRA DE ORIENTACAO. Montar a terceira coluna com o produto vetorial
+                // ATUAL faz det(P) = |p1 x p2|^2 > 0 SEMPRE: o frame do triangulo parece
+                // destro mesmo quando ele esta virado, e o passo local perde a informacao
+                // de inversao. Era por isso que o contador de reflexoes dava zero, e por
+                // isso que iterar mais nunca desdobrava nada. Referenciada a orientacao
+                // AUTORADA - a mesma que a invariante usa - o triangulo virado passa a dar
+                // det(M) < 0, e a rotacao propria mais proxima deixa um residuo que o
+                // empurra para fora da dobra.
+                if (kOrientBarrier && Dot(np, triNrm0[ti]) < 0.0f) np = Scale(np, -1.0f);
                 const float P[3][3] = {{p1.x,p2.x,np.x},{p1.y,p2.y,np.y},{p1.z,p2.z,np.z}};
                 const float Q[3][3] = {{q1.x,q2.x,nq.x},{q1.y,q2.y,nq.y},{q1.z,q2.z,nq.z}};
                 float Mx[9];
                 for (int a = 0; a < 3; ++a)
                     for (int b = 0; b < 3; ++b)
                         Mx[a*3+b] = P[a][0]*Q[b][0] + P[a][1]*Q[b][1] + P[a][2]*Q[b][2];
-                PathBPolar3(Mx, Rt[ti].data());
-                {   // a iteracao de Newton converge para o fator ortogonal com
-                    // o MESMO sinal de determinante da entrada. Se o triangulo
-                    // inverteu, det(P Q^T) < 0 e o que sai e uma REFLEXAO: o
-                    // passo local passaria a pedir a configuracao invertida.
-                    const float* R = Rt[ti].data();
-                    const float dR = R[0]*(R[4]*R[8]-R[5]*R[7])
-                                   - R[1]*(R[3]*R[8]-R[5]*R[6])
-                                   + R[2]*(R[3]*R[7]-R[4]*R[6]);
-                    if (dR < 0.0f) ++reflections;
+                if (kOrientBarrier) PathBNearestRotation3(Mx, Rt[ti].data());
+                else PathBPolar3(Mx, Rt[ti].data());
+                {   // det da ENTRADA. Medir o da saida nao diz nada: a rotacao
+                    // propria mais proxima forca +1 por construcao, e a polar
+                    // por Newton preserva o sinal da entrada. O que interessa e
+                    // quantos triangulos chegam VIRADOS ao passo local.
+                    const float dM = Mx[0]*(Mx[4]*Mx[8]-Mx[5]*Mx[7])
+                                   - Mx[1]*(Mx[3]*Mx[8]-Mx[5]*Mx[6])
+                                   + Mx[2]*(Mx[3]*Mx[7]-Mx[4]*Mx[6]);
+                    if (dM < 0.0f) ++reflections;
                 }
             }
             // GLOBAL: um sistema laplaciano por coordenada
@@ -12303,9 +12424,12 @@ static bool PathBSimV2Solve(
         }
         // REPARO EM CARGA CHEIA. Mesmo passo local-global, agora sem avancar
         // carga nenhuma: so pode melhorar, e roda ate parar de melhorar.
-        int repairFrom = -1, repairIt = 0;
+        int repairFrom = -1, repairIt = 0, bestBad = 1 << 30;
+        std::vector<Vec3> bestMp;
         if (kPathFree) {
             repairFrom = badCount(mp);
+            bestBad = repairFrom;
+            bestMp = mp;
             for (int rep = 0; rep < kOuter * 8; ++rep) {
                 const int before = badCount(mp);
                 if (before == 0) break;
@@ -12317,14 +12441,24 @@ static bool PathBSimV2Solve(
                     const Vec3 p1 = Sub(mp[mnode[t[1]]], mp[mnode[t[0]]]);
                     const Vec3 p2 = Sub(mp[mnode[t[2]]], mp[mnode[t[0]]]);
                     const Vec3 q1 = cur[ti].T1, q2 = cur[ti].T2;
-                    const Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                    Vec3 nq = Cross(q1, q2), np = Cross(p1, p2);
+                    // BARREIRA DE ORIENTACAO. Montar a terceira coluna com o produto vetorial
+                    // ATUAL faz det(P) = |p1 x p2|^2 > 0 SEMPRE: o frame do triangulo parece
+                    // destro mesmo quando ele esta virado, e o passo local perde a informacao
+                    // de inversao. Era por isso que o contador de reflexoes dava zero, e por
+                    // isso que iterar mais nunca desdobrava nada. Referenciada a orientacao
+                    // AUTORADA - a mesma que a invariante usa - o triangulo virado passa a dar
+                    // det(M) < 0, e a rotacao propria mais proxima deixa um residuo que o
+                    // empurra para fora da dobra.
+                    if (kOrientBarrier && Dot(np, triNrm0[ti]) < 0.0f) np = Scale(np, -1.0f);
                     const float P[3][3] = {{p1.x,p2.x,np.x},{p1.y,p2.y,np.y},{p1.z,p2.z,np.z}};
                     const float Q[3][3] = {{q1.x,q2.x,nq.x},{q1.y,q2.y,nq.y},{q1.z,q2.z,nq.z}};
                     float Mx[9];
                     for (int a = 0; a < 3; ++a)
                         for (int b = 0; b < 3; ++b)
                             Mx[a*3+b] = P[a][0]*Q[b][0] + P[a][1]*Q[b][1] + P[a][2]*Q[b][2];
-                    PathBPolar3(Mx, Rt[ti].data());
+                    if (kOrientBarrier) PathBNearestRotation3(Mx, Rt[ti].data());
+                    else PathBPolar3(Mx, Rt[ti].data());
                 }
                 std::vector<std::vector<double>> rhs(3, std::vector<double>((size_t)M, 0.0));
                 for (size_t ti = 0; ti < tris.size(); ++ti) {
@@ -12364,21 +12498,25 @@ static bool PathBSimV2Solve(
                         else cand[m].z = (float)xv[m];
                     }
                 }
+                const double e0 = badEnergy(mp);
                 float alpha = 1.0f;
                 std::vector<Vec3> test((size_t)M);
                 bool moved = false;
-                for (int ls = 0; ls < 10; ++ls) {
+                for (int ls = 0; ls < 12; ++ls) {
                     for (uint32_t m = 0; m < M; ++m)
                         test[m] = anchorM[m] ? anchorP[m]
                                              : Add(mp[m], Scale(Sub(cand[m], mp[m]), alpha));
-                    if (badCount(test) < before) { mp = test; moved = true; break; }
+                    if (badEnergy(test) < e0) { mp = test; moved = true; break; }
                     alpha *= 0.5f;
                 }
                 ++repairIt;
+                const int now = badCount(mp);
+                if (now < bestBad) { bestBad = now; bestMp = mp; }
                 if (!moved) break;
             }
         }
         if (done < 1.0f - 1.0e-4f && stalled < 0) stalled = (int)(done * 100.0f);
+        if (kPathFree && !bestMp.empty() && bestBad < badCount(mp)) mp = bestMp;
         adaptedRest.assign(n, Vec3{0,0,0});
         for (size_t i = 0; i < n; ++i) adaptedRest[i] = mp[mnode[i]];
         // Quanto o no material se afasta do suporte de cada membro fixo: se
