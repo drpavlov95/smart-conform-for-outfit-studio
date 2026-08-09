@@ -10636,14 +10636,11 @@ static void PathBPolar3(const float M[9], float R[9]) {
 // A rotacao propria mais proxima troca o sinal da direcao singular MENOS
 // significativa - e e justamente o residuo grande que ela deixa que empurra o
 // triangulo de volta para fora da dobra.
-static void PathBNearestRotation3(const float M[9], float R[9]) {
-    double S[3][3] = {};                      // S = M^T M, simetrica PSD
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            for (int k = 0; k < 3; ++k)
-                S[i][j] += (double)M[k*3+i] * M[k*3+j];
-
-    double V[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+// Diagonalizacao de simetrica 3x3 por rotacoes de Jacobi. S entra e sai
+// diagonal (autovalores em S[i][i]); V acumula os autovetores em coluna.
+static void PathBJacobiSym3(double S[3][3], double V[3][3]) {
+    V[0][0] = V[1][1] = V[2][2] = 1.0;
+    V[0][1] = V[0][2] = V[1][0] = V[1][2] = V[2][0] = V[2][1] = 0.0;
     for (int sweep = 0; sweep < 12; ++sweep) {
         double off = 0.0;
         for (int i = 0; i < 3; ++i)
@@ -10674,6 +10671,17 @@ static void PathBNearestRotation3(const float M[9], float R[9]) {
             }
         }
     }
+}
+
+static void PathBNearestRotation3(const float M[9], float R[9]) {
+    double S[3][3] = {};                      // S = M^T M, simetrica PSD
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k)
+                S[i][j] += (double)M[k*3+i] * M[k*3+j];
+
+    double V[3][3];
+    PathBJacobiSym3(S, V);
 
     double sig[3] = {std::sqrt(std::max(S[0][0], 0.0)),
                      std::sqrt(std::max(S[1][1], 0.0)),
@@ -11958,6 +11966,184 @@ static bool PathBSimV2Solve(
             ++seeds;
         }
 
+        // ---- 1b) GRADUACAO AFIM (DRAPE_MATERIAL_AFFINE) --------------------
+        //
+        // A deformacao que os apoios medem tem duas partes de natureza
+        // diferente:
+        //
+        //     deformacao do apoio  =  redimensionamento coerente da peca
+        //                          +  impressao local daquele corpo
+        //
+        // Propagar a soma e o que o harmonico faz (leva a barriga inteira para
+        // dentro do painel); propagar nada e o localizado. Graduar e propagar
+        // SO a primeira parcela - que e exatamente a componente afim.
+        //
+        // Por regiao material, o melhor mapa linear A que explica como os
+        // triangulos APOIADOS foram redimensionados, minimos quadrados
+        // ponderados por area sobre as arestas:
+        //
+        //     min_A  sum_t area_t * sum_e | A e_autorada - e_suporte |^2
+        //     =>     A ( sum w e e^T ) = ( sum w f e^T )
+        //
+        // Descartada a rotacao global (A = R S, giro nao e mudanca de
+        // material), S vira o alvo da regiao inteira. O resultado e a peca
+        // autorada sob uma transformacao linear de R^3 - e a imagem linear de
+        // uma superficie embutivel e embutivel, entao esta formulacao nao pode
+        // pedir uma metrica que so se realize ondulando. Era essa a suspeita
+        // sobre o screened, e este experimento e o teste dela.
+        //
+        // LIMITACAO DECLARADA DA v0, duas: (1) um A unico em WORLD-SPACE nao
+        // representa perfeitamente um resize material de uma superficie curva,
+        // porque cada triangulo tem seu proprio frame tangente; (2) componente
+        // conexo == regiao de graduacao e HIPOTESE - uma costura pode ligar
+        // corpete e saia, que graduam diferente. Se a candidate falhar, essas
+        // duas sao suspeitas antes de "afim e falso".
+        const bool kAffine = EnvToggle("DRAPE_MATERIAL_AFFINE", false);
+        std::vector<uint32_t> regionOf((size_t)M, 0);
+        std::vector<std::array<double, 9>> regionS;
+        int regionCount = 0;
+        if (kAffine) {
+            std::vector<uint32_t> par((size_t)M);
+            for (uint32_t m = 0; m < M; ++m) par[m] = m;
+            std::function<uint32_t(uint32_t)> fr = [&](uint32_t a) {
+                while (par[a] != a) { par[a] = par[par[a]]; a = par[a]; }
+                return a;
+            };
+            for (const auto& t : tris) {
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                par[fr(mnode[t[0]])] = fr(mnode[t[1]]);
+                par[fr(mnode[t[1]])] = fr(mnode[t[2]]);
+            }
+            std::unordered_map<uint32_t, uint32_t> pack;
+            for (uint32_t m = 0; m < M; ++m) {
+                const uint32_t root = fr(m);
+                auto it = pack.find(root);
+                if (it == pack.end()) { pack[root] = (uint32_t)regionCount; ++regionCount; }
+                regionOf[m] = pack[fr(m)];
+            }
+
+            // normais e RHS por regiao, mais um acumulador da malha inteira
+            // para regiao sem apoio nenhum
+            const int slots = regionCount + 1;
+            std::vector<std::array<double, 9>> Nrm((size_t)slots, {0,0,0,0,0,0,0,0,0});
+            std::vector<std::array<double, 9>> Rhs((size_t)slots, {0,0,0,0,0,0,0,0,0});
+            std::vector<double> supArea((size_t)slots, 0.0), totArea((size_t)slots, 0.0);
+            std::vector<int> supTris((size_t)slots, 0);
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                const auto& t = tris[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                const Vec3 e1 = Sub(baseVerts[t[1]], baseVerts[t[0]]);
+                const Vec3 e2 = Sub(baseVerts[t[2]], baseVerts[t[0]]);
+                const double a = 0.5 * Len(Cross(e1, e2));
+                const uint32_t rg = regionOf[mnode[t[0]]];
+                totArea[rg] += a; totArea[regionCount] += a;
+                if (!triSupported[ti]) continue;
+                supArea[rg] += a; supArea[regionCount] += a;
+                ++supTris[rg]; ++supTris[regionCount];
+                const Vec3 f1 = Sub(support[t[1]], support[t[0]]);
+                const Vec3 f2 = Sub(support[t[2]], support[t[0]]);
+                const Vec3 E[2] = {e1, e2}, F[2] = {f1, f2};
+                for (int k = 0; k < 2; ++k) {
+                    const double ev[3] = {E[k].x, E[k].y, E[k].z};
+                    const double fv[3] = {F[k].x, F[k].y, F[k].z};
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j) {
+                            Nrm[rg][i*3+j] += a * ev[i] * ev[j];
+                            Rhs[rg][i*3+j] += a * fv[i] * ev[j];
+                            Nrm[regionCount][i*3+j] += a * ev[i] * ev[j];
+                            Rhs[regionCount][i*3+j] += a * fv[i] * ev[j];
+                        }
+                }
+            }
+
+            regionS.assign((size_t)slots, {1,0,0,0,1,0,0,0,1});
+            std::vector<double> isoOf((size_t)slots, 0.0);
+            for (int rg = 0; rg < slots; ++rg) {
+                double N[9], B[9];
+                for (int k = 0; k < 9; ++k) { N[k] = Nrm[rg][k]; B[k] = Rhs[rg][k]; }
+                const double tr = N[0] + N[4] + N[8];
+                if (!(tr > 1.0e-12) || supTris[rg] == 0) continue;
+                // As arestas de um painel PLANO nao geram as tres direcoes, entao
+                // o sistema normal e deficiente de posto. Cresta em direcao a
+                // IDENTIDADE: a direcao sem dado recebe "nao mude", nunca lixo.
+                const double ridge = 1.0e-3 * tr / 3.0;
+                for (int i = 0; i < 3; ++i) {
+                    N[i*3+i] += ridge;
+                    B[i*3+i] += ridge;
+                }
+                const double det =
+                    N[0]*(N[4]*N[8]-N[5]*N[7]) - N[1]*(N[3]*N[8]-N[5]*N[6]) +
+                    N[2]*(N[3]*N[7]-N[4]*N[6]);
+                if (std::fabs(det) < 1.0e-18) continue;
+                const double id = 1.0 / det;
+                const double Inv[9] = {
+                    (N[4]*N[8]-N[5]*N[7])*id, (N[2]*N[7]-N[1]*N[8])*id, (N[1]*N[5]-N[2]*N[4])*id,
+                    (N[5]*N[6]-N[3]*N[8])*id, (N[0]*N[8]-N[2]*N[6])*id, (N[2]*N[3]-N[0]*N[5])*id,
+                    (N[3]*N[7]-N[4]*N[6])*id, (N[1]*N[6]-N[0]*N[7])*id, (N[0]*N[4]-N[1]*N[3])*id};
+                float A[9];
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) {
+                        double acc = 0.0;
+                        for (int k = 0; k < 3; ++k) acc += B[i*3+k] * Inv[k*3+j];
+                        A[i*3+j] = (float)acc;
+                    }
+                // A = R S. O giro global da peca nao e deformacao de material.
+                float R[9];
+                PathBNearestRotation3(A, R);
+                double Sm[3][3];
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) {
+                        double acc = 0.0;
+                        for (int k = 0; k < 3; ++k) acc += (double)R[k*3+i] * A[k*3+j];
+                        Sm[i][j] = acc;
+                    }
+                for (int i = 0; i < 3; ++i)
+                    for (int j = i + 1; j < 3; ++j) {
+                        const double s = 0.5 * (Sm[i][j] + Sm[j][i]);
+                        Sm[i][j] = Sm[j][i] = s;
+                    }
+                double V[3][3];
+                double D[3][3] = {{Sm[0][0],Sm[0][1],Sm[0][2]},
+                                  {Sm[1][0],Sm[1][1],Sm[1][2]},
+                                  {Sm[2][0],Sm[2][1],Sm[2][2]}};
+                PathBJacobiSym3(D, V);
+                const double lam[3] = {
+                    ClampRange((float)D[0][0], kMetricMin, kMetricMax),
+                    ClampRange((float)D[1][1], kMetricMin, kMetricMax),
+                    ClampRange((float)D[2][2], kMetricMin, kMetricMax)};
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) {
+                        double acc = 0.0;
+                        for (int k = 0; k < 3; ++k) acc += V[i][k] * lam[k] * V[j][k];
+                        regionS[rg][i*3+j] = acc;
+                    }
+                isoOf[rg] = det / std::pow(tr / 3.0, 3.0);   // 1 = isotropico, 0 = degenerado
+            }
+            for (int rg = 0; rg < regionCount; ++rg) {
+                if (supTris[rg] == 0) regionS[rg] = regionS[regionCount];
+            }
+            // sanity, nao investigacao: as maiores regioes
+            std::vector<int> order(regionCount);
+            for (int i = 0; i < regionCount; ++i) order[i] = i;
+            std::sort(order.begin(), order.end(),
+                      [&](int a, int b) { return totArea[a] > totArea[b]; });
+            for (int k = 0; k < (int)order.size() && k < 4; ++k) {
+                const int rg = order[k];
+                double D2[3][3] = {{regionS[rg][0],regionS[rg][1],regionS[rg][2]},
+                                   {regionS[rg][3],regionS[rg][4],regionS[rg][5]},
+                                   {regionS[rg][6],regionS[rg][7],regionS[rg][8]}};
+                double V2[3][3];
+                PathBJacobiSym3(D2, V2);
+                fprintf(stderr, "  AFIM regiao=%d area=%.0f apoiada=%.0f%% tris=%d "
+                        "cond=%.3f estiramentos=[%.3f %.3f %.3f]%s\n",
+                        rg, totArea[rg],
+                        totArea[rg] > 0 ? 100.0 * supArea[rg] / totArea[rg] : 0.0,
+                        supTris[rg], isoOf[rg],
+                        D2[0][0], D2[1][1], D2[2][2],
+                        supTris[rg] == 0 ? "  (herdou da malha)" : "");
+            }
+        }
+
         // ---- 2) LAPLACIANO COTANGENTE do mesh autorado ----
         // Discretizacao ciente de area e de angulo, nao 1/comprimento: e a forma
         // padrao e correta de um Laplaciano em superficie triangulada, e nao
@@ -12095,7 +12281,7 @@ static bool PathBSimV2Solve(
             for (uint32_t m = 0; m < M; ++m) screen[m] = screenMu * nodeArea[m];
         }
         int harmIt = 0; double harmRes = 0.0;
-        for (int q = 0; kLocalized ? false : q < 6; ++q) {
+        for (int q = 0; (kLocalized || kAffine) ? false : q < 6; ++q) {
             std::vector<double> xv((size_t)M, 0.0), fv((size_t)M, 0.0);
             for (uint32_t m = 0; m < M; ++m) {
                 fv[m] = Cm[m][q];
@@ -12147,7 +12333,16 @@ static bool PathBSimV2Solve(
                 sa = 1.0f; sb = 0.0f; sc = 1.0f;
                 ++degen;   // C nao positiva-definida: cai para ARAP puro
             }
+            // No modo afim o alvo nao passa por frame tangente nenhum: e a
+            // aresta autorada sob o S da regiao, isto e, a peca inteira sob uma
+            // transformacao linear de R^3.
             auto apply2 = [&](const Vec3& e) {
+                if (kAffine) {
+                    const auto& S3 = regionS[regionOf[mnode[t[0]]]];
+                    return Vec3{(float)(S3[0]*e.x + S3[1]*e.y + S3[2]*e.z),
+                                (float)(S3[3]*e.x + S3[4]*e.y + S3[5]*e.z),
+                                (float)(S3[6]*e.x + S3[7]*e.y + S3[8]*e.z)};
+                }
                 const float p = Dot(e, uu), q2 = Dot(e, vv);
                 const float np = sa * p + sb * q2, nq = sb * p + sc * q2;
                 return Add(Scale(uu, np), Scale(vv, nq));
@@ -12550,7 +12745,7 @@ static bool PathBSimV2Solve(
         HLog("path-b-shell: FASE1 nos=%u sementes=%d harmCG(it=%d res=%.2e) "
              "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG(it=%d res=%.2e) recuos=%d carga=%.0f%% "
              "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)",
-             M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
+             M, seeds, harmIt, harmRes, kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
              globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
@@ -12558,7 +12753,7 @@ static bool PathBSimV2Solve(
         fprintf(stderr, "FASE1 nos=%u sementes=%d harmCG it=%d res=%.2e "
                 "modo=%s lambda=%.1f razao[%.3f..%.3f med=%.3f] globalCG it=%d res=%.2e recuos=%d carga=%.0f%% "
                 "arap=%d semAlvo=%d reflexoes=%d picoNoCaminho=%d reparo=%d->%d(%dit) facesRuins=%d (antes da ancora=%d desvio=%.3f ancorasFora=%d gruposMistos=%d supportRuim=%d/rigido=%d)\n",
-                M, seeds, harmIt, harmRes, kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico"),
+                M, seeds, harmIt, harmRes, kAffine ? "afim" : (kScreened ? "screened" : (kLocalized ? "localizado" : "harmonico")),
              kScreened ? lambda : 0.0, rMin, rMax, rN ? rSum / rN : 1.0,
                 globIt, globRes, rejected, done * 100.0f, degen, noTgt, reflections, worstOnPath, repairFrom, badCount(mp), repairIt,
              badNew,
