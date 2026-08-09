@@ -11968,7 +11968,7 @@ static bool PathBSimV2Solve(
 
         // ---- 1b) GRADUACAO AFIM (DRAPE_MATERIAL_AFFINE) --------------------
         //
-        // A deformacao que os apoios medem tem duas partes de natureza
+        // A deformacao que os apoios medem tem duas parcelas de natureza
         // diferente:
         //
         //     deformacao do apoio  =  redimensionamento coerente da peca
@@ -11978,31 +11978,44 @@ static bool PathBSimV2Solve(
         // dentro do painel); propagar nada e o localizado. Graduar e propagar
         // SO a primeira parcela - que e exatamente a componente afim.
         //
-        // Por regiao material, o melhor mapa linear A que explica como os
-        // triangulos APOIADOS foram redimensionados, minimos quadrados
-        // ponderados por area sobre as arestas:
+        // O melhor mapa linear A que explica como a estrutura foi
+        // redimensionada, minimos quadrados ponderados sobre arestas:
         //
-        //     min_A  sum_t area_t * sum_e | A e_autorada - e_suporte |^2
+        //     min_A  sum  w | A e_autorada - e_morphada |^2
         //     =>     A ( sum w e e^T ) = ( sum w f e^T )
         //
         // Descartada a rotacao global (A = R S, giro nao e mudanca de
-        // material), S vira o alvo da regiao inteira. O resultado e a peca
-        // autorada sob uma transformacao linear de R^3 - e a imagem linear de
-        // uma superficie embutivel e embutivel, entao esta formulacao nao pode
-        // pedir uma metrica que so se realize ondulando. Era essa a suspeita
-        // sobre o screened, e este experimento e o teste dela.
+        // material), S vira o alvo. O resultado e a peca autorada sob uma
+        // transformacao linear de R^3, e imagem linear de superficie embutivel
+        // e embutivel: esta formulacao nao consegue pedir uma metrica que so se
+        // realize ondulando.
         //
-        // LIMITACAO DECLARADA DA v0, duas: (1) um A unico em WORLD-SPACE nao
-        // representa perfeitamente um resize material de uma superficie curva,
-        // porque cada triangulo tem seu proprio frame tangente; (2) componente
-        // conexo == regiao de graduacao e HIPOTESE - uma costura pode ligar
-        // corpete e saia, que graduam diferente. Se a candidate falhar, essas
-        // duas sao suspeitas antes de "afim e falso".
+        // RESSALVA que a v0 me ensinou a nao repetir: isso torna compativel o
+        // CAMPO DE METRICA, nao o problema inteiro. As ancoras continuam
+        // impondo as posicoes completas do host, incluindo o residuo nao-afim
+        // que o alvo descarta. Interior e fronteira podem seguir se
+        // contradizendo, e as inversoes que sobram sao suspeitas disso.
+        //
+        // DOMINIO DO GRADING. Na v0 a regiao era o componente conexo do grafo
+        // material, e medi que as costuras soldam corpete, mangas e saia numa
+        // regiao so: um unico A, ajustado sobre 2045 triangulos apoiados de
+        // torso e busto, aplicado tambem a saia livre. A peca saiu graduada
+        // demais em bloco. Com DRAPE_MATERIAL_AFFINE_FRONTIER a regiao passa a
+        // ser cada componente conexo de material LIVRE, e ela aprende o resize
+        // apenas da sua FRONTEIRA DE ATTACHMENT - o lugar onde ela esta
+        // costurada. A pergunta que o painel responde deixa de ser "quanto a
+        // roupa toda cresceu" e passa a ser "o que prende voce ficou de que
+        // tamanho".
         const bool kAffine = EnvToggle("DRAPE_MATERIAL_AFFINE", false);
-        std::vector<uint32_t> regionOf((size_t)M, 0);
+        const bool kFrontier = EnvToggle("DRAPE_MATERIAL_AFFINE_FRONTIER", false);
+        std::vector<int> triRegion(tris.size(), -1);
         std::vector<std::array<double, 9>> regionS;
         int regionCount = 0;
         if (kAffine) {
+            std::vector<uint8_t> nodeFixed((size_t)M, 0);
+            for (size_t i = 0; i < n; ++i)
+                if (fixed[i]) nodeFixed[mnode[i]] = 1;
+
             std::vector<uint32_t> par((size_t)M);
             for (uint32_t m = 0; m < M; ++m) par[m] = m;
             std::function<uint32_t(uint32_t)> fr = [&](uint32_t a) {
@@ -12011,136 +12024,194 @@ static bool PathBSimV2Solve(
             };
             for (const auto& t : tris) {
                 if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
-                par[fr(mnode[t[0]])] = fr(mnode[t[1]]);
-                par[fr(mnode[t[1]])] = fr(mnode[t[2]]);
+                uint32_t prev = 0xFFFFFFFFu;
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t m = mnode[t[k]];
+                    // no modo fronteira so o material LIVRE forma regiao; a
+                    // costura nao pode mais unir saia e corpete numa coisa so
+                    if (kFrontier && nodeFixed[m]) continue;
+                    if (prev != 0xFFFFFFFFu) par[fr(prev)] = fr(m);
+                    prev = m;
+                }
             }
-            std::unordered_map<uint32_t, uint32_t> pack;
+            std::unordered_map<uint32_t, int> pack;
+            std::vector<int> regionOfNode((size_t)M, -1);
             for (uint32_t m = 0; m < M; ++m) {
+                if (kFrontier && nodeFixed[m]) continue;
                 const uint32_t root = fr(m);
                 auto it = pack.find(root);
-                if (it == pack.end()) { pack[root] = (uint32_t)regionCount; ++regionCount; }
-                regionOf[m] = pack[fr(m)];
+                if (it == pack.end()) { pack[root] = regionCount; ++regionCount; }
+                regionOfNode[m] = pack[root];
+            }
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                const auto& t = tris[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const int rg = regionOfNode[mnode[t[k]]];
+                    if (rg >= 0) { triRegion[ti] = rg; break; }
+                }
             }
 
-            // normais e RHS por regiao, mais um acumulador da malha inteira
-            // para regiao sem apoio nenhum
+            // slot extra = malha inteira, para regiao sem dado proprio
             const int slots = regionCount + 1;
+            const int GLOBAL = regionCount;
             std::vector<std::array<double, 9>> Nrm((size_t)slots, {0,0,0,0,0,0,0,0,0});
             std::vector<std::array<double, 9>> Rhs((size_t)slots, {0,0,0,0,0,0,0,0,0});
-            std::vector<double> supArea((size_t)slots, 0.0), totArea((size_t)slots, 0.0);
-            std::vector<int> supTris((size_t)slots, 0);
+            std::vector<double> totArea((size_t)slots, 0.0);
+            std::vector<int> samples((size_t)slots, 0);
+
+            auto feed = [&](int rg, const Vec3& e, const Vec3& f, double w) {
+                const double ev[3] = {e.x, e.y, e.z};
+                const double fv[3] = {f.x, f.y, f.z};
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) {
+                        Nrm[rg][a*3+b] += w * ev[a] * ev[b];
+                        Rhs[rg][a*3+b] += w * fv[a] * ev[b];
+                    }
+                ++samples[rg];
+            };
+
             for (size_t ti = 0; ti < tris.size(); ++ti) {
                 const auto& t = tris[ti];
                 if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
                 const Vec3 e1 = Sub(baseVerts[t[1]], baseVerts[t[0]]);
                 const Vec3 e2 = Sub(baseVerts[t[2]], baseVerts[t[0]]);
-                const double a = 0.5 * Len(Cross(e1, e2));
-                const uint32_t rg = regionOf[mnode[t[0]]];
-                totArea[rg] += a; totArea[regionCount] += a;
-                if (!triSupported[ti]) continue;
-                supArea[rg] += a; supArea[regionCount] += a;
-                ++supTris[rg]; ++supTris[regionCount];
-                const Vec3 f1 = Sub(support[t[1]], support[t[0]]);
-                const Vec3 f2 = Sub(support[t[2]], support[t[0]]);
-                const Vec3 E[2] = {e1, e2}, F[2] = {f1, f2};
-                for (int k = 0; k < 2; ++k) {
-                    const double ev[3] = {E[k].x, E[k].y, E[k].z};
-                    const double fv[3] = {F[k].x, F[k].y, F[k].z};
-                    for (int i = 0; i < 3; ++i)
-                        for (int j = 0; j < 3; ++j) {
-                            Nrm[rg][i*3+j] += a * ev[i] * ev[j];
-                            Rhs[rg][i*3+j] += a * fv[i] * ev[j];
-                            Nrm[regionCount][i*3+j] += a * ev[i] * ev[j];
-                            Rhs[regionCount][i*3+j] += a * fv[i] * ev[j];
-                        }
+                const double area = 0.5 * Len(Cross(e1, e2));
+                if (triRegion[ti] >= 0) totArea[triRegion[ti]] += area;
+                totArea[GLOBAL] += area;
+
+                if (kFrontier) {
+                    // a fronteira e montada fora deste laco, sobre o conjunto
+                    // completo de nos presos vizinhos da regiao
+                } else {
+                    if (!triSupported[ti]) continue;
+                    const Vec3 f1 = Sub(support[t[1]], support[t[0]]);
+                    const Vec3 f2 = Sub(support[t[2]], support[t[0]]);
+                    const int rg = triRegion[ti] >= 0 ? triRegion[ti] : GLOBAL;
+                    feed(rg, e1, f1, area); feed(rg, e2, f2, area);
+                    if (rg != GLOBAL) { feed(GLOBAL, e1, f1, area); feed(GLOBAL, e2, f2, area); }
+                }
+            }
+
+            if (kFrontier) {
+                // FRONTEIRA DE ATTACHMENT, completa. Contar so as arestas
+                // presas DENTRO de triangulos da regiao pega apenas os
+                // triangulos 2-fixos-1-livre e perde o resto da linha de
+                // costura: na primeira medicao isso deu 18 amostras para uma
+                // regiao de 79% da area, e o ajuste virou ruido de um trecho
+                // esticado. O conjunto certo e "todo no preso vizinho da
+                // regiao", e todas as arestas da malha entre eles - o anel
+                // inteiro pelo qual o painel se segura.
+                std::vector<std::vector<int>> nodeFrontier((size_t)M);
+                for (size_t ti = 0; ti < tris.size(); ++ti) {
+                    const int rg = triRegion[ti];
+                    if (rg < 0) continue;
+                    const auto& t = tris[ti];
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    for (int k = 0; k < 3; ++k) {
+                        const uint32_t m = mnode[t[k]];
+                        if (!nodeFixed[m]) continue;
+                        auto& v = nodeFrontier[m];
+                        if (std::find(v.begin(), v.end(), rg) == v.end()) v.push_back(rg);
+                    }
+                }
+                for (const auto& ed : edges) {
+                    if (ed.a >= n || ed.b >= n) continue;
+                    if (!fixed[ed.a] || !fixed[ed.b]) continue;
+                    const uint32_t ma = mnode[ed.a], mb = mnode[ed.b];
+                    const Vec3 e = Sub(baseVerts[ed.b], baseVerts[ed.a]);
+                    const Vec3 f = Sub(support[ed.b], support[ed.a]);
+                    const double w = Len(e);
+                    if (w < 1.0e-9) continue;
+                    for (int rg : nodeFrontier[ma]) {
+                        const auto& vb2 = nodeFrontier[mb];
+                        if (std::find(vb2.begin(), vb2.end(), rg) == vb2.end()) continue;
+                        feed(rg, e, f, w);
+                    }
+                    feed(GLOBAL, e, f, w);
                 }
             }
 
             regionS.assign((size_t)slots, {1,0,0,0,1,0,0,0,1});
             std::vector<double> isoOf((size_t)slots, 0.0);
             for (int rg = 0; rg < slots; ++rg) {
-                double N[9], B[9];
-                for (int k = 0; k < 9; ++k) { N[k] = Nrm[rg][k]; B[k] = Rhs[rg][k]; }
+                if (samples[rg] == 0) continue;
+                double N[9], Bv[9];
+                for (int k = 0; k < 9; ++k) { N[k] = Nrm[rg][k]; Bv[k] = Rhs[rg][k]; }
                 const double tr = N[0] + N[4] + N[8];
-                if (!(tr > 1.0e-12) || supTris[rg] == 0) continue;
-                // As arestas de um painel PLANO nao geram as tres direcoes, entao
-                // o sistema normal e deficiente de posto. Cresta em direcao a
-                // IDENTIDADE: a direcao sem dado recebe "nao mude", nunca lixo.
+                if (!(tr > 1.0e-12)) continue;
+                // Uma fronteira e uma CURVA: suas arestas nao geram as tres
+                // direcoes, e o sistema normal nasce deficiente de posto. Crista
+                // em direcao a IDENTIDADE - a direcao sem dado recebe "nao
+                // mude", nunca lixo. Numa cintura isso significa aprender o
+                // alargamento em volta e nao inventar crescimento vertical.
                 const double ridge = 1.0e-3 * tr / 3.0;
-                for (int i = 0; i < 3; ++i) {
-                    N[i*3+i] += ridge;
-                    B[i*3+i] += ridge;
-                }
+                for (int a = 0; a < 3; ++a) { N[a*3+a] += ridge; Bv[a*3+a] += ridge; }
                 const double det =
                     N[0]*(N[4]*N[8]-N[5]*N[7]) - N[1]*(N[3]*N[8]-N[5]*N[6]) +
                     N[2]*(N[3]*N[7]-N[4]*N[6]);
                 if (std::fabs(det) < 1.0e-18) continue;
-                const double id = 1.0 / det;
+                const double idet = 1.0 / det;
                 const double Inv[9] = {
-                    (N[4]*N[8]-N[5]*N[7])*id, (N[2]*N[7]-N[1]*N[8])*id, (N[1]*N[5]-N[2]*N[4])*id,
-                    (N[5]*N[6]-N[3]*N[8])*id, (N[0]*N[8]-N[2]*N[6])*id, (N[2]*N[3]-N[0]*N[5])*id,
-                    (N[3]*N[7]-N[4]*N[6])*id, (N[1]*N[6]-N[0]*N[7])*id, (N[0]*N[4]-N[1]*N[3])*id};
-                float A[9];
-                for (int i = 0; i < 3; ++i)
-                    for (int j = 0; j < 3; ++j) {
+                    (N[4]*N[8]-N[5]*N[7])*idet, (N[2]*N[7]-N[1]*N[8])*idet, (N[1]*N[5]-N[2]*N[4])*idet,
+                    (N[5]*N[6]-N[3]*N[8])*idet, (N[0]*N[8]-N[2]*N[6])*idet, (N[2]*N[3]-N[0]*N[5])*idet,
+                    (N[3]*N[7]-N[4]*N[6])*idet, (N[1]*N[6]-N[0]*N[7])*idet, (N[0]*N[4]-N[1]*N[3])*idet};
+                float Amat[9];
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) {
                         double acc = 0.0;
-                        for (int k = 0; k < 3; ++k) acc += B[i*3+k] * Inv[k*3+j];
-                        A[i*3+j] = (float)acc;
+                        for (int k = 0; k < 3; ++k) acc += Bv[a*3+k] * Inv[k*3+b];
+                        Amat[a*3+b] = (float)acc;
                     }
-                // A = R S. O giro global da peca nao e deformacao de material.
-                float R[9];
-                PathBNearestRotation3(A, R);
-                double Sm[3][3];
-                for (int i = 0; i < 3; ++i)
-                    for (int j = 0; j < 3; ++j) {
+                float Rot[9];
+                PathBNearestRotation3(Amat, Rot);
+                double D[3][3];
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) {
                         double acc = 0.0;
-                        for (int k = 0; k < 3; ++k) acc += (double)R[k*3+i] * A[k*3+j];
-                        Sm[i][j] = acc;
+                        for (int k = 0; k < 3; ++k) acc += (double)Rot[k*3+a] * Amat[k*3+b];
+                        D[a][b] = acc;
                     }
-                for (int i = 0; i < 3; ++i)
-                    for (int j = i + 1; j < 3; ++j) {
-                        const double s = 0.5 * (Sm[i][j] + Sm[j][i]);
-                        Sm[i][j] = Sm[j][i] = s;
+                for (int a = 0; a < 3; ++a)
+                    for (int b = a + 1; b < 3; ++b) {
+                        const double sy = 0.5 * (D[a][b] + D[b][a]);
+                        D[a][b] = D[b][a] = sy;
                     }
                 double V[3][3];
-                double D[3][3] = {{Sm[0][0],Sm[0][1],Sm[0][2]},
-                                  {Sm[1][0],Sm[1][1],Sm[1][2]},
-                                  {Sm[2][0],Sm[2][1],Sm[2][2]}};
                 PathBJacobiSym3(D, V);
                 const double lam[3] = {
                     ClampRange((float)D[0][0], kMetricMin, kMetricMax),
                     ClampRange((float)D[1][1], kMetricMin, kMetricMax),
                     ClampRange((float)D[2][2], kMetricMin, kMetricMax)};
-                for (int i = 0; i < 3; ++i)
-                    for (int j = 0; j < 3; ++j) {
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) {
                         double acc = 0.0;
-                        for (int k = 0; k < 3; ++k) acc += V[i][k] * lam[k] * V[j][k];
-                        regionS[rg][i*3+j] = acc;
+                        for (int k = 0; k < 3; ++k) acc += V[a][k] * lam[k] * V[b][k];
+                        regionS[rg][a*3+b] = acc;
                     }
-                isoOf[rg] = det / std::pow(tr / 3.0, 3.0);   // 1 = isotropico, 0 = degenerado
+                isoOf[rg] = det / std::pow(tr / 3.0, 3.0);
             }
-            for (int rg = 0; rg < regionCount; ++rg) {
-                if (supTris[rg] == 0) regionS[rg] = regionS[regionCount];
-            }
-            // sanity, nao investigacao: as maiores regioes
+            for (int rg = 0; rg < regionCount; ++rg)
+                if (samples[rg] == 0) regionS[rg] = regionS[GLOBAL];
+
             std::vector<int> order(regionCount);
-            for (int i = 0; i < regionCount; ++i) order[i] = i;
+            for (int i2 = 0; i2 < regionCount; ++i2) order[i2] = i2;
             std::sort(order.begin(), order.end(),
                       [&](int a, int b) { return totArea[a] > totArea[b]; });
-            for (int k = 0; k < (int)order.size() && k < 4; ++k) {
+            fprintf(stderr, "  AFIM modo=%s regioes=%d\n",
+                    kFrontier ? "fronteira" : "global", regionCount);
+            for (int k = 0; k < (int)order.size() && k < 5; ++k) {
                 const int rg = order[k];
                 double D2[3][3] = {{regionS[rg][0],regionS[rg][1],regionS[rg][2]},
                                    {regionS[rg][3],regionS[rg][4],regionS[rg][5]},
                                    {regionS[rg][6],regionS[rg][7],regionS[rg][8]}};
                 double V2[3][3];
                 PathBJacobiSym3(D2, V2);
-                fprintf(stderr, "  AFIM regiao=%d area=%.0f apoiada=%.0f%% tris=%d "
-                        "cond=%.3f estiramentos=[%.3f %.3f %.3f]%s\n",
-                        rg, totArea[rg],
-                        totArea[rg] > 0 ? 100.0 * supArea[rg] / totArea[rg] : 0.0,
-                        supTris[rg], isoOf[rg],
+                fprintf(stderr, "  AFIM regiao=%d area=%.0f amostras=%d cond=%.4f "
+                        "estiramentos=[%.3f %.3f %.3f]%s\n",
+                        rg, totArea[rg], samples[rg], isoOf[rg],
                         D2[0][0], D2[1][1], D2[2][2],
-                        supTris[rg] == 0 ? "  (herdou da malha)" : "");
+                        samples[rg] == 0 ? "  (herdou da malha)" : "");
             }
         }
 
@@ -12338,7 +12409,8 @@ static bool PathBSimV2Solve(
             // transformacao linear de R^3.
             auto apply2 = [&](const Vec3& e) {
                 if (kAffine) {
-                    const auto& S3 = regionS[regionOf[mnode[t[0]]]];
+                    const int rg = triRegion[ti] >= 0 ? triRegion[ti] : regionCount;
+                    const auto& S3 = regionS[rg];
                     return Vec3{(float)(S3[0]*e.x + S3[1]*e.y + S3[2]*e.z),
                                 (float)(S3[3]*e.x + S3[4]*e.y + S3[5]*e.z),
                                 (float)(S3[6]*e.x + S3[7]*e.y + S3[8]*e.z)};
