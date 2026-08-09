@@ -12400,7 +12400,7 @@ static bool PathBSimV2Solve(
         // dependente de resolucao.
         std::vector<Vec3> warpY;
         int warpIt = 0; double warpRes = 0.0;
-        int warpBad = 0, warpOpen = 0, warpDir = 0;
+        int warpCollapse = 0, warpFlip = 0, warpOpen = 0, warpDir = 0;
         double warpSMin = 0.0, warpSMax = 0.0, warpSMed = 1.0;
         if (kWarp) {
             // borda ABERTA: par de nos materiais que so aparece em um triangulo.
@@ -12515,7 +12515,13 @@ static bool PathBSimV2Solve(
                 const Vec3 an = Cross(e1, e2), gn = Cross(g1, g2);
                 const float a0 = Len(an), a1 = Len(gn);
                 if (a0 <= 1.0e-9f) continue;
-                if (Dot(an, gn) <= 0.0f || a1 < 0.10f * a0) ++warpBad;
+                // COLAPSO e VIRADA nao sao a mesma evidencia. Perda de posto
+                // (area -> 0) e inequivoca. Ja Dot(n_autorada, n_warp) < 0 numa
+                // superficie 2D em R^3 tambem dispara por rotacao grande, que
+                // nao quebra injetividade local nenhuma - F^T F nem enxerga
+                // rotacao. Contar as duas juntas confundia diagnostico.
+                if (a1 < 0.10f * a0) ++warpCollapse;
+                else if (Dot(an, gn) <= 0.0f) ++warpFlip;
                 stretches.push_back(std::sqrt(a1 / a0));
             }
             if (!stretches.empty()) {
@@ -12525,8 +12531,9 @@ static bool PathBSimV2Solve(
                 warpSMed = stretches[stretches.size() / 2];
             }
             fprintf(stderr, "  WARP nos=%u dirichlet=%d (borda aberta=%d) CG it=%d res=%.2e "
-                    "facesRuinsNoWarp=%d raizArea[%.3f..%.3f med=%.3f]\n",
-                    M, warpDir, warpOpen, warpIt, warpRes, warpBad,
+                    "colapso=%d virada=%d raizArea[%.3f..%.3f med=%.3f]\n",
+                    M, warpDir, warpOpen, warpIt, warpRes,
+                    warpCollapse, warpFlip,
                     warpSMin, warpSMax, warpSMed);
         }
 
@@ -12534,6 +12541,10 @@ static bool PathBSimV2Solve(
         struct TriTarget { Vec3 T1, T2, A1, A2; float w0, w1, w2; uint8_t ok; };
         std::vector<TriTarget> tgt(tris.size());
         double rMin = 1e9, rMax = -1e9, rSum = 0.0; int rN = 0, degen = 0, noTgt = 0;
+        const bool kWarpClamp = !EnvToggle("DRAPE_MATERIAL_WARP_NOCLAMP", false);
+        int clampHits = 0, warpNonFinite = 0, warpExtreme = 0;
+        float clampMin = 1e9f, clampMax = -1e9f;
+        std::vector<double> witness;
         for (size_t ti = 0; ti < tris.size(); ++ti) {
             tgt[ti].ok = 0;
             const auto& t = tris[ti];
@@ -12589,10 +12600,40 @@ static bool PathBSimV2Solve(
             };
             float sa = 1.0f, sb = 0.0f, sc = 1.0f;
             if (kWarp) {
-                if (!PathBStretchClamp2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
-                                          kMetricMin, kMetricMax, sa, sb, sc)) {
+                // AQUI MORA A GARANTIA. "A metrica veio de uma superficie, logo
+                // e realizavel" so vale ATE esta linha: limitar os estiramentos
+                // principais de cada triangulo INDEPENDENTEMENTE nao preserva a
+                // existencia de um mapa global cujo campo metrico seja o
+                // resultado. Y e uma testemunha da metrica bruta; da metrica
+                // limitada, nao e testemunha de nada.
+                float l1, l2, vx, vy;
+                PathBSymEigen2x2(quad(uu, uu), quad(uu, vv), quad(vv, vv),
+                                 l1, l2, vx, vy);
+                if (!(l2 > 1.0e-12f) || !std::isfinite(l1) || !std::isfinite(l2)) {
                     sa = 1.0f; sb = 0.0f; sc = 1.0f;
                     ++degen;
+                    if (!std::isfinite(l1) || !std::isfinite(l2)) ++warpNonFinite;
+                } else {
+                    float s1 = std::sqrt(l1), s2 = std::sqrt(l2);
+                    clampMin = std::min(clampMin, s2);
+                    clampMax = std::max(clampMax, s1);
+                    const bool hit = (s1 > kMetricMax) || (s2 < kMetricMin) ||
+                                     (s2 > kMetricMax) || (s1 < kMetricMin);
+                    if (hit) ++clampHits;
+                    if (kWarpClamp) {
+                        s1 = ClampRange(s1, kMetricMin, kMetricMax);
+                        s2 = ClampRange(s2, kMetricMin, kMetricMax);
+                    } else {
+                        // sem o clamp de modelo, resta so a guarda absoluta de
+                        // sanidade numerica - nao e um alvo, e um aborto
+                        if (s1 > 1.0e3f || s2 > 1.0e3f) ++warpExtreme;
+                        s1 = ClampRange(s1, 1.0e-3f, 1.0e3f);
+                        s2 = ClampRange(s2, 1.0e-3f, 1.0e3f);
+                    }
+                    const float wx = -vy, wy = vx;
+                    sa = s1 * vx * vx + s2 * wx * wx;
+                    sb = s1 * vx * vy + s2 * wx * wy;
+                    sc = s1 * vy * vy + s2 * wy * wy;
                 }
             } else if (kScreened) {
                 // volta de log-strain para estiramento no plano DESTE triangulo
@@ -12620,6 +12661,26 @@ static bool PathBSimV2Solve(
             };
             tgt[ti].T1 = apply2(e1);
             tgt[ti].T2 = apply2(e2);
+            if (kWarp) {
+                // Y e a testemunha: se o alvo entregue ao local-global e mesmo
+                // a metrica de Y, o Gram das arestas de Y tem de bater com o
+                // Gram do alvo. Sem clamp isso deve ser ruido numerico; com
+                // clamp, o quanto nao bate e exatamente o quanto a garantia foi
+                // quebrada. Nao e detector novo: e a propriedade definidora
+                // desta arquitetura, medida.
+                const Vec3 g1 = Sub(warpY[t[1]], warpY[t[0]]);
+                const Vec3 g2 = Sub(warpY[t[2]], warpY[t[0]]);
+                const double gy[3] = {Dot(g1, g1), Dot(g1, g2), Dot(g2, g2)};
+                const double gt[3] = {Dot(tgt[ti].T1, tgt[ti].T1),
+                                      Dot(tgt[ti].T1, tgt[ti].T2),
+                                      Dot(tgt[ti].T2, tgt[ti].T2)};
+                double num = 0.0, den = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    num += (gy[k] - gt[k]) * (gy[k] - gt[k]);
+                    den += gy[k] * gy[k];
+                }
+                if (den > 1.0e-18) witness.push_back(std::sqrt(num / den));
+            }
             tgt[ti].A1 = e1;
             tgt[ti].A2 = e2;
             auto cotOf = [&](int k) {
@@ -12640,6 +12701,18 @@ static bool PathBSimV2Solve(
         }
 
         for (size_t ti = 0; ti < tgt.size(); ++ti) if (!tgt[ti].ok) ++noTgt;
+        if (kWarp) {
+            double wMed = 0.0, wMax = 0.0;
+            if (!witness.empty()) {
+                std::sort(witness.begin(), witness.end());
+                wMed = witness[witness.size() / 2];
+                wMax = witness.back();
+            }
+            fprintf(stderr, "  WARP alvo clamp=%s testemunha[med=%.2e max=%.2e] "
+                    "clampados=%d/%d estiramentoBruto[%.3f..%.3f] naoFinito=%d extremo=%d\n",
+                    kWarpClamp ? "ON" : "OFF", wMed, wMax, clampHits, (int)tgt.size(),
+                    clampMin, clampMax, warpNonFinite, warpExtreme);
+        }
 
         // ---- 4) realizacao local-global, preservando orientacao ----
         // local  : rotacao livre por triangulo (decomposicao polar)
@@ -12665,6 +12738,19 @@ static bool PathBSimV2Solve(
             mp[mnode[i]] = Add(mp[mnode[i]], baseVerts[i]); ++mc[mnode[i]];
         }
         for (uint32_t m = 0; m < M; ++m) if (mc[m]) mp[m] = Scale(mp[m], 1.0f / mc[m]);
+        // Partir de Y: se o alvo E a metrica de Y e as ancoras de Y ja sao o
+        // suporte, entao Y e uma solucao conhecida. Se o local-global nao a
+        // reconhece como energia baixa, a inconsistencia esta na interface
+        // entre extracao e realizacao, nao no modelo de roupa.
+        if (kWarp && EnvToggle("DRAPE_MATERIAL_WARP_INIT", false) && !warpY.empty()) {
+            for (uint32_t m = 0; m < M; ++m) mc[m] = 0;
+            for (uint32_t m = 0; m < M; ++m) mp[m] = Vec3{0, 0, 0};
+            for (size_t i = 0; i < n; ++i) {
+                mp[mnode[i]] = Add(mp[mnode[i]], warpY[i]); ++mc[mnode[i]];
+            }
+            for (uint32_t m = 0; m < M; ++m) if (mc[m]) mp[m] = Scale(mp[m], 1.0f / mc[m]);
+            anchorA = anchorB;          // ancoras ja no destino: carga cheia
+        }
         std::vector<Vec3> anchorP = anchorA;
 
         std::vector<Vec3> triNrm0(tris.size());
