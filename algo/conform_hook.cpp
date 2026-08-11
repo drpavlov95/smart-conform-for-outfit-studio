@@ -343,6 +343,38 @@ static int NormalizePreset(int preset);
 static float PresetFollowWeight(int preset, float rawWeight);
 static bool EnvToggle(const char* name, bool dflt);
 
+// MODO ESTRITO (M0a). Nao muda fisica nenhuma - muda a SEMANTICA DA PUBLICACAO,
+// que era o que estava impedindo qualquer experimento de significar alguma coisa.
+//
+// Tres defeitos medidos no log vivo de hoje, todos estruturais:
+//
+//   1. O portao do shell podia virar diagnostico ("sim-mode gates BYPASSED"), e
+//      o candidato invalido - ate 583 faces invertidas - virava o CHECKPOINT.
+//   2. O gate terminal reprovava 12 de 12 e o rollback restaurava justamente
+//      esse checkpoint que ninguem validou. Nao faltava transacao; a transacao
+//      estava ancorada no estado errado. Numa peca o log mostra a cauda melhor
+//      que a producao em TODOS os termos contados (flip 13 vs 19, pen 25 vs 46,
+//      facePen 519 vs 1109) sendo descartada de volta para um checkpoint com
+//      flip=54, e noutra de volta para um com flip=540.
+//   3. Recusar nao devolvia o vanilla: caia no fallback que escala o diff do
+//      host pela mascara. Entao "rollback foi para producao" nunca implicou
+//      "o OutfitStudio recebeu producao".
+//
+// Em estrito: o portao nao pode ser desligado, o rollback volta para a ENTRADA
+// DE PRODUCAO (a unica pose publicavel por construcao - o host ja a tem), e
+// recusa significa literalmente "Smart Conform nao aconteceu".
+//
+// O harness ignora flag files de proposito (o corpus tem de ser reproduzivel por
+// ambiente), entao la se liga com DRAPE_STRICT=1.
+static bool DrapeStrictMode() {
+    bool on = EnvToggle("DRAPE_STRICT", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+    if (DrapeFlagExists("strict_off.flag")) on = false;
+    else if (DrapeFlagExists("strict_on.flag")) on = true;
+#endif
+    return on;
+}
+
 static uint32_t EdgeKey(uint16_t a, uint16_t b) {
     if (a > b) std::swap(a, b);
     return (static_cast<uint32_t>(a) << 16) | b;
@@ -9623,6 +9655,45 @@ static bool PathBIntegrityNoWorse(
                entry.worstBodyFacePenetration + 1.0e-4f;
 }
 
+// A EXPRESSAO BOOLEANA QUE DECIDE PUBLICACAO, VISIVEL TERMO A TERMO.
+//
+// Nao e detector novo e nao muda limiar nenhum: e exatamente a conjuncao acima,
+// impressa. Existe porque o log de hoje diz "final global physical integrity
+// gate" e imprime maxArea/maxEdge SO do candidato - entao a recusa de 12 de 12
+// pecas se decidia num numero que nao aparecia em lugar nenhum, e descobrir qual
+// termo era custava uma tarde. Um portao cuja razao nao e observavel nao e um
+// portao, e um oraculo.
+static void PathBLogIntegrityTerms(const char* tag,
+                                   const std::string& shapeName,
+                                   const PathBShellIntegrity& cand,
+                                   const PathBShellIntegrity& ref)
+{
+    const float areaCeil = std::max(8.0f, ref.worstAreaRatio);
+    const float stretchCeil = std::max(8.0f, ref.worstStretch);
+    auto vI = [](int c, int r) { return c <= r ? "PASS" : "FAIL"; };
+    auto vF = [](float c, float r) { return c <= r + 1.0e-4f ? "PASS" : "FAIL"; };
+    char line[1024];
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+        "GATE[%s] shape='%s' | flip %d<=%d %s | collapse %d<=%d %s | "
+        "pen %d<=%d %s | penDepth %.4f<=%.4f %s | facePen %d<=%d %s | "
+        "facePenDepth %.4f<=%.4f %s | area %.3f<=%.3f %s | stretch %.3f<=%.3f %s",
+        tag, shapeName.c_str(),
+        cand.flips, ref.flips, vI(cand.flips, ref.flips),
+        cand.collapsed, ref.collapsed, vI(cand.collapsed, ref.collapsed),
+        cand.penetrations, ref.penetrations,
+        vI(cand.penetrations, ref.penetrations),
+        cand.worstPenetration, ref.worstPenetration,
+        vF(cand.worstPenetration, ref.worstPenetration),
+        cand.bodyFacePenetrations, ref.bodyFacePenetrations,
+        vI(cand.bodyFacePenetrations, ref.bodyFacePenetrations),
+        cand.worstBodyFacePenetration, ref.worstBodyFacePenetration,
+        vF(cand.worstBodyFacePenetration, ref.worstBodyFacePenetration),
+        cand.worstAreaRatio, areaCeil, vF(cand.worstAreaRatio, areaCeil),
+        cand.worstStretch, stretchCeil, vF(cand.worstStretch, stretchCeil));
+    HLog("%s", line);
+    fprintf(stderr, "%s\n", line);
+}
+
 // Restore both faces of every newly crossing pair, plus exact-seam twins, to
 // the production entry candidate. Counting crossings is insufficient because a
 // hidden pair can be traded for a different visible pair at equal total count.
@@ -17394,6 +17465,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (DrapeFlagExists("shell_transactions_off.flag"))
                     shellTransactions = false;
 #endif
+                // M0a: em estrito o desligamento nao existe. Falha de integridade
+                // nao pode virar diagnostico, porque foi assim que um candidato
+                // com centenas de faces invertidas virou o checkpoint de rollback
+                // do gate terminal.
+                if (DrapeStrictMode()) shellTransactions = true;
                 // CLOSURE REPAIR MODE (2026-07-26) - IMPLEMENTED, MEASURED, AND
                 // FALSIFIED. Kept off by default and documented so nobody spends
                 // the day rediscovering it.
@@ -17533,6 +17609,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     }
                     seamsOk = worstSeamSplit <= 1.0e-4f;
                     integrityOk = PathBIntegrityNoWorse(candidateIntegrity, entryIntegrity);
+                    PathBLogIntegrityTerms("shell", shapeName,
+                                           candidateIntegrity, entryIntegrity);
                     const bool bodySamplesOk = PathBBodySamplesNoWorse(
                         productionEntry, shellCandidate, *tris, *bodyBVH,
                         bodySampleStats);
@@ -26054,6 +26132,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // the already-accepted shell is the deterministic fallback.
     if (pathBShellAccepted) {
         bool finalAccepted = true;
+        bool strictRejected = false;
         std::string finalReason = "accepted";
         PathBCrossingClosureStats finalClosure;
         PathBBodyClosureStats finalBodyClosure;
@@ -26086,6 +26165,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (DrapeFlagExists("shell_transactions_off.flag"))
                 shellTransactionsFinal = false;
 #endif
+            if (DrapeStrictMode()) shellTransactionsFinal = true;   // M0a
             if (!shellTransactionsFinal) stable = true;   // sim mode: see publish-closure note
             for (int cycle = 0; shellTransactionsFinal && cycle < 8 && finalAccepted; ++cycle) {
                 PathBCrossingClosureStats crossCycle;
@@ -26153,6 +26233,8 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 finalReason = "final integrity measurement failed";
             }
 
+            PathBLogIntegrityTerms("final", shapeName,
+                                   finalIntegrity, baselineIntegrity);
             if (finalAccepted && !PathBIntegrityNoWorse(
                     finalIntegrity, baselineIntegrity)) {
                 finalAccepted = false;
@@ -26204,6 +26286,22 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // essa prova e publicar uma pose que falhou um invariante duro.
             if (EnvToggle("DRAPE_EXP_KEEP_TAIL", false)) {
                 finalReason += " -> EXPERIMENTO: cauda mantida";
+            } else if (DrapeStrictMode() &&
+                       pathBShellIntegrityBaseline.size() == n) {
+                // M0a, A ANCORA CERTA. O rollback voltava para
+                // pathBShellPublishedReference - o candidato do shell -, e com o
+                // portao do shell desligado esse candidato nunca tinha sido
+                // validado: medido hoje, uma peca restaurava um checkpoint com
+                // 540 faces invertidas depois de descartar uma cauda com 13.
+                // "Rollback" para um estado que ninguem aprovou nao e rollback.
+                //
+                // A entrada de producao e a unica pose publicavel por
+                // construcao, porque o host ja a tem. Restaurar significa
+                // literalmente desistir: nada aqui pode dizer que Smart Conform
+                // aconteceu.
+                finalVerts = pathBShellIntegrityBaseline;
+                finalReason += " -> STRICT: production entry (Smart Conform did not happen)";
+                strictRejected = true;
             } else {
                 finalVerts = pathBShellPublishedReference;
                 finalReason += " -> restored physical checkpoint";
@@ -26226,6 +26324,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              finalIntegrity.collapsed, finalIntegrity.penetrations,
              finalIntegrity.bodyFacePenetrations, finalIntegrity.worstAreaRatio,
              finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
+        if (strictRejected) {
+            // TERMINALIDADE PARCIAL, honesta sobre o que ela e. Sair aqui e o
+            // que torna "recusa = producao exata" DEMONSTRAVEL: se eu apenas
+            // restaurasse finalVerts, os oito blocos que ainda movem vertice
+            // depois deste ponto (flip repair, line locks, contact release,
+            // body evict, plumb, seam re-assert) mexeriam na pose restaurada e
+            // o host receberia producao-mais-alguma-coisa.
+            //
+            // A terminalidade completa - o mesmo tratamento no caminho ACEITO -
+            // e o M0b e nao esta aqui.
+            outDiff.clear();
+            if (outSolvedVerts) outSolvedVerts->clear();
+            if (outColliderVerts) outColliderVerts->clear();
+            return false;
+        }
     }
     tracePathBTail("21-post-final-transaction");
 
@@ -28602,7 +28715,7 @@ static ReplayOutcome RunReplayCapture(const fs::path& path, const ReplayOptions&
         if (publishStatic) {
             out.publishMode = CAPTURE_PUBLISH_STATIC_CLOTH;
             out.solvedDiff = MergePublishedStaticDiff(cap.rawDiff, out.solvedDiff);
-        } else if (!cap.presetMask.empty()) {
+        } else if (!cap.presetMask.empty() && !DrapeStrictMode()) {
             out.publishMode = CAPTURE_PUBLISH_FALLBACK_MASK;
             out.solvedDiff = ApplyFallbackMaskToDiff(cap.rawDiff, cap.presetMask);
             // A rejected live candidate is never cached as a downstream proxy.
@@ -30042,6 +30155,29 @@ static void Detour_GenResult(
     // Ã¢â€â‚¬Ã¢â€â‚¬ Fallback: ZeroVertDiff mask scale Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Scales each vanilla conform diff by the preset mask weight; drops near-zero
     // entries. This is the safety net, not the feature.
+    //
+    // M0a: EM ESTRITO ESTE CAMINHO NAO EXISTE. Ele e a razao de "rollback foi
+    // para producao" nunca ter implicado "o OutfitStudio recebeu producao": o
+    // solve podia ser recusado e o host ainda receber producao ESCALADA PELA
+    // MASCARA. O comentario da escada U2 dizia "vanilla stays untouched" e o
+    // codigo fazia outra coisa. Em estrito, recusa e recusa: o host fica com o
+    // resultado que ele mesmo calculou, byte por byte.
+    if (DrapeStrictMode()) {
+        if (g_fallbackShapesLogged.insert(*shapeName).second) {
+            HLog("detour: STRICT REJECT shape='%s' slider='%s' preset='%s' - host "
+                 "keeps its own conform (no mask, no fallback, no partial write)",
+                 shapeName->c_str(), sliderName->c_str(), PresetName(preset));
+        }
+        if (capturePrepared) {
+            TargetDataDiffs publishedDiff;
+            if (!HostGetRawResultDiff(self, shapeName, sliderName, publishedDiff))
+                publishedDiff = solverCapture.rawDiff;
+            MaybeWriteSolverCapture(std::move(solverCapture),
+                                    CAPTURE_PUBLISH_VANILLA, publishedDiff);
+            capturePrepared = false;
+        }
+        return;
+    }
     if (!presetMask.empty()) {
         if (g_fallbackShapesLogged.insert(*shapeName).second) {
             float sumMask = 0.0f;
