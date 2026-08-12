@@ -26284,24 +26284,30 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // ou seja, que o portao rejeita por um defeito que um passe logo
             // adiante repara. Nunca ligar em producao: pular a restauracao sem
             // essa prova e publicar uma pose que falhou um invariante duro.
-            if (EnvToggle("DRAPE_EXP_KEEP_TAIL", false)) {
-                finalReason += " -> EXPERIMENTO: cauda mantida";
-            } else if (DrapeStrictMode() &&
-                       pathBShellIntegrityBaseline.size() == n) {
-                // M0a, A ANCORA CERTA. O rollback voltava para
-                // pathBShellPublishedReference - o candidato do shell -, e com o
-                // portao do shell desligado esse candidato nunca tinha sido
-                // validado: medido hoje, uma peca restaurava um checkpoint com
-                // 540 faces invertidas depois de descartar uma cauda com 13.
-                // "Rollback" para um estado que ninguem aprovou nao e rollback.
+            if (DrapeStrictMode()) {
+                // M0b: ESTE JA NAO E O PORTAO TERMINAL.
                 //
-                // A entrada de producao e a unica pose publicavel por
-                // construcao, porque o host ja a tem. Restaurar significa
-                // literalmente desistir: nada aqui pode dizer que Smart Conform
-                // aconteceu.
-                finalVerts = pathBShellIntegrityBaseline;
-                finalReason += " -> STRICT: production entry (Smart Conform did not happen)";
-                strictRejected = true;
+                // No M0a a recusa restaurava aqui a entrada de producao e saia da
+                // funcao. Isso tornava o caminho RECUSADO terminal e deixava o
+                // caminho ACEITO como estava: seis blocos ainda moviam vertice
+                // depois desta linha - reparo de flip, travas de linha, contato,
+                // eviccao, prumo, re-solda de costura - entao a pose que o portao
+                // mediu nao era a pose que o host recebia.
+                //
+                // Medido hoje na sessao viva: a eviccao acrescenta ~12
+                // auto-interseccoes e as travas de linha ~211 na saia do Yarl,
+                // TODAS depois deste ponto. Aprovar aqui e afirmar sobre uma pose
+                // que ainda vai mudar.
+                //
+                // O veredito passa a ser tomado no fim, sobre a pose publicada.
+                // Nada aqui muda de politica: os termos, as referencias e os
+                // limiares sao os mesmos - so o INSTANTE da medida mudou. O
+                // trabalho posicional deste bloco (piso de corpo, fechamentos)
+                // continua acontecendo, porque ele produz o candidato; o que
+                // deixou de acontecer e ele decidir.
+                finalReason += " -> M0b: veredito adiado para o portao terminal";
+            } else if (EnvToggle("DRAPE_EXP_KEEP_TAIL", false)) {
+                finalReason += " -> EXPERIMENTO: cauda mantida";
             } else {
                 finalVerts = pathBShellPublishedReference;
                 finalReason += " -> restored physical checkpoint";
@@ -26324,21 +26330,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              finalIntegrity.collapsed, finalIntegrity.penetrations,
              finalIntegrity.bodyFacePenetrations, finalIntegrity.worstAreaRatio,
              finalIntegrity.worstStretch, referenceSeamSplit, finalSeamSplit);
-        if (strictRejected) {
-            // TERMINALIDADE PARCIAL, honesta sobre o que ela e. Sair aqui e o
-            // que torna "recusa = producao exata" DEMONSTRAVEL: se eu apenas
-            // restaurasse finalVerts, os oito blocos que ainda movem vertice
-            // depois deste ponto (flip repair, line locks, contact release,
-            // body evict, plumb, seam re-assert) mexeriam na pose restaurada e
-            // o host receberia producao-mais-alguma-coisa.
-            //
-            // A terminalidade completa - o mesmo tratamento no caminho ACEITO -
-            // e o M0b e nao esta aqui.
-            outDiff.clear();
-            if (outSolvedVerts) outSolvedVerts->clear();
-            if (outColliderVerts) outColliderVerts->clear();
-            return false;
-        }
+        (void)strictRejected;   // M0b: o veredito nao e mais tomado aqui
     }
     tracePathBTail("21-post-final-transaction");
 
@@ -27810,6 +27802,108 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              mFixed, mTrans, mFree, mRigid, n,
              zEntry, zShell - zEntry, zFinal - zEntry, tailRms, tailMax,
              flips, pen, worstPen);
+    }
+
+    // ── M0b: O PORTAO TERMINAL, E ELE E O ULTIMO ────────────────────────────
+    //
+    // Nada move vertice depois daqui: o proximo bloco escreve o diff. Entao a
+    // pose MEDIDA e exatamente a pose PUBLICADA, que era a propriedade que
+    // faltava - e sem ela nenhum experimento significa nada, porque o numero do
+    // log e o resultado na tela podiam ser poses diferentes.
+    //
+    // Nao e portao novo e nao muda politica: mesmos termos, mesmas referencias,
+    // mesmos limiares do portao do M0a. So o instante mudou. Tambem nao repara:
+    // os fechamentos rodam sobre COPIA descartavel, apenas para contar - um
+    // portao que conserta o que esta julgando volta a medir outra coisa.
+    //
+    // Recusar significa literalmente "Smart Conform nao aconteceu": saimos com
+    // outDiff vazio, e em estrito o chamador nao aplica mascara nem fallback, de
+    // modo que o host fica com o conform que ele mesmo calculou, byte por byte.
+    // DRAPE_M0B_TERMINAL=1 liga o portao sem o estrito. Existe porque em estrito
+    // o shell e rejeitado antes deste ponto, entao o bloco nasceria DORMENTE - e
+    // codigo que nunca executou nao esta testado. Com o bypass do shell ligado
+    // (DRAPE_SHELL_TRANSACTIONS=0) esta via faz o candidato chegar aqui e o
+    // portao ser exercitado de verdade no harness.
+    if ((DrapeStrictMode() || EnvToggle("DRAPE_M0B_TERMINAL", false)) &&
+        pathBShellAccepted) {
+        bool ok = true;
+        const char* why = "accepted";
+        PathBShellIntegrity refI{}, finI{};
+        PathBBodySampleStats bodySamples{};
+        PathBCrossingClosureStats crossProbe{};
+        PathBFaceClosureStats faceProbe{};
+        float seamSplit = 0.0f, refSeamSplit = 0.0f;
+        std::vector<PathBShellEdge> gEdges;
+        std::vector<PathBShellHinge> gHinges;
+        std::vector<uint8_t> gBoundary;
+
+        if (pathBShellIntegrityBaseline.size() != n ||
+            pathBShellPublishedReference.size() != n || !tris || tris->empty() ||
+            !bodyBVH || !bodyBVH->valid ||
+            !PathBBuildTopology(baseVerts, *tris, gEdges, gHinges, gBoundary) ||
+            !PathBComputeIntegrity(pathBShellIntegrityBaseline, baseVerts, gEdges,
+                                   *tris, *bodyBVH, refI) ||
+            !PathBComputeIntegrity(finalVerts, baseVerts, gEdges, *tris,
+                                   *bodyBVH, finI)) {
+            ok = false;
+            why = "terminal measurement failed";
+        } else {
+            PathBLogIntegrityTerms("terminal", shapeName, finI, refI);
+            auto worstSeam = [&](const std::vector<Vec3>& v) {
+                float w = 0.0f;
+                for (const auto& g : exactSeamGroups) {
+                    uint32_t first = (uint32_t)n;
+                    for (uint32_t vi : g) {
+                        if (vi >= n) continue;
+                        if (first >= n) { first = vi; continue; }
+                        w = std::max(w, Len(Sub(v[first], v[vi])));
+                    }
+                }
+                return w;
+            };
+            refSeamSplit = worstSeam(pathBShellPublishedReference);
+            seamSplit = worstSeam(finalVerts);
+
+            std::vector<Vec3> probe = finalVerts;
+            PathBCloseNewCrossings(pathBShellPublishedReference, probe, *tris,
+                                   exactSeamGroups, crossProbe);
+            probe = finalVerts;
+            PathBCloseFaceRegressions(pathBShellPublishedReference, baseVerts,
+                                      probe, *tris, exactSeamGroups, faceProbe);
+            const bool bodyOk = PathBBodySamplesNoWorse(
+                pathBShellPublishedReference, finalVerts, *tris, *bodyBVH,
+                bodySamples);
+
+            if (!PathBIntegrityNoWorse(finI, refI)) {
+                ok = false; why = "global physical integrity";
+            } else if (!bodyOk) {
+                ok = false; why = "corresponding body-face";
+            } else if (crossProbe.initialNewPairs > 0) {
+                ok = false; why = "crossing-set inclusion";
+            } else if (faceProbe.initialWorsened > 0) {
+                ok = false; why = "face-integrity regression";
+            } else if (seamSplit > std::max(1.0e-4f, refSeamSplit + 1.0e-4f)) {
+                ok = false; why = "exact seam";
+            }
+        }
+
+        HLog("path-b-shell: TERMINAL(M0b) shape='%s' published=%d reason='%s' "
+             "newCrossings=%d faceRegressions=%d bodyWorsened=%d/%d "
+             "seam=%.6f->%.6f final(flip=%d collapse=%d pen=%d facePen=%d "
+             "maxArea=%.3f maxEdge=%.3f)",
+             shapeName.c_str(), ok ? 1 : 0, why,
+             crossProbe.initialNewPairs, faceProbe.initialWorsened,
+             bodySamples.worsened, bodySamples.compared,
+             refSeamSplit, seamSplit, finI.flips, finI.collapsed,
+             finI.penetrations, finI.bodyFacePenetrations,
+             finI.worstAreaRatio, finI.worstStretch);
+
+        if (!ok) {
+            outDiff.clear();
+            if (outSolvedVerts) outSolvedVerts->clear();
+            if (outColliderVerts) outColliderVerts->clear();
+            return false;
+        }
     }
 
 #if !defined(DRAPE_HARNESS_BUILD)
