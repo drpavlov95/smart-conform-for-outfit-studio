@@ -4279,6 +4279,102 @@ static int BuildNearContactSupportBridgeField(
 // outward at the new height until that clearance is restored. The caller
 // applies this field through the topology/crossing transaction, so this rule
 // cannot buy a better hang with a new fold, tear, or crossing.
+// REPARO DE ORIENTACAO CONTRA A NORMAL AUTORADA.
+//
+// Medido em 11/08 no BlackSmithTorso vivo, conjunto casado: das 41 faces
+// invertidas que publicamos, **39 ja chegam invertidas do Conform All** e
+// apenas 2 sao nossas. Nao sao slivers - area autorada mediana 1.18 contra
+// 1.86 da malha, nenhuma abaixo de 10% da mediana - sao faces reais, e sao
+// elas que produzem 26 das 39 quebras de superficie acima de 90 graus que o
+// usuario le como "edges" numa roupa de pano unico.
+//
+// O unico reparo que existia nao podia consertar isso, por dois motivos
+// estruturais: ele so roda quando o shell e aceito (em estrito, nunca), e
+// puxa os vertices na direcao de baseVerts+rawDiff - a POSE DO HOST, que e
+// exatamente onde a face ja esta invertida. Puxar uma face para uma pose em
+// que ela esta virada nao a desvira.
+//
+// Entao aqui nao existe pose de referencia. A grandeza corrigida e a propria
+// ORIENTACAO: para o triangulo (a,b,c) com normal autorada N,
+//
+//     s = N . ((b-a) x (c-a))         negativo <=> face virada
+//
+// e o gradiente de s e analitico:
+//
+//     ds/da = N x (c-b)   ds/db = N x (a-c)   ds/dc = N x (b-a)
+//
+// O passo e a menor movimentacao que devolve s a um valor positivo pequeno -
+// nada de alvo posicional, nada de conform, nada de nome de peca. Vale para
+// qualquer malha porque toda malha tem orientacao autorada.
+//
+// O campo sai daqui e vai para ApplyGuardedDisplacementField, que e quem
+// decide se cabe: desvirar uma face nao pode ser comprado com rasgo, com
+// cruzamento novo ou com penetracao no corpo.
+static int BuildAuthoredOrientationRepairField(
+    const std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    float margin,
+    float strength,
+    float maxStep,
+    std::vector<Vec3>& outField)
+{
+    const size_t n = verts.size();
+    outField.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+    if (n == 0 || baseVerts.size() < n || tris.empty()) return 0;
+    margin = ClampRange(margin, 0.0f, 0.5f);
+    strength = ClampRange(strength, 0.0f, 1.0f);
+    maxStep = std::max(0.0f, maxStep);
+    if (strength <= 0.0f || maxStep <= 0.0f) return 0;
+
+    std::vector<Vec3> acc(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<int> hits(n, 0);
+    int inverted = 0;
+    for (const auto& t : tris) {
+        if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+        const Vec3 an = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                              Sub(baseVerts[t[2]], baseVerts[t[0]]));
+        const float twoA = Len(an);
+        if (twoA <= 1.0e-9f) continue;              // face autorada degenerada
+        const Vec3 N = Scale(an, 1.0f / twoA);
+        const Vec3& a = verts[t[0]];
+        const Vec3& b = verts[t[1]];
+        const Vec3& c = verts[t[2]];
+        const float s = Dot(N, Cross(Sub(b, a), Sub(c, a)));
+        const float want = margin * twoA;           // margem, nao apenas zero
+        if (s >= want) continue;
+        ++inverted;
+
+        const Vec3 ga = Cross(N, Sub(c, b));
+        const Vec3 gb = Cross(N, Sub(a, c));
+        const Vec3 gc = Cross(N, Sub(b, a));
+        const float g2 = Len2(ga) + Len2(gb) + Len2(gc);
+        if (g2 <= 1.0e-12f) continue;
+        // passo de menor norma que leva s ate `want` (Gauss-Newton em 1 eq.)
+        const float lam = (want - s) / g2;
+        const Vec3 d[3] = {Scale(ga, lam), Scale(gb, lam), Scale(gc, lam)};
+        for (int k = 0; k < 3; ++k) {
+            acc[t[k]] = Add(acc[t[k]], d[k]);
+            ++hits[t[k]];
+        }
+    }
+    if (inverted == 0) return 0;
+
+    int seeds = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (hits[i] == 0) continue;
+        // media, nao soma: um vertice de varias faces viradas receberia um
+        // empurrao proporcional a quantas, e nao ao quanto cada uma precisa
+        Vec3 v = Scale(acc[i], strength / (float)hits[i]);
+        const float l = Len(v);
+        if (!std::isfinite(l) || l <= 1.0e-7f) continue;
+        if (l > maxStep) v = Scale(v, maxStep / l);
+        outField[i] = v;
+        ++seeds;
+    }
+    return seeds;
+}
+
 static int BuildElevatedContactReleaseField(
     const std::vector<Vec3>& verts,
     const std::vector<Vec3>& baseVerts,
@@ -27802,6 +27898,189 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              mFixed, mTrans, mFree, mRigid, n,
              zEntry, zShell - zEntry, zFinal - zEntry, tailRms, tailMax,
              flips, pen, worstPen);
+    }
+
+    // ── REPARO DE ORIENTACAO (ver BuildAuthoredOrientationRepairField) ──────
+    //
+    // Roda ANTES do portao terminal, entao o M0b continua valendo: o portao
+    // segue sendo a ultima coisa que acontece.
+    //
+    // Transacao propria, e nao ApplyGuardedDisplacementField: aquele guard
+    // reprova qualquer candidato cuja normal de face gire demais em relacao a
+    // ENTRADA, e desvirar uma face gira a normal em 180 graus por construcao.
+    // Um guard ancorado em "a orientacao nao pode mudar" nao pode julgar o
+    // passe cujo proposito e mudar a orientacao. Os invariantes certos sao
+    // outros, e sao estes:
+    //   - a contagem de faces viradas contra o AUTORADO tem de CAIR;
+    //   - nada de cruzamento novo, de penetracao nova/mais funda no corpo,
+    //     de aresta mais esticada do que ja estava, de costura aberta.
+    // Se o passe nao consegue pagar, ele nao acontece.
+    {
+        bool orientRepair = EnvToggle("DRAPE_ORIENT_REPAIR", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (DrapeFlagExists("orient_repair_off.flag"))     orientRepair = false;
+        else if (DrapeFlagExists("orient_repair_on.flag")) orientRepair = true;
+#endif
+        if (orientRepair && tris && !tris->empty() && n > 0 &&
+            baseVerts.size() == n) {
+            const float margin = ClampRange(
+                EnvFloat("DRAPE_ORIENT_MARGIN", 0.05f), 0.0f, 0.5f);
+            const float strength = ClampRange(
+                EnvFloat("DRAPE_ORIENT_STRENGTH", 1.0f), 0.05f, 1.0f);
+            const float maxStep = std::max(0.01f,
+                EnvFloat("DRAPE_ORIENT_STEP", 0.35f));
+            const int rounds = (int)ClampRange(
+                EnvFloat("DRAPE_ORIENT_ROUNDS", 8.0f), 1.0f, 40.0f);
+
+            auto invertedCount = [&](const std::vector<Vec3>& V) {
+                int c = 0;
+                for (const auto& t : *tris) {
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    const Vec3 an = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                          Sub(baseVerts[t[2]], baseVerts[t[0]]));
+                    if (Len(an) <= 1.0e-9f) continue;
+                    const Vec3 cn = Cross(Sub(V[t[1]], V[t[0]]),
+                                          Sub(V[t[2]], V[t[0]]));
+                    if (Dot(an, cn) < 0.0f) ++c;
+                }
+                return c;
+            };
+            auto worstStrain = [&](const std::vector<Vec3>& V) {
+                float w = 0.0f;
+                for (const EdgeConstraint& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    const float rest = Len(Sub(baseVerts[e.a], baseVerts[e.b]));
+                    if (rest <= 1.0e-6f) continue;
+                    w = std::max(w, Len(Sub(V[e.a], V[e.b])) / rest);
+                }
+                return w;
+            };
+            auto bodyState = [&](const std::vector<Vec3>& V) {
+                std::pair<int, float> s{0, 0.0f};
+                if (!bodyBVH || !bodyBVH->valid) return s;
+                for (size_t i = 0; i < n; ++i) {
+                    float g = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, V[i], g, nullptr)) continue;
+                    if (g < 0.0f) { ++s.first; s.second = std::min(s.second, g); }
+                }
+                return s;
+            };
+            // O CORPO JULGADO POR PROFUNDIDADE, POR VERTICE - nao por contagem.
+            //
+            // A contagem global recusava trocas cujo preco medido e quatro
+            // centesimos de unidade: Cloth desvira 20->17 por 3 vertices a -0.039,
+            // Cuirass 7->2 por um a -0.028. Isso e invisivel, e e menos do que o
+            // proprio contato ja tolera em qualquer outro passe. Veto binario
+            // sobre contador quando a magnitude diz que o custo e nulo e o erro
+            // que este projeto ja pagou varias vezes.
+            //
+            // As duas condicoes sao: nenhum vertice pode ficar MAIS FUNDO do que
+            // ja estava, e nenhuma penetracao NOVA pode passar da espessura de
+            // tecido. O piso nao e numero meu - e o mesmo DRAPE_SHELL_FACE_HARD
+            // que o contato de face usa como espessura em todo o resto do
+            // arquivo.
+            const float bodyFloor = std::max(0.0f,
+                EnvFloat("DRAPE_SHELL_FACE_HARD", 0.15f));
+            auto bodyNoWorse = [&](const std::vector<Vec3>& A,
+                                   const std::vector<Vec3>& B) {
+                if (!bodyBVH || !bodyBVH->valid) return true;
+                for (size_t i = 0; i < n; ++i) {
+                    if (Len2(Sub(A[i], B[i])) <= 1.0e-12f) continue;
+                    float ga = 0.0f, gb = 0.0f;
+                    if (!BVHSignedGap(*bodyBVH, A[i], ga, nullptr) ||
+                        !BVHSignedGap(*bodyBVH, B[i], gb, nullptr))
+                        continue;
+                    if (gb >= 0.0f) continue;   // fora do corpo: aproximar-se nao e defeito
+                    if (ga < 0.0f) {
+                        if (gb < ga - 1.0e-4f) return false;   // ja penetrava: nao pode afundar
+                    } else {
+                        if (gb < -bodyFloor) return false;     // nova: so se mais rasa que a espessura
+                    }
+                }
+                return true;
+            };
+            auto weld = [&](std::vector<Vec3>& V) {
+                for (const auto& g : exactSeamGroups) {
+                    if (g.size() < 2) continue;
+                    Vec3 avg{0.0f, 0.0f, 0.0f};
+                    int c = 0;
+                    for (uint32_t vi : g) {
+                        if (vi >= n) continue;
+                        avg = Add(avg, V[vi]);
+                        ++c;
+                    }
+                    if (c < 2) continue;
+                    avg = Scale(avg, 1.0f / (float)c);
+                    for (uint32_t vi : g) if (vi < n) V[vi] = avg;
+                }
+            };
+
+            const int invStart = invertedCount(finalVerts);
+            int invNow = invStart, applied = 0, refused = 0;
+            // POR QUE recusou. Sem isto o log diz "recusas=5" e a proxima
+            // pergunta vira palpite - que e exatamente como se perdem tardes
+            // neste projeto.
+            int rejInv = 0, rejStrain = 0, rejBody = 0, rejCross = 0;
+            int worstInvCand = -1;
+            for (int r = 0; r < rounds && invNow > 0; ++r) {
+                const std::vector<Vec3> entry = finalVerts;
+                const float strainEntry = worstStrain(entry);
+                const auto bodyEntry = bodyState(entry);
+                std::vector<Vec3> field;
+                if (BuildAuthoredOrientationRepairField(
+                        entry, baseVerts, *tris, margin, strength, maxStep,
+                        field) == 0)
+                    break;
+
+                bool took = false;
+                for (float alpha = 1.0f; alpha >= 0.06f; alpha *= 0.5f) {
+                    std::vector<Vec3> cand = entry;
+                    for (size_t i = 0; i < n; ++i)
+                        cand[i] = Add(cand[i], Scale(field[i], alpha));
+                    weld(cand);
+
+                    const int invCand = invertedCount(cand);
+                    if (worstInvCand < 0) {
+                        // ETIQUETA DE PRECO do passo cheio: quanto ele desvira e
+                        // quanto cobra por isso, sem curto-circuito. Sem os quatro
+                        // numeros juntos a decisao "vale pagar?" seria palpite.
+                        worstInvCand = invCand;
+                        const auto bc = bodyState(cand);
+                        PathBCrossingClosureStats xs0;
+                        std::vector<Vec3> p0 = cand;
+                        PathBCloseNewCrossings(entry, p0, *tris, exactSeamGroups, xs0);
+                        HLog("orient-repair PRECO shape='%s' alpha=1: viradas %d->%d "
+                             "| corpo pen %d->%d fundo %.3f->%.3f | cruz novos=%d "
+                             "| strain %.2f->%.2f",
+                             shapeName.c_str(), invNow, invCand,
+                             bodyEntry.first, bc.first, bodyEntry.second, bc.second,
+                             xs0.initialNewPairs, strainEntry, worstStrain(cand));
+                    }
+                    if (invCand >= invNow) { ++refused; ++rejInv; continue; }
+                    if (worstStrain(cand) > strainEntry + 1.0e-3f) { ++refused; ++rejStrain; continue; }
+                    if (!bodyNoWorse(entry, cand)) { ++refused; ++rejBody; continue; }
+                    // cruzamento novo: sonda descartavel, so para contar
+                    PathBCrossingClosureStats xs;
+                    std::vector<Vec3> probe = cand;
+                    PathBCloseNewCrossings(entry, probe, *tris, exactSeamGroups, xs);
+                    if (xs.initialNewPairs > 0) { ++refused; ++rejCross; continue; }
+
+                    finalVerts.swap(cand);
+                    invNow = invCand;
+                    ++applied;
+                    took = true;
+                    break;
+                }
+                if (!took) break;
+            }
+            if (invStart > 0)
+                HLog("orient-repair shape='%s' viradas %d -> %d  rodadas=%d "
+                     "recusas=%d (contagem=%d strain=%d corpo=%d cruz=%d) "
+                     "melhorAlpha1=%d margem=%.2f passo=%.2f",
+                     shapeName.c_str(), invStart, invNow, applied, refused,
+                     rejInv, rejStrain, rejBody, rejCross, worstInvCand,
+                     margin, maxStep);
+        }
     }
 
     // ── M0b: O PORTAO TERMINAL, E ELE E O ULTIMO ────────────────────────────
