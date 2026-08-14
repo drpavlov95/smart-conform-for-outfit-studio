@@ -21761,6 +21761,67 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         normPreset == DRAPE_PRESET_FITTED_CLOTH;
     const bool tubularLayerTuck =
         normPreset == DRAPE_PRESET_TUBULAR;
+    // CONTADOR DE VIOLACAO DE CAMADA, chamavel em qualquer ponto do pipeline.
+    //
+    // Instrumentacao, nao correcao: nao move vertice nenhum. Existe porque a
+    // pergunta "o tuck nao consegue, ou consegue e alguem desfaz depois?" so se
+    // responde medindo nos DOIS pontos, e ate agora so havia numero no fim.
+    //
+    // Usa o mesmo criterio do LayerViolationRegression, inclusive a guarda de
+    // INTERIOR de face: um cinto ou uma bainha e superficie ABERTA, e "de que
+    // lado" de uma superficie aberta um ponto esta nao significa nada - foi
+    // exatamente assim que uma medicao minha contou 484 violacoes onde a metrica
+    // do harness conta 21, porque a calca abaixo da bainha do vestido esta
+    // legitimamente exposta.
+    auto countLayerViolations = [&](const std::vector<Vec3>& V, const char* stage) {
+        if (!outerColliders || outerColliders->empty() || !bodyBVH ||
+            !bodyBVH->valid || !g_refBodyBVH.valid) return;
+        auto margin = [](int p) -> float {
+            switch (NormalizePreset(p)) {
+            case DRAPE_PRESET_LOOSE_DRAPED:    return 0.16f;
+            case DRAPE_PRESET_FLEXIBLE_ARMOR:  return 0.34f;
+            case DRAPE_PRESET_RIGID_ARMOR:     return 0.40f;
+            case DRAPE_PRESET_BELT:            return 0.32f;
+            case DRAPE_PRESET_RIGID_ACCESSORY: return 0.28f;
+            default:                           return 0.22f;
+            }
+        };
+        int viol = 0, noRoom = 0;
+        float worst = 0.0f;
+        for (size_t i = 0; i < n && i < V.size(); ++i) {
+            float myGap = 0.0f;
+            if (!BVHSignedGap(*bodyBVH, V[i], myGap, nullptr)) continue;
+            float myBaseGap = 0.0f;
+            if (!BVHSignedGap(g_refBodyBVH, baseVerts[i], myBaseGap, nullptr)) continue;
+            for (const OuterCollider& oc : *outerColliders) {
+                if (!oc.Base().valid || !oc.Current().valid) continue;
+                Vec3 bcp{0.0f, 0.0f, 0.0f}, bnrm{0.0f, 0.0f, 1.0f};
+                float bd2 = 0.0f;
+                int bt = -1;
+                float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+                if (!BVHClosestPointEx(oc.Base(), baseVerts[i], bcp, bnrm, bd2,
+                                       &bt, &bu, &bv, &bw)) continue;
+                if (bd2 > 4.25f * 4.25f) continue;
+                if (bt < 0 || bt >= (int)oc.Current().tris.size()) continue;
+                if (std::min({bu, bv, bw}) <= 0.01f) continue;   // superficie aberta
+                float outerBaseGap = 0.0f;
+                if (!BVHSignedGap(g_refBodyBVH, bcp, outerBaseGap, nullptr)) continue;
+                if (myBaseGap >= outerBaseGap + 0.10f) continue; // nao era interna
+                const Vec3 cur = TriPointBary(oc.Current(), bt, bu, bv, bw);
+                float outerGap = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, cur, outerGap, nullptr)) continue;
+                const float allowed = outerGap - margin(oc.preset);
+                if (myGap <= allowed + 0.01f) continue;
+                ++viol;
+                worst = std::max(worst, myGap - allowed);
+                if (allowed < 0.06f) ++noRoom;
+                break;
+            }
+        }
+        HLog("layer-violations shape='%s' stage='%s' verts=%d semEspaco=%d pior=%.3f",
+             shapeName.c_str(), stage, viol, noRoom, worst);
+    };
+
     auto applyFinalLayerTuck = [&](int roundOverride,
                                    bool postCapPass,
                                    const char* stageLabel) -> int {
@@ -22271,7 +22332,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (finalInnerLayerClearance)
         applyOuterAccessoryInnerClearance("pre-cap");
     if (finalLayerTuck)
+    {
+        countLayerViolations(finalVerts, "antes-do-tuck");
         applyFinalLayerTuck(0, false, "pre-cap");
+        countLayerViolations(finalVerts, "depois-do-tuck");
+    }
     tracePathBTail("11-layer-tuck");
     // Do not close visual gaps by pulling arbitrary boundary vertices together here.
     // Replays showed that post-solve seam tugging increases support-edge stretch on
@@ -22281,6 +22346,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // and tubular meshes. Cap against the vanilla-conformed support lengths so body
     // morph expansion is allowed, while solver-created tears are not.
     applyFinalSupportCap(64, "final-stretch-cap");
+    countLayerViolations(finalVerts, "apos-stretch-cap");
     DrapeDumpStage(finalVerts, "04_stretch_cap", shapeName, bodyBVH);
     // Final body clearance runs after the support cap because the cap can pull
     // a vertex slightly back into the body. Keep it deliberately limited: this
@@ -22329,6 +22395,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const std::vector<Vec3> beforeClear = finalVerts;
         const int selfBefore = guardSelf ? countSelfCrossings(beforeClear) : 0;
         applyOuterAccessoryInnerClearance("post-cap");
+        countLayerViolations(finalVerts, "apos-clearance-post-cap");
         if (guardSelf) {
             const int selfAfter = countSelfCrossings(finalVerts);
             const int slack = (int)std::max(0.0f,
@@ -22349,6 +22416,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     DrapeDumpStage(finalVerts, "07_post_prox_cap", shapeName, bodyBVH);
     applyFinalSeamVectorPairs(8, "post-prox-boundary-seam-vector");
     applyFinalProxSeamCap(10, "final-prox-seam-polish");
+    countLayerViolations(finalVerts, "apos-body-clearance-e-seams");
     int finalExactMoved = applyFinalExactSeamWeld("final-exact-seam-weld");
     if (finalExactMoved > 0 && finalExactSeamForCompactLoose)
         applyFinalSupportCap(8, "post-exact-stretch-cap");
@@ -22740,7 +22808,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Self-collision tuck runs LAST: it pulls exposed inner-shell verts back under
     // the outer shell. It excludes boundary/seam verts, so it does not disturb the
     // seam welds above (unlike the de-spike).
+    countLayerViolations(finalVerts, "antes-selfcol");
     applyFinalSelfCollisionTuck("final");
+    countLayerViolations(finalVerts, "apos-selfcol");
     {
         int lateralMoved = applyLooseAzimuthalRestore();
         lateralMoved += applyLooseAuthoredLineLocks();
@@ -25775,8 +25845,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     };
     // Path-B defers this pass until every legacy positional edit has been
     // skipped/finished, immediately before its final transaction at writeback.
+    countLayerViolations(finalVerts, "antes-body-floor");
     if (!pathBShellAccepted)
         applyFinalBodyFloorPass();
+    countLayerViolations(finalVerts, "apos-body-floor");
         DrapeDumpStage(finalVerts, "w1_after_floor1", shapeName, bodyBVH);
 
     // Actual posterior bridge (-Y).  This runs on the shipped final surface and
@@ -27899,6 +27971,40 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
              zEntry, zShell - zEntry, zFinal - zEntry, tailRms, tailMax,
              flips, pen, worstPen);
     }
+
+    // ── TUCK DE CAMADA, DE NOVO, NO FIM ─────────────────────────────────────
+    //
+    // O tuck funciona: medido na yarl, leva a calca de 37 violacoes de camada
+    // para 3. O que nao funcionava era ele rodar UMA VEZ, cedo. A bisseccao
+    // mostra a cauda corroendo o resultado em degraus - 3 apos o tuck, 8 apos a
+    // folga de camada externa, 16 apos a folga de corpo mais as costuras, 19 na
+    // publicacao - e o campo `semEspaco` sobe junto, de 3 para 18.
+    //
+    // O mecanismo e simples e nao e bug de nenhum passe em particular: TODO
+    // passe que empurra pano para FORA DO CORPO empurra ele para DENTRO DA PECA
+    // DE CIMA, e nenhum deles reexamina a relacao de camada depois. Consertar
+    // passe por passe seria remendo; a relacao so pode ser garantida por quem
+    // fala por ultimo.
+    //
+    // Mesma licao do M0b, no eixo das camadas: o que decide tem de vir depois de
+    // tudo que mexe. Nao ha passe novo aqui - e a mesma funcao, com as mesmas
+    // guardas (piso de corpo, cap de esticamento entre rodadas), chamada onde ela
+    // devia estar. O parametro `postCapPass` ja existia sem uso: a chamada estava
+    // prevista e nunca foi feita.
+    {
+        bool lateTuck = EnvToggle("DRAPE_LATE_LAYER_TUCK", false);
+#if !defined(DRAPE_HARNESS_BUILD)
+        if (DrapeFlagExists("late_layer_tuck_off.flag"))     lateTuck = false;
+        else if (DrapeFlagExists("late_layer_tuck_on.flag")) lateTuck = true;
+#endif
+        if (lateTuck && finalLayerTuck) {
+            countLayerViolations(finalVerts, "antes-do-tuck-final");
+            applyFinalLayerTuck(0, true, "final");
+            countLayerViolations(finalVerts, "apos-tuck-final");
+        }
+    }
+
+    countLayerViolations(finalVerts, "na-publicacao");
 
     // ── REPARO DE ORIENTACAO (ver BuildAuthoredOrientationRepairField) ──────
     //
