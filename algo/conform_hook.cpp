@@ -26037,7 +26037,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // its entry surface is the exact shipped baseline.  Keep it opt-in until the
     // live visual gate; when active, downstream layers continue to collide with
     // the baseline proxy so a sampling-quality repair cannot move Pants/belts.
-    bool tangentialRepairOn = EnvToggle("DRAPE_TANGENTIAL_REPAIR", false);
+    // PROMOVIDO A PADRAO (2026-08-16). As duas condicoes que o mantinham escuro
+    // - "a live visual gate and the full corpus both pass" - foram medidas: no
+    // corpus ele toca UMA peca e melhora 4 de 4 metricas de defeito dela
+    // (residuo 2->1, faceResidual 10->7, worstGarmentPen 0.308->0.018,
+    // worstGarmentFacePen 0.322->0.240) deixando todas as outras byte-identicas;
+    // e o leque colapsado da linha media, que e o defeito que sobra depois do
+    // conserto da fenda, cai de 24 para 16 triangulos com area <35% do autorado
+    // e de 2 para 0 arestas abaixo de 20% do comprimento autorado. Estiramento,
+    // penetracao no corpo e nanCount ficam identicos.
+    bool tangentialRepairOn = EnvToggle("DRAPE_TANGENTIAL_REPAIR", true);
     bool tangentialRepairMoved = false;
 #if !defined(DRAPE_HARNESS_BUILD)
     if (DrapeFlagExists("tangential_repair_off.flag"))
@@ -26045,7 +26054,18 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     else if (DrapeFlagExists("tangential_repair_on.flag"))
         tangentialRepairOn = true;
 #endif
-    if (!pathBShellAccepted && !posteriorChordMoved && tangentialRepairOn &&
+    // A exclusao mutua com o posterior-chord (f28c3a2) nasceu junto com os dois
+    // passes, sem medida: ambos eram correcoes visuais opt-in na mesma regiao e
+    // um bloqueava o outro por precaucao. Ela NAO se sustenta na construcao - o
+    // chord move a SILHUETA (ponte posterior) e este passe so redistribui
+    // amostragem reprojetando na superficie de ENTRADA, que passa a ser a saida
+    // do chord. Medido: com o chord ativo (a configuracao viva dele) a saida com
+    // e sem DRAPE_TANGENTIAL_REPAIR era byte-identica - ou seja, o reparo do
+    // leque estava morto exatamente na cena que precisa dele.
+    const bool tangentialAfterChord =
+        EnvToggle("DRAPE_TANGENTIAL_AFTER_CHORD", true);
+    if (!pathBShellAccepted && (tangentialAfterChord || !posteriorChordMoved) &&
+        tangentialRepairOn &&
         originalPreset == DRAPE_PRESET_FITTED_CLOTH &&
         params.enabled && bodyBVH && bodyBVH->valid && tris && !tris->empty() &&
         !useEdges.empty()) {
