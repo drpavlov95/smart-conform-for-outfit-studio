@@ -9880,6 +9880,37 @@ static void PathBDumpTris(const std::vector<Vec3>& verts,
     fclose(f);
 }
 
+// Per-shape mesh dump for OFFLINE analysis (2026-08-16).  Two problems it
+// fixes at once: the dumps above are named per FILE, not per SHAPE, so only
+// the last garment of a conform survives; and the harness writes to the very
+// same %TEMP% paths as the live DLL, so a harness run DESTROYS the live
+// capture the user just produced (that collision already cost one bogus
+// measurement).  Writes nothing unless DRAPE_DUMP_DIR names a directory, so
+// it is inert for users and cannot collide with anything by accident.
+static bool DrapeDumpDir(std::string& out) {
+    const char* d = getenv("DRAPE_DUMP_DIR");
+    if (!d || !*d) return false;
+    out = d;
+    return true;
+}
+
+static void DrapeDumpMesh(const std::vector<Vec3>& verts,
+                          const std::vector<std::array<uint16_t, 3>>* tris,
+                          const std::string& shape, const char* tag) {
+    std::string dir;
+    if (!DrapeDumpDir(dir)) return;
+    std::string path = dir + "\\" + SafeFilePart(shape) + "__" + tag + ".obj";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) return;
+    fprintf(f, "# shape=%s tag=%s verts=%zu\n", shape.c_str(), tag, verts.size());
+    for (const Vec3& v : verts)
+        fprintf(f, "v %.6f %.6f %.6f\n", v.x, v.y, v.z);
+    if (tris)
+        for (const auto& t : *tris)
+            fprintf(f, "f %d %d %d\n", t[0] + 1, t[1] + 1, t[2] + 1);
+    fclose(f);
+}
+
 // Measurement-only trace for the contact-release investigation.  It records
 // which operator still acts on each material vertex at each morph step, without
 // changing solve order or positions.  The trace is opt-in because writing it on
@@ -15813,6 +15844,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         follow[i] = f;
 
         supportVerts[i] = Add(baseVerts[i], raw);
+        // ANALYSIS DUMP (inert unless DRAPE_DUMP_DIR is set) - see DrapeDumpMesh.
         // Start from the conformed fit (supportVerts) in all modes. The Verlet
         // cloth solve then hangs the drape region down from this fitted start Ã¢â‚¬â€
         // matching the diagnostic drop that looked correct. Starting from the slim
@@ -15850,6 +15882,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         invMass[i]      = Clamp01(mobility);
         anchorWeight[i] = Clamp01(anchor);
     }
+
+    // ANALYSIS DUMP (inert unless DRAPE_DUMP_DIR is set). supportVerts here is
+    // the PRODUCTION entry - authored + the host's own conform diff, before any
+    // pass of ours. Dumped per SHAPE so a whole outfit can be analysed, and to
+    // a directory of the caller's choosing so a harness run cannot overwrite a
+    // live capture.
+    DrapeDumpMesh(std::vector<Vec3>(baseVerts.begin(), baseVerts.begin() + n),
+                  tris, shapeName, "authored");
+    DrapeDumpMesh(supportVerts, tris, shapeName, "production");
+    if (bodyBVH && bodyBVH->valid)
+        DrapeDumpMesh(bodyBVH->verts, &bodyBVH->tris, shapeName, "body");
 
     // Belt-as-cloth boundary condition. The BELT mask forces high follow everywhere, so
     // the drape solver would anchor the whole belt to the FLOATING vanilla conform (it
@@ -24038,18 +24081,36 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         ? finalVerts : std::vector<Vec3>{};
     {
         bool cleftOn = EnvToggle("DRAPE_CLEFT_BRIDGE", true);
-        bool cleftTrueRear = EnvToggle("DRAPE_CLEFT_TRUE_REAR", false);
+        // A FENDA TEM DOIS LADOS (2026-08-16). This pass detects a body
+        // concavity - "deep central V between two summits in the lower half" -
+        // and fairs the cloth over it. NOTHING in that formulation is
+        // side-specific: the body has an intergluteal cleft at the rear AND an
+        // inner-thigh/pubic cleft at the front, and vanilla Conform All copies
+        // BOTH into the cloth as a crease down the midline (measured on the
+        // live BlackSmithTorso: cloth recedes from its own convex hull by up to
+        // 4.4u at the front and 1.4u at the rear, against ~0.0 authored).
+        // Choosing one side was never physics - it was a leftover of the old
+        // +Y-is-the-back mistake, kept "byte-stable" pending an A/B. So run the
+        // detector on both halves; each half builds its own ROI and its own
+        // target field, and the two ROIs are disjoint by construction.
+        // DRAPE_CLEFT_SIDES: 0 = front only (legacy), 1 = rear only, 2 = both.
+        int cleftSides = (int)EnvFloat("DRAPE_CLEFT_SIDES", 2.0f);
+        if (EnvToggle("DRAPE_CLEFT_TRUE_REAR", false)) cleftSides = 1;
 #if !defined(DRAPE_HARNESS_BUILD)
         if (DrapeFlagExists("cleft_bridge_off.flag"))
             cleftOn = false;
         if (DrapeFlagExists("cleft_true_rear_on.flag"))
-            cleftTrueRear = true;
+            cleftSides = 1;
         if (DrapeFlagExists("cleft_true_rear_off.flag"))
-            cleftTrueRear = false;
+            cleftSides = 0;
 #endif
         if (cleftOn && NormalizePreset(preset) == DRAPE_PRESET_FITTED_CLOTH &&
             params.enabled && !useEdges.empty() && bodyBVH && bodyBVH->valid &&
             n > 0 && n <= 0xFFFF) {
+          for (int cleftSideIdx = 0; cleftSideIdx < 2; ++cleftSideIdx) {
+            // side 0 = front half (+Y), side 1 = true rear (centerY - y).
+            if (cleftSides != 2 && cleftSides != cleftSideIdx) continue;
+            const bool cleftTrueRear = (cleftSideIdx == 1);
             // v3 (2026-07-10): BODY-DERIVED ROI. The cloth-side groove detection
             // (dip x lateral concavity) proved unstable across live states: on the
             // fresh capture it reached the cofrinho with 2 verts / 0.16u while
@@ -24232,12 +24293,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 if (nReg >= 12) {
                     // 1) raw offset targets on the region (drape-gated).
                     std::vector<Vec3> tgt = finalVerts;
+                    std::vector<Vec3> outN(n, Vec3{0.0f, 0.0f, 0.0f});
                     for (size_t i = 0; i < n; ++i) {
                         if (fw[i] <= 0.0f) continue;
                         Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
                         if (!BVHClosestPoint(*bodyBVH, finalVerts[i], cp, nrm, d2)) { fw[i] = 0.0f; continue; }
                         if (std::sqrt(d2) > kMaxGap) { fw[i] = 0.0f; continue; }   // bridging: leave it
                         tgt[i] = Add(cp, Scale(nrm, kClear));
+                        outN[i] = nrm;   // direcao para FORA do corpo neste vertice
                     }
                     // 2) heavy Laplacian smoothing of the TARGET FIELD (erases the
                     //    cleft/anatomy from the offset surface).
@@ -24330,10 +24393,31 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         }
                     }
                     // 3) blend verts toward the smoothed offset surface, capped.
+                    //
+                    // OUTWARD-ONLY (2026-08-16). The v5 pass above is described as
+                    // "each vert is FORBIDDEN to move toward the body ... no
+                    // magnetism/clip possible (never moves inward)"; the v7
+                    // offset-follow that replaced it silently LOST that invariant -
+                    // blending toward a body offset pulls cloth IN wherever the
+                    // cloth hangs outside that offset. Measured cost of the loss
+                    // when the rear branch is enabled: the yarl coat's back panel
+                    // is sucked onto the pants underneath (+20 garment face
+                    // residual on Pants, garmentFaceBodyConflict 94->111). Bridging
+                    // a hollow is OUTWARD by definition, so cancelling the inward
+                    // component costs the pass nothing it is meant to do, and it
+                    // restores an invariant the ad-hoc guards (bridge gap, plumb
+                    // apex) were each approximating from one side.
+                    const bool kOutwardOnly = EnvToggle("DRAPE_CLEFT_OUTWARD_ONLY", true);
                     for (size_t i = 0; i < n; ++i) {
                         if (fw[i] <= 0.0f) continue;
                         Vec3 cand = Add(finalVerts[i], Scale(Sub(tgt[i], finalVerts[i]), fw[i]));
                         Vec3 fromOrig = Sub(cand, orig[i]);
+                        if (kOutwardOnly && Len2(outN[i]) > 0.5f) {
+                            const float along = Dot(fromOrig, outN[i]);
+                            if (along < 0.0f)
+                                fromOrig = Sub(fromOrig, Scale(outN[i], along));
+                            cand = Add(orig[i], fromOrig);
+                        }
                         float dl = Len(fromOrig);
                         if (dl > kMaxDisp) cand = Add(orig[i], Scale(fromOrig, kMaxDisp / dl));
                         finalVerts[i] = cand;
@@ -24374,6 +24458,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // per-region post-hoc patch. See [[live-vs-corpus-divergence]].
                 }
             }
+          }
         }
     }
 
@@ -28309,6 +28394,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     if (pathBShellRequested && pathBShellScoped)
         PathBDumpLiveFinal(finalVerts, shapeName.c_str(), pathBShellAccepted);
 #endif
+    // ANALYSIS DUMP (inert unless DRAPE_DUMP_DIR is set): the pose the host
+    // actually receives. Nothing runs after this point.
+    DrapeDumpMesh(finalVerts, tris, shapeName, "final");
 
     static constexpr float kWriteEps2 = 1.0e-10f;
     for (size_t i = 0; i < n; ++i) {

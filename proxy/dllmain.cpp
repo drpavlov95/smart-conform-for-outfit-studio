@@ -280,7 +280,13 @@ static DWORD WINAPI KbPollThreadProc(LPVOID) {
             DbgLog("KbPoll: Ctrl+Alt+C fgPid=%lu osPid=%lu ready=%d conformAllId=%u running=%d hwnd=%p",
                    fgPid, g_osProcId, ready ? 1 : 0, g_conformAllId, running ? 1 : 0,
                    (void*)g_osHwnd);
-            if (fgPid == g_osProcId && ready && g_conformAllId && g_osHwnd && !running)
+            // NAO consultar g_hookReady aqui (bug 2026-08-16): ele só vira 1 dentro
+            // de EnsureAlgoLoaded, que só roda no WM_COMMAND — ou seja, o atalho
+            // ficava morto até o usuário CLICAR no item de menu uma vez por sessão
+            // ("ready=0" no log, com todo o resto válido). O teclado tem de fazer
+            // exatamente o que o clique faz: postar o comando. Quem carrega o algo
+            // sob demanda, e quem avisa se o build não é suportado, é o handler.
+            if (fgPid == g_osProcId && g_conformAllId && g_osHwnd && !running)
                 PostMessageA(g_osHwnd, WM_COMMAND, MAKEWPARAM(DRAPE_CMD_ID, 0), 0);
         }
         wasDown = combo;
@@ -505,12 +511,14 @@ static bool TryInjectMenu(HWND hw) {
         insertPos = nItems;
     }
 
-    BOOL r1 = InsertMenuA(sliderMenu, insertPos, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    // SEM separador: o item entra no MESMO grupo dos outros conforms, logo
+    // abaixo de "Conform All". O separador que existia aqui empurrava o Smart
+    // Conform para fora do grupo a que ele pertence.
     // The "\t" right-aligns the accelerator hint, exactly like the native
-    // "Conform All\tCtrl+Shift+C". The key itself is wired via DrapeKeyboardProc.
-    BOOL r2 = InsertMenuA(sliderMenu, insertPos + 1, MF_BYPOSITION | MF_STRING,
+    // "Conform All\tCtrl+Shift+C". The key itself is wired via KbPollThreadProc.
+    BOOL r2 = InsertMenuA(sliderMenu, insertPos, MF_BYPOSITION | MF_STRING,
                           DRAPE_CMD_ID, "Smart Conform All\tCtrl+Alt+C");
-    DbgLog("  TryInject: InsertMenu sep=%d item=%d", (int)r1, (int)r2);
+    DbgLog("  TryInject: InsertMenu item=%d (no separator, same group)", (int)r2);
     if (!r2) return false;
 
     // NEVER call DrawMenuBar from this (background) thread - see the
