@@ -28000,6 +28000,20 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         if (lateTuck && finalLayerTuck) {
             countLayerViolations(finalVerts, "antes-do-tuck-final");
             applyFinalLayerTuck(0, true, "final");
+            // SOLDA DE COSTURA, OBRIGATORIA AQUI.
+            //
+            // O tuck move vertice por vertice e roda DEPOIS da ultima solda do
+            // pipeline, entao qualquer gemeo de costura que ele separe nunca mais
+            // e reunido. Medido no BlackSmithTorso: 0 costuras abertas sem esta
+            // chamada... e 44, com abertura de ate 0.847u, com o tuck ligado -
+            // que e exatamente o rasgo vertical no centro das costas.
+            //
+            // `force` porque o gate do weld e por preset e este passe pode mover
+            // qualquer peca: quem quebra a invariante tem de poder restaura-la,
+            // que e a mesma razao pela qual o passe de volume de corpo ja usa
+            // force. Lição escrita cinco vezes neste arquivo e que eu repeti de
+            // novo: passe por vertice restaura a costura no proprio laco.
+            applyFinalExactSeamWeld("post-tuck-final", /*force=*/true);
             countLayerViolations(finalVerts, "apos-tuck-final");
         }
     }
