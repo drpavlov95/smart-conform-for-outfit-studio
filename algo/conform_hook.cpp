@@ -9868,7 +9868,10 @@ static void PathBDumpVerts(const std::vector<Vec3>& verts, const char* file) {
 static void PathBDumpTris(const std::vector<Vec3>& verts,
                           const std::vector<std::array<uint16_t, 3>>& tris,
                           const char* file) {
-    const char* tmp = getenv("TEMP");
+    // DRAPE_DUMP_DIR tem precedencia: sem isso um replay do harness sobrescreve
+    // as capturas vivas em %TEMP% (colisao ja medida uma vez).
+    const char* dir = getenv("DRAPE_DUMP_DIR");
+    const char* tmp = (dir && *dir) ? dir : getenv("TEMP");
     if (!tmp) return;
     std::string path = std::string(tmp) + "\\" + file;
     FILE* f = nullptr;
@@ -17844,8 +17847,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // shell can be physically clean at publication and then be modified by
     // finishers authored for the older Verlet/correction paths. Keep this
     // opt-in and pose-neutral: each checkpoint only measures and writes an OBJ.
+    // NAO gatear em pathBShellAccepted (2026-08-16): a cena viva dele RECUSA o
+    // shell, entao o unico traco que localiza qual estagio da cauda estraga a
+    // malha estava desligado exatamente no caso que precisa ser diagnosticado.
+    // Instrumentacao nao pode depender de o resultado ser bom.
     const bool pathBTailTrace =
-        pathBShellAccepted && tris && !tris->empty() &&
+        tris && !tris->empty() &&
         EnvToggle("DRAPE_PATHB_TAIL_TRACE", false);
     int pathBTailTraceIndex = 0;
     auto tracePathBTail = [&](const char* stage) {
@@ -26159,11 +26166,23 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // A compound threshold is intentional: the corpus contains legitimate
     // large panel rotations (many negative normal dots) and a few thin faces,
     // but only the broken Vampire baseline has both failure signals together.
-    bool antiClipIntegrityGuard = EnvToggle("DRAPE_ANTICLIP_SAFE_FLOOR", false);
+    // UMA FLAG GOVERNAVA DOIS MECANISMOS SEM RELACAO (2026-08-16).
+    // `DRAPE_ANTICLIP_SAFE_FLOOR` escolhia (a) a variante do piso de corpo que
+    // recusa passos que colapsam area de triangulo (<25%) ou viram normal - uma
+    // protecao de topologia que este projeto quer sempre - e ao mesmo tempo (b)
+    // ESTE guarda de degradacao, que ao disparar arrasta vertices de volta para
+    // a vanilla. Na cena viva dele (b) disparava na margem (flips=28/20,
+    // collapsed=3/2) e arrastava 89 vertices, RECRIANDO o vinco da linha media
+    // que (a) e os passes de ponte tinham acabado de tirar - e nao havia como
+    // ficar com (a) sem (b). Agora tem: o guarda tem o proprio interruptor, e
+    // por padrao esta DESLIGADO, porque a medida na captura dele diz que ligado
+    // custa +9 penetracoes, 1.7u de profundidade e 0.53 de estiramento.
+    bool antiClipIntegrityGuard =
+        EnvToggle("DRAPE_ANTICLIP_INTEGRITY_GUARD", false);
 #if !defined(DRAPE_HARNESS_BUILD)
-    if (DrapeFlagExists("anticlip_safe_floor_off.flag"))
+    if (DrapeFlagExists("anticlip_integrity_guard_off.flag"))
         antiClipIntegrityGuard = false;
-    else if (DrapeFlagExists("anticlip_safe_floor_on.flag"))
+    else if (DrapeFlagExists("anticlip_integrity_guard_on.flag"))
         antiClipIntegrityGuard = true;
 #endif
     // UNIVERSAL (2026-07-24): was gated on shapeName == "vampire_robes_alt" &&
