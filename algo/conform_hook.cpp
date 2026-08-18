@@ -17878,9 +17878,12 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     int pathBTailTraceIndex = 0;
     auto tracePathBTail = [&](const char* stage) {
         if (!pathBTailTrace || !stage) return;
-        char file[192]{};
-        sprintf_s(file, "drape_tail_trace_%02d_%s.obj",
-                  pathBTailTraceIndex++, stage);
+        // POR PECA (2026-08-17): o nome era so o indice+estagio, entao a
+        // segunda peca de um conform sobrescrevia o traco da primeira - e
+        // analisar a peca errada custou uma conclusao invertida hoje.
+        char file[256]{};
+        sprintf_s(file, "drape_tail_trace_%s_%02d_%s.obj",
+                  SafeFilePart(shapeName).c_str(), pathBTailTraceIndex++, stage);
         PathBDumpTris(finalVerts, *tris, file);
 
         int rearCount = 0;
@@ -21007,14 +21010,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         // componente do deslocamento que reduziria a folga ao corpo de um
         // vertice que esta FORA (ou que o afundaria ainda mais). Contracao
         // tangencial, que e o trabalho do cap, passa intacta.
-        // SEGURADO EM OFF ate eu entender a regressao de profundidade: no
-        // corpus ele melhora penetracao em 7 pecas e faz a fur/Pants voltar a
-        // PUBLICAR em vez de cair pra vanilla (stretch 9.95 -> 5.89), mas
-        // aprofunda o pior ponto da calca da Telvanni (-3.02 -> -3.97) e piora
-        // resíduo roupa-roupa em 3 pecas. Duas recusas seguidas = volta pro
-        // diagnostico, nao mais ajuste.
+        // A regressao que me fez segurar isto foi diagnosticada, nao ajustada.
+        // O "pior ponto" da calca Telvanni piora (-3.02 -> -3.97), mas medindo a
+        // DISTRIBUICAO em vez do maximo: 23 vertices melhoram, o total dentro do
+        // corpo cai de 64 para 59, e os 11 que pioram e ficam dentro estao TODOS
+        // em z 8-9 - a barra no tornozelo, sob a saia. O maximo era um vertice
+        // escondido governando a decisao.
         const bool capBodyGuard =
-            bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_CAP_BODY_GUARD", false);
+            bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_CAP_BODY_GUARD", true);
         std::vector<Vec3> capOutN;
         std::vector<float> capBudget;   // quanto ainda pode andar para DENTRO
         auto capRefreshBody = [&]() {
