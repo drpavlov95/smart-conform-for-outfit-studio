@@ -20994,22 +20994,82 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         const float kFinalSupportCap =
             EnvFloat("DRAPE_FINAL_SUPPORT_CAP",
                      innerLooseSupportCap ? 1.08f : 1.12f);
+        // O CAP NAO PODE EMPURRAR PANO PARA DENTRO DO CORPO (2026-08-17).
+        // Este cap contrai arestas esticadas puxando as duas pontas uma para a
+        // outra, sem saber onde esta o corpo - entao ele desfaz o piso final de
+        // corpo. Medido na calca da Telvanni, os tres ciclos do piso:
+        //     empurrao 48->35, cap+solda ->51 | 51->35, ->52 | 52->35, ->51
+        // O piso tira ~15 por ciclo e o cap devolve ~16. Tres ciclos, saldo
+        // ZERO, e a calca fica 3u dentro do corpo bem na abertura da saia, que
+        // e onde o usuario ve. E a mesma classe do invariante que o cleft-bridge
+        // tinha perdido: um passe corretivo com licenca para enfiar pano no
+        // corpo. A regra e "nao piorar", sem limiar novo: cancela-se apenas a
+        // componente do deslocamento que reduziria a folga ao corpo de um
+        // vertice que esta FORA (ou que o afundaria ainda mais). Contracao
+        // tangencial, que e o trabalho do cap, passa intacta.
+        // SEGURADO EM OFF ate eu entender a regressao de profundidade: no
+        // corpus ele melhora penetracao em 7 pecas e faz a fur/Pants voltar a
+        // PUBLICAR em vez de cair pra vanilla (stretch 9.95 -> 5.89), mas
+        // aprofunda o pior ponto da calca da Telvanni (-3.02 -> -3.97) e piora
+        // resíduo roupa-roupa em 3 pecas. Duas recusas seguidas = volta pro
+        // diagnostico, nao mais ajuste.
+        const bool capBodyGuard =
+            bodyBVH && bodyBVH->valid && EnvToggle("DRAPE_CAP_BODY_GUARD", false);
+        std::vector<Vec3> capOutN;
+        std::vector<float> capBudget;   // quanto ainda pode andar para DENTRO
+        auto capRefreshBody = [&]() {
+            if (!capBodyGuard) return;
+            capOutN.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+            capBudget.assign(n, 1.0e9f);
+            for (size_t i = 0; i < n; ++i) {
+                Vec3 nr{0.0f, 0.0f, 1.0f};
+                float g = 0.0f;
+                if (BVHSignedGap(*bodyBVH, finalVerts[i], g, &nr)) {
+                    // ORCAMENTO, nao instantaneo: a folga e medida uma vez por
+                    // rodada e envelhece depois de milhares de arestas. Guardar
+                    // pela folga velha deixava passar deslocamentos somados que
+                    // afundavam o pior vertice (medido: pior folga -3.02 ->
+                    // -4.91). Cada correcao consome do orcamento, entao a soma
+                    // da rodada nunca ultrapassa a pele, mesmo com a medida
+                    // envelhecida.
+                    capBudget[i] = std::max(0.0f, g);
+                    capOutN[i] = nr;
+                }
+            }
+        };
+        auto capGuard = [&](uint32_t v, const Vec3& delta) -> Vec3 {
+            if (!capBodyGuard || v >= capBudget.size() || capBudget[v] > 1.0e8f)
+                return delta;
+            const Vec3& nrm = capOutN[v];
+            if (Len2(nrm) < 0.5f) return delta;
+            const float along = Dot(delta, nrm);
+            if (along >= 0.0f) return delta;              // para fora: livre
+            const float want = -along;                    // quanto quer entrar
+            const float grant = std::min(want, capBudget[v]);
+            capBudget[v] -= grant;
+            if (grant >= want - 1.0e-6f) return delta;    // coube no orcamento
+            return Add(delta, Scale(nrm, want - grant));  // corta o excedente
+        };
         auto applySupportDelta = [&](uint32_t v, const Vec3& delta) {
             if (v >= n) return;
             if (!exactSeamGroupOf.empty() && v < exactSeamGroupOf.size()) {
                 int gi = exactSeamGroupOf[v];
                 if (gi >= 0 && gi < (int)exactSeamGroups.size()) {
+                    Vec3 d = delta;
+                    for (uint32_t member : exactSeamGroups[(size_t)gi])
+                        if (member < n) d = capGuard(member, d);
                     for (uint32_t member : exactSeamGroups[(size_t)gi]) {
                         if (member < n)
-                            finalVerts[member] = Add(finalVerts[member], delta);
+                            finalVerts[member] = Add(finalVerts[member], d);
                     }
                     return;
                 }
             }
-            finalVerts[v] = Add(finalVerts[v], delta);
+            finalVerts[v] = Add(finalVerts[v], capGuard(v, delta));
         };
         int finalCapAdjusted = 0;
         for (int it = 0; it < rounds; ++it) {
+            capRefreshBody();
             int roundAdjusted = 0;
             for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                 const auto& e = useEdges[ei];
@@ -25666,12 +25726,31 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             if (id >= 0 && id < (int)islandRigidOut.size() && islandRigidOut[(size_t)id])
                 return false;
             if (outerColliders) {
+                // PROXIMIDADE NAO E COBERTURA (2026-08-17). O teste era so
+                // "existe superficie externa a menos de 2u", e a borda de uma
+                // peca ABERTA - a fenda frontal da saia Telvanni, uma capa, um
+                // manto aberto - fica a menos de 2u de tudo que esta ao lado
+                // dela. Resultado: o vertice era classificado como escondido e
+                // deixado ENTERRADO no corpo bem no vao onde o olho o ve.
+                // Medido na calca da Telvanni: 35 dos ~47 vertices dentro do
+                // corpo eram pulados por esta regra.
+                // Coberto significa que a peca externa esta POR FORA de mim, e
+                // isso se decide pela normal do corpo, nao pela distancia: se o
+                // ponto mais proximo da externa esta ao LADO (ou por dentro), eu
+                // estou na abertura dela e apareco.
+                Vec3 bodyNrm{0.0f, 0.0f, 1.0f};
+                float bodyGap = 0.0f;
+                const bool haveNrm =
+                    BVHSignedGap(*bodyBVH, finalVerts[i], bodyGap, &bodyNrm);
                 for (const OuterCollider& oc : *outerColliders) {
                     if (!oc.Current().valid) continue;
                     Vec3 cp{0,0,0}, nrm{0,0,1}; float d2 = 0.0f;
-                    if (BVHClosestPoint(oc.Current(), finalVerts[i], cp, nrm, d2) &&
-                        d2 < kCoveredDist * kCoveredDist)
-                        return false;   // covered by an outer garment: leave buried
+                    if (!BVHClosestPoint(oc.Current(), finalVerts[i], cp, nrm, d2))
+                        continue;
+                    if (d2 >= kCoveredDist * kCoveredDist) continue;
+                    if (haveNrm && Dot(Sub(cp, finalVerts[i]), bodyNrm) <= 0.0f)
+                        continue;   // a externa esta ao lado/por dentro: exposto
+                    return false;   // covered by an outer garment: leave buried
                 }
             }
             return true;
@@ -25726,9 +25805,26 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
         };
         int floored = 0;
+        // Diagnostico do piso (2026-08-17): quantos vertices seguem DENTRO do
+        // corpo em cada ciclo, e quantos estao dentro mas foram pulados por
+        // "coberto". Sem isto nao da para distinguir "o piso nao alcancou" de
+        // "o cap de esticamento desfez o empurrao".
+        const bool floorDiag = EnvToggle("DRAPE_FINAL_FLOOR_DIAG", false);
+        auto floorPenCount = [&](int& skippedCovered) -> int {
+            int pen = 0; skippedCovered = 0;
+            for (size_t i = 0; i < n; ++i) {
+                float g = 0.0f;
+                if (!BVHSignedGap(*bodyBVH, finalVerts[i], g, nullptr)) continue;
+                if (g >= -0.15f) continue;
+                ++pen;
+                if (!floorable(i)) ++skippedCovered;
+            }
+            return pen;
+        };
         if (!safeTopologyFloor) {
             for (int cycle = 0; cycle < 3; ++cycle) {
                 int moved = 0;
+                int skipped0 = 0, pen0 = floorDiag ? floorPenCount(skipped0) : 0;
                 for (size_t i = 0; i < n; ++i) {
                     if (!floorable(i)) continue;
                     Vec3 target = finalVerts[i];
@@ -25736,10 +25832,22 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     finalVerts[i] = target;
                     ++moved;
                 }
+                int skipped1 = 0, pen1 = floorDiag ? floorPenCount(skipped1) : 0;
                 if (cycle == 0) floored = moved;
-                if (moved == 0) break;
+                if (moved == 0) {
+                    if (floorDiag)
+                        HLog("detour: FLOOR-DIAG shape='%s' cycle=%d moved=0 pen=%d (coberto=%d)",
+                             shapeName.c_str(), cycle, pen1, skipped1);
+                    break;
+                }
                 applyFinalSupportCap(16, "final-floor-stretch-cap");
                 weldGroupsFloored();
+                if (floorDiag) {
+                    int skipped2 = 0; const int pen2 = floorPenCount(skipped2);
+                    HLog("detour: FLOOR-DIAG shape='%s' cycle=%d pen %d->%d apos empurrao "
+                         "(moveu=%d), ->%d apos cap+solda (coberto-e-dentro: %d)",
+                         shapeName.c_str(), cycle, pen0, pen1, moved, pen2, skipped2);
+                }
             }
             if (floored > 0)
                 HLog("detour: final-body-floor shape='%s' clr=%.2f pushed=%d",
