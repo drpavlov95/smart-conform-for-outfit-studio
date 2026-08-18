@@ -66,8 +66,17 @@ static void HLog(const char* fmt, ...) {
     char line[1200];
     int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "[%02d:%02d:%02d.%03d] HOOK %s\r\n",
         st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    // DRAPE_DUMP_DIR tem precedencia (2026-08-17): sem isso um replay do harness
+    // APENDA no drape_debug.log da sessao viva do usuario - o unico artefato que
+    // registra o que o OutfitStudio dele realmente fez. Ja aconteceu.
     char path[MAX_PATH];
-    if (!GetTempPathA(MAX_PATH, path)) return;
+    const char* dumpDir = getenv("DRAPE_DUMP_DIR");
+    if (dumpDir && *dumpDir) {
+        strncpy_s(path, MAX_PATH, dumpDir, _TRUNCATE);
+        strcat_s(path, MAX_PATH, "\\");
+    } else if (!GetTempPathA(MAX_PATH, path)) {
+        return;
+    }
     strcat_s(path, MAX_PATH, "drape_debug.log");
     HANDLE h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -17492,6 +17501,14 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
         HLog("path-b-shell: %s preset admitted by geometry shape='%s' free=%d/%zu (%.0f%%)",
              autoHasCloth ? "AUTO" : "TUBULAR",
              shapeName.c_str(), shellFreeVerts, n, shellFreeFrac * 100.0f);
+    // Registrar tambem a RECUSA: sem isto, "por que esta peca nao chegou ao
+    // solver" so se responde recompilando. O escopo e a primeira pergunta de
+    // todo diagnostico de clipping.
+    else if (pathBShellRequested && !pathBShellScoped)
+        HLog("path-b-shell: OUT OF SCOPE shape='%s' preset=%d free=%d/%zu (%.0f%%) "
+             "autoFrac=%.2f tubularFrac=%.2f",
+             shapeName.c_str(), (int)originalPreset, shellFreeVerts, n,
+             shellFreeFrac * 100.0f, kAutoFreeFrac, kTubularFreeFrac);
     if (pathBShellRequested && pathBShellScoped) {
         const auto started = std::chrono::steady_clock::now();
         const std::vector<Vec3> productionEntry = finalVerts;
