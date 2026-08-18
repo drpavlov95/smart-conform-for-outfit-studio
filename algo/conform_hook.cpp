@@ -24004,6 +24004,157 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             // extra rounds are ~no-ops for them.
             const int effIters = (nChord > 0)
                 ? std::max(iters, (int)EnvFloat("DRAPE_PIT_ITERS", 16.0f)) : iters;
+
+            // ESPACO LIVRE POR VERTICE (2026-08-18). Este passe achata cada
+            // painel pendurado em direcao a curvatura AUTORADA dele, movendo o
+            // vertice ao longo da propria normal - sem saber que existe outro
+            // painel da MESMA peca a 2u de distancia. No manto da Telvanni ele
+            // move 1974 de 2785 vertices por 8 iteracoes e leva a peca de 409
+            // auto-interseccoes (abaixo do host) para 528.
+            //
+            // Enfraquecer o passe inteiro nao serve: metade da forca ja leva o
+            // estiramento de 4.87 para 7.40, porque o alivio de esticamento E o
+            // que ele produz. E reverter depois tambem nao (medido: derruba
+            // BlackSmithTorso e Cloak para vanilla).
+            //
+            // Entao o limite e local e vem da geometria, sem constante nova:
+            // cada vertice pode andar no maximo METADE da distancia ate a
+            // superficie mais proxima da propria peca que esteja LONGE dele ao
+            // longo da malha. Metade porque os dois lados se movem: se cada um
+            // anda metade do vao, eles se encontram e nao se atravessam.
+            // "Longe ao longo da malha" e o que separa outro painel da propria
+            // vizinhanca do vertice.
+            std::vector<float> panelFree;
+            std::vector<Vec3> panelFreeDir;       // rumo a superficie vizinha
+            std::vector<int>  panelFreeTri;       // triangulo parceiro
+            std::vector<float> panelFreeAuthored; // separacao que o autor deu
+            const bool panelFreeSpace =
+                EnvToggle("DRAPE_PANELS_FREE_SPACE", false) && tris && !tris->empty();
+            if (panelFreeSpace) {
+                const int kRings = std::max(1, (int)EnvFloat("DRAPE_PANELS_FREE_RINGS", 4.0f));
+                const float kSearch = std::max(0.5f, EnvFloat("DRAPE_PANELS_FREE_SEARCH", 6.0f));
+                std::vector<std::vector<uint32_t>> vnbr(n);
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    vnbr[e.a].push_back(e.b);
+                    vnbr[e.b].push_back(e.a);
+                }
+                // A COSTURA E O MESMO PONTO DE MATERIAL, NAO OUTRO PAINEL.
+                // Sem isto, uma costura de gemeos coincidentes cuja topologia
+                // quase nao compartilha aresta - a escada do centro do
+                // BlackSmithTorso e o caso classico deste arquivo - aparece
+                // como "outra superficie a distancia zero", o vao livre vai a
+                // zero e o passe congela ali. Medido: stretch 4.07 -> 12.05 e a
+                // peca cai para vanilla. Ligar os gemeos na vizinhanca resolve
+                // pela definicao, sem limiar.
+                for (const auto& grp : exactSeamGroups) {
+                    if (grp.size() < 2) continue;
+                    for (uint32_t a : grp)
+                        for (uint32_t b : grp)
+                            if (a != b && a < n && b < n) vnbr[a].push_back(b);
+                }
+                // grade uniforme sobre os triangulos, na pose de entrada
+                const float cell = kSearch;
+                std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+                auto key3 = [&](int x, int y, int z) -> uint64_t {
+                    return ((uint64_t)(uint32_t)(x + 1024) << 42) ^
+                           ((uint64_t)(uint32_t)(y + 1024) << 21) ^
+                            (uint64_t)(uint32_t)(z + 1024);
+                };
+                for (size_t ti = 0; ti < tris->size(); ++ti) {
+                    const auto& t = (*tris)[ti];
+                    if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                    Vec3 lo = finalVerts[t[0]], hi = lo;
+                    for (int k = 1; k < 3; ++k) {
+                        const Vec3& p = finalVerts[t[k]];
+                        lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
+                        hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z);
+                    }
+                    for (int x = (int)std::floor(lo.x / cell); x <= (int)std::floor(hi.x / cell); ++x)
+                    for (int y = (int)std::floor(lo.y / cell); y <= (int)std::floor(hi.y / cell); ++y)
+                    for (int z = (int)std::floor(lo.z / cell); z <= (int)std::floor(hi.z / cell); ++z)
+                        grid[key3(x, y, z)].push_back((uint32_t)ti);
+                }
+                panelFree.assign(n, 1.0e9f);
+                panelFreeDir.assign(n, Vec3{0.0f, 0.0f, 0.0f});
+                panelFreeTri.assign(n, -1);
+                panelFreeAuthored.assign(n, 0.0f);
+                std::vector<uint8_t> nearVert(n, 0);
+                std::vector<uint32_t> ring, next, touched;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!eligible[i]) continue;
+                    // vizinhanca de kRings aneis: essa parte da malha NAO conta
+                    touched.clear(); ring.clear();
+                    ring.push_back((uint32_t)i);
+                    nearVert[i] = 1; touched.push_back((uint32_t)i);
+                    for (int r = 0; r < kRings; ++r) {
+                        next.clear();
+                        for (uint32_t v : ring)
+                            for (uint32_t w : vnbr[v])
+                                if (!nearVert[w]) { nearVert[w] = 1; touched.push_back(w); next.push_back(w); }
+                        ring.swap(next);
+                    }
+                    const Vec3& p = finalVerts[i];
+                    float best = 1.0e9f;
+                    int bestTri = -1;
+                    Vec3 bestDir{0.0f, 0.0f, 0.0f};
+                    const int cx = (int)std::floor(p.x / cell), cy = (int)std::floor(p.y / cell),
+                              cz = (int)std::floor(p.z / cell);
+                    for (int dx = -1; dx <= 1; ++dx)
+                    for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        auto it = grid.find(key3(cx + dx, cy + dy, cz + dz));
+                        if (it == grid.end()) continue;
+                        for (uint32_t ti : it->second) {
+                            const auto& t = (*tris)[ti];
+                            if (nearVert[t[0]] || nearVert[t[1]] || nearVert[t[2]]) continue;
+                            const Vec3 cp = ClosestPtTriangle(
+                                p, finalVerts[t[0]], finalVerts[t[1]], finalVerts[t[2]]);
+                            const Vec3 toIt = Sub(cp, p);
+                            const float dd = Len(toIt);
+                            if (dd < best) {
+                                best = dd;
+                                bestTri = (int)ti;
+                                bestDir = dd > 1.0e-6f ? Scale(toIt, 1.0f / dd)
+                                                       : Vec3{0.0f, 0.0f, 0.0f};
+                            }
+                        }
+                    }
+                    panelFree[i] = best;
+                    panelFreeDir[i] = bestDir;
+                    panelFreeTri[i] = bestTri;
+                    // SEPARACAO AUTORADA como piso, no lugar de "metade do vao".
+                    // A regra da metade supoe que os dois lados vem um contra o
+                    // outro; onde o outro lado esta parado ela proibe movimento
+                    // legitimo (BlackSmithTorso: nada apertado, menor vao 2.34u,
+                    // e ainda assim stretch 4.07 -> 12.06 por travar deslocamento
+                    // acima de ~1.16u). O autor ja disse qual e a folga certa
+                    // entre estes dois painies: e a que eles tem na malha
+                    // AUTORADA. Comprimi-la e o defeito; ate ela, e drapejado.
+                    if (bestTri >= 0) {
+                        const auto& bt = (*tris)[(size_t)bestTri];
+                        const Vec3 acp = ClosestPtTriangle(
+                            baseVerts[i], baseVerts[bt[0]], baseVerts[bt[1]], baseVerts[bt[2]]);
+                        panelFreeAuthored[i] = Len(Sub(baseVerts[i], acp));
+                    }
+                    for (uint32_t v : touched) nearVert[v] = 0;
+                }
+                int limited = 0, tight = 0, veryTight = 0;
+                float minFree = 1.0e9f;
+                for (size_t i = 0; i < n; ++i) {
+                    if (!eligible[i] || panelFree[i] >= 1.0e8f) continue;
+                    ++limited;
+                    minFree = std::min(minFree, panelFree[i]);
+                    if (panelFree[i] < 1.0f) ++tight;
+                    if (panelFree[i] < 0.2f) ++veryTight;
+                }
+                HLog("detour: panel free-space shape='%s' medidos=%d apertados(<1u)=%d "
+                     "congelados(<0.2u)=%d menor=%.3f aneis=%d busca=%.1f",
+                     shapeName.c_str(), limited, tight, veryTight,
+                     minFree > 1.0e8f ? -1.0f : minFree, kRings, kSearch);
+            }
+            const std::vector<Vec3> panelFreeEntry =
+                panelFreeSpace ? finalVerts : std::vector<Vec3>{};
             for (int it = 0; it < effIters; ++it) {
                 // (a) NORMAL-component Laplacian toward the AUTHORED curvature (c -> c0),
                 //     hanging verts only. Normal-only: the tangential part would slide
@@ -24059,6 +24210,21 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // lifting the vert to the bridge); inward is blocked near contact.
                     delta *= (delta > 0.0f) ? std::max(wOut[i], wPit[i]) : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
+                    if (panelFreeSpace && panelFreeTri[i] >= 0) {
+                        // distancia ATUAL ao painel parceiro, recalculada a cada
+                        // iteracao: e uma restricao viva, nao um orcamento
+                        // gasto de antemao.
+                        const auto& bt = (*tris)[(size_t)panelFreeTri[i]];
+                        const Vec3 cp = ClosestPtTriangle(
+                            finalVerts[i], finalVerts[bt[0]], finalVerts[bt[1]],
+                            finalVerts[bt[2]]);
+                        const Vec3 toIt = Sub(cp, finalVerts[i]);
+                        const float dd = Len(toIt);
+                        const float floorGap = panelFreeAuthored[i];
+                        if (dd < floorGap && dd > 1.0e-6f)
+                            finalVerts[i] = Sub(finalVerts[i],
+                                Scale(toIt, (floorGap - dd) / dd));
+                    }
                 }
                 // (a2) Â§6 chord bridge: lift each pit vert toward the segment between its
                 // antipodal rim pair (the mouth of the crease), stopping at the depth
