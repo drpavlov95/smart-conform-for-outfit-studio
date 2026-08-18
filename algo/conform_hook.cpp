@@ -17718,6 +17718,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             initialFaceRegressions == 0;
                     }
                 }
+                // A pose RECUSADA e a unica evidencia de por que o portao
+                // recusa, e ate agora ela era descartada sem deixar rastro.
+                DrapeDumpMesh(shellCandidate, tris, shapeName, "candidate");
+                DrapeDumpMesh(productionEntry, tris, shapeName, "shellentry");
                 HLog("path-b-shell: local-closure cycles=%d crossReverted=%d bodyReverted=%d faceReverted=%d crossing=%d->%d bodyRegression=%d->%d faceRegression=%d->%d accepted=%d/%d/%d stable=%d",
                      closureCycles, crossingReverted, bodyReverted, faceReverted,
                      initialCrossings, closureStats.finalNewPairs,
