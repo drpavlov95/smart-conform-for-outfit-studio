@@ -21923,6 +21923,55 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                    islandRigidOut[(size_t)id];
         };
 
+        // NAO CRIAR TRIANGULO COLAPSADO (2026-08-16). Este passe empurra cada
+        // vertice pela SUA folga ao longo da SUA normal; vizinhos que recebem
+        // passos diferentes espremem a face entre eles. Medido no replay da
+        // captura viva: ele leva as faces abaixo de 35% da area autorada de 40
+        // para 50 e, ao faze-lo, apaga o reparo de parametrizacao que roda antes
+        // (colapsos fora da costura: 7 sem este passe, 16 com ele).
+        //
+        // A regra e a mesma que a variante guardada do piso final ja usa, e e um
+        // "nao piorar", nao um limiar novo: um passo que levaria uma face
+        // incidente abaixo de kTuckMinArea da area AUTORADA e recusado; se ela ja
+        // estava abaixo disso, so nao pode encolher mais. O tuck perde apenas os
+        // passos que estragam a malha.
+        const float kTuckMinArea = ClampRange(
+            EnvFloat("DRAPE_TUCK_MIN_AREA", 0.35f), 0.05f, 0.95f);
+        std::vector<std::vector<uint32_t>> tuckIncident;
+        std::vector<float> tuckAuthoredArea;
+        if (tris && !tris->empty()) {
+            tuckIncident.assign(n, std::vector<uint32_t>());
+            tuckAuthoredArea.assign(tris->size(), 0.0f);
+            for (size_t ti = 0; ti < tris->size(); ++ti) {
+                const auto& t = (*tris)[ti];
+                if (t[0] >= n || t[1] >= n || t[2] >= n) continue;
+                tuckIncident[t[0]].push_back((uint32_t)ti);
+                tuckIncident[t[1]].push_back((uint32_t)ti);
+                tuckIncident[t[2]].push_back((uint32_t)ti);
+                tuckAuthoredArea[ti] = 0.5f * Len(Cross(
+                    Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                    Sub(baseVerts[t[2]], baseVerts[t[0]])));
+            }
+        }
+        auto tuckAreaOk = [&](size_t vi, const Vec3& cand) -> bool {
+            if (tuckIncident.empty() || vi >= tuckIncident.size()) return true;
+            for (uint32_t ti : tuckIncident[vi]) {
+                const float authored = tuckAuthoredArea[ti];
+                if (authored <= 1.0e-9f) continue;
+                const auto& t = (*tris)[ti];
+                Vec3 p[3] = {finalVerts[t[0]], finalVerts[t[1]], finalVerts[t[2]]};
+                const float before =
+                    0.5f * Len(Cross(Sub(p[1], p[0]), Sub(p[2], p[0])));
+                for (int k = 0; k < 3; ++k)
+                    if ((size_t)t[k] == vi) p[k] = cand;
+                const float after =
+                    0.5f * Len(Cross(Sub(p[1], p[0]), Sub(p[2], p[0])));
+                if (after >= before) continue;             // nao encolheu
+                if (after < kTuckMinArea * authored) return false;
+            }
+            return true;
+        };
+
         int totalTucked = 0;
         // ENTRY DIAGNOSTIC (2026-07-22): is the rear under-belt band already
         // inside the body when this pass STARTS? The shell hands off clean, so
@@ -22003,7 +22052,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // CURRENT gap each round, so it bounds the actual position, not just intent.
                 step = std::min(step, myGap - kMoveFloor);
                 if (step <= 0.0f) continue;
-                finalVerts[i] = Add(finalVerts[i], Scale(myNrm, -step));
+                {
+                    const Vec3 cand = Add(finalVerts[i], Scale(myNrm, -step));
+                    if (!tuckAreaOk(i, cand)) continue;
+                    finalVerts[i] = cand;
+                }
                 ++roundTucked;
             }
             if (tris && !tris->empty()) {
@@ -22071,7 +22124,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                                 if (room <= 0.005f) continue;
                                 float vStep = std::min(step * ws[k] / sumSq, room);
                                 if (vStep <= 0.0f) continue;
-                                finalVerts[vi[k]] = Add(finalVerts[vi[k]], Scale(myNrm, -vStep));
+                                const Vec3 cand =
+                                    Add(finalVerts[vi[k]], Scale(myNrm, -vStep));
+                                if (!tuckAreaOk(vi[k], cand)) continue;
+                                finalVerts[vi[k]] = cand;
                                 moved = true;
                             }
                         }
