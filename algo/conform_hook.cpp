@@ -23558,7 +23558,10 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // Rigid islands and the belt are excluded. OFF by default until eyeballed (DRAPE_PANELS=1).
     const std::vector<Vec3> panelPassEntry = fittedFinisherGuard
         ? finalVerts : std::vector<Vec3>{};
-    bool panelsOn = kPanelFlatten || EnvToggleOn("DRAPE_PANELS");
+    // Toggle SIMETRICO (2026-08-18): era `kPanelFlatten || EnvToggleOn(...)`, ou
+    // seja, so ligava - e com kPanelFlatten=true nao havia como ablacionar este
+    // passe. Padrao inalterado; DRAPE_PANELS=0 agora desliga para medir.
+    bool panelsOn = EnvToggle("DRAPE_PANELS", kPanelFlatten);
 #if !defined(DRAPE_HARNESS_BUILD)
     // Live-only file gate (MO2 can't set env vars): drop/delete panels_on.flag to A/B in
     // OutfitStudio. Harness/golden runs ignore the file so the corpus baseline stays clean.
