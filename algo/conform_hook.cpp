@@ -24028,8 +24028,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             std::vector<Vec3> panelFreeDir;       // rumo a superficie vizinha
             std::vector<int>  panelFreeTri;       // triangulo parceiro
             std::vector<float> panelFreeAuthored; // separacao que o autor deu
+            // ESCOPO = O MODO DE PIPELINE EM QUE FOI VALIDADO, nao uma peca.
+            // Medido: com o shell no circuito o limite e limpo (BlackSmithTorso
+            // sai BYTE-IDENTICO, manto Telvanni 576 -> 374 auto-interseccoes com
+            // o esticamento intacto). Sem o shell, a mesma mudanca de pose e
+            // amplificada pelo piso final de corpo ate estourar o teto de
+            // publicacao em duas pecas. Enquanto essa fragilidade do piso nao
+            // for consertada, o limite vale onde foi medido.
             const bool panelFreeSpace =
-                EnvToggle("DRAPE_PANELS_FREE_SPACE", false) && tris && !tris->empty();
+                EnvToggle("DRAPE_PANELS_FREE_SPACE", true) &&
+                pathBShellRequested && tris && !tris->empty();
             if (panelFreeSpace) {
                 const int kRings = std::max(1, (int)EnvFloat("DRAPE_PANELS_FREE_RINGS", 4.0f));
                 const float kSearch = std::max(0.5f, EnvFloat("DRAPE_PANELS_FREE_SEARCH", 6.0f));
@@ -24155,6 +24163,33 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
             const std::vector<Vec3> panelFreeEntry =
                 panelFreeSpace ? finalVerts : std::vector<Vec3>{};
+            // ESCADA DE DEGRADACAO (2026-08-18). O limite de separacao entre
+            // paineis conserta o auto-clipping onde ele existe (manto Telvanni:
+            // 576 -> 374 auto-interseccoes, host 520, autorado 190) mas em outras
+            // malhas o degrau que ele cria nao e absorvido nem por 12 rodadas de
+            // cap, e o esticamento estoura o teto de publicacao - a peca cairia
+            // para VANILLA, que e muito pior do que ter auto-interseccao. Sete
+            // mecanismos diferentes bateram nessa mesma parede.
+            //
+            // Em vez de escolher entre as duas, mede-se: roda com o limite, e se
+            // o esticamento ficou pior do que estava ANTES do passe, refaz o
+            // passe sem ele. Fallback = comportamento anterior, nunca vanilla.
+            // Mesma receita do clamp de silhueta (f0654af).
+            auto worstStretchNow = [&]() -> float {
+                float w = 0.0f;
+                for (const auto& e : useEdges) {
+                    if (e.a >= n || e.b >= n) continue;
+                    if (e.restLength <= 1.0e-6f) continue;
+                    w = std::max(w, Len(Sub(finalVerts[e.a], finalVerts[e.b]))
+                                        / e.restLength);
+                }
+                return w;
+            };
+            const std::vector<Vec3> panelAttemptEntry = finalVerts;
+            const float panelEntryStretch = panelFreeSpace ? worstStretchNow() : 0.0f;
+            bool panelLimitActive = panelFreeSpace;
+            for (int attempt = 0; attempt < (panelFreeSpace ? 2 : 1); ++attempt) {
+            if (attempt == 1) { finalVerts = panelAttemptEntry; panelLimitActive = false; }
             for (int it = 0; it < effIters; ++it) {
                 // (a) NORMAL-component Laplacian toward the AUTHORED curvature (c -> c0),
                 //     hanging verts only. Normal-only: the tangential part would slide
@@ -24210,7 +24245,7 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     // lifting the vert to the bridge); inward is blocked near contact.
                     delta *= (delta > 0.0f) ? std::max(wOut[i], wPit[i]) : wIn[i];
                     finalVerts[i] = Add(finalVerts[i], Scale(nrm, delta));
-                    if (panelFreeSpace && panelFreeTri[i] >= 0) {
+                    if (panelLimitActive && panelFreeTri[i] >= 0) {
                         // distancia ATUAL ao painel parceiro, recalculada a cada
                         // iteracao: e uma restricao viva, nao um orcamento
                         // gasto de antemao.
@@ -24305,6 +24340,19 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 // re-polices edges other passes left over 1.12 (the loose path's line
                 // locks do), yanking verts far from any panel/pit into pucker stars
                 // (measured: centre-back v395 moved 1.46u with zero eligibility).
+                // UMA VARREDURA NAO ABSORVE UM RASGO. Este cap e Gauss-Seidel:
+                // uma passada so propaga a correcao por uma aresta. Enquanto o
+                // passe move um campo suave isso basta, mas quando o limite de
+                // separacao entre paineis trava vertices espalhados, o degrau
+                // fica - medido: o esticamento estoura em '15-panel' (4.45 ->
+                // 8.04) e em nenhum outro estagio. O piso final de corpo ja
+                // resolve o mesmo problema alternando empurrao com 16 rodadas
+                // de cap. Aqui, mesma receita, e so quando o limite esta ativo:
+                // sem ele o numero de rodadas continua 1 e a saida e identica.
+                const int capRounds = panelLimitActive
+                    ? std::max(1, (int)EnvFloat("DRAPE_PANELS_CAP_ROUNDS", 12.0f)) : 1;
+                for (int cr = 0; cr < capRounds; ++cr) {
+                int capMoved = 0;
                 for (size_t ei = 0; ei < useEdges.size(); ++ei) {
                     const auto& e = useEdges[ei];
                     if (e.a >= n || e.b >= n) continue;
@@ -24326,6 +24374,9 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                     Vec3 delta = Scale(dir, ((len - cap) / len) / (wa + wb));
                     finalVerts[e.a] = Sub(finalVerts[e.a], Scale(delta, wa));
                     finalVerts[e.b] = Add(finalVerts[e.b], Scale(delta, wb));
+                    ++capMoved;
+                }
+                if (capMoved == 0) break;
                 }
                 // (c) one-way body floor on the smoothed verts â€” smoothing can't clip.
                 if (bodyBVH && bodyBVH->valid) {
@@ -24349,6 +24400,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 }
                 // (d) weld seam twins every round so the smoother can't split seams.
                 weldSeams();
+            }
+            if (!panelLimitActive) break;
+            const float afterStretch = worstStretchNow();
+            if (afterStretch <= panelEntryStretch + 1.0e-3f) {
+                HLog("detour: panel free-space ACEITO shape='%s' stretch %.3f -> %.3f",
+                     shapeName.c_str(), panelEntryStretch, afterStretch);
+                break;
+            }
+            HLog("detour: panel free-space RECUSADO shape='%s' stretch %.3f -> %.3f "
+                 "(refaz sem o limite)", shapeName.c_str(),
+                 panelEntryStretch, afterStretch);
             }
             // Pit verts sit ON island junctions (the armpit is the arm<->torso stitch);
             // per-vert lifts can open prox pairs â€” restore the invariant here, not at
