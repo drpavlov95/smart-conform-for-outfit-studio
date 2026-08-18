@@ -23556,7 +23556,11 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
     // No body-position target anywhere => cannot introduce magnetism; only removes local
     // curvature => cannot balloon fitted regions (their authored gap is small => excluded).
     // Rigid islands and the belt are excluded. OFF by default until eyeballed (DRAPE_PANELS=1).
-    const std::vector<Vec3> panelPassEntry = fittedFinisherGuard
+    // Instantaneo proprio: panelPassEntry so existe quando o guarda por
+    // componente esta ligado, e o fechamento por vertice e independente dele.
+    const bool finisherCrossClose = EnvToggle("DRAPE_FINISHER_CROSS_CLOSE", false)
+        && tris && !tris->empty();
+    const std::vector<Vec3> panelPassEntry = (fittedFinisherGuard || finisherCrossClose)
         ? finalVerts : std::vector<Vec3>{};
     // Toggle SIMETRICO (2026-08-18): era `kPanelFlatten || EnvToggleOn(...)`, ou
     // seja, so ligava - e com kPanelFlatten=true nao havia como ablacionar este
@@ -24194,6 +24198,37 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
 
     if (!panelPassEntry.empty())
         guardFittedFinisher(panelPassEntry, "panel-flatten");
+    // FECHAMENTO POR VERTICE NOS FINISHERS (2026-08-18). Medido no manto da
+    // Telvanni, que o usuario viu clipando sobre si mesmo: ate '14-self-line' a
+    // peca esta com 409 auto-interseccoes, ABAIXO do conform do host (520); o
+    // panel-flatten leva a 528 e o cleft-bridge a 578.
+    //
+    // Os dois guardas que ja envolvem estes passes nao servem aqui porque sao
+    // por COMPONENTE, e depois de soldar costura este manto tem 2 componentes:
+    // o guarda reverte a malha inteira (rolled=2 de 2, verts=2785) ou aceita
+    // alpha=0.000977, ou seja, os dois degeneram em "desligar o passe" - e
+    // desligar nao e opcao (sem panel-flatten, BlackSmithTorso vai a stretch
+    // 12.70 e Cloak a 13.31, ambos caindo para vanilla).
+    //
+    // PathBCloseNewCrossings reverte VERTICE A VERTICE, so os que participam de
+    // um cruzamento novo, e e a mesma maquina que o portao do shell usa. Nao e
+    // repulsao: uma sonda offline mostrou que empurrar malha ja embaracada
+    // piora (225 -> 275). Reverter funciona; empurrar nao.
+    auto closeFinisherCrossings = [&](const std::vector<Vec3>& entry,
+                                      const char* passName) {
+        if (!finisherCrossClose) return;
+        if (entry.size() != finalVerts.size()) return;
+        PathBCrossingClosureStats st;
+        const bool ok = PathBCloseNewCrossings(entry, finalVerts, *tris,
+                                               exactSeamGroups, st);
+        if (st.initialNewPairs > 0 || !ok)
+            HLog("detour: finisher cross-close shape='%s' pass='%s' novos=%d->%d "
+                 "revertidos=%d rodadas=%d convergiu=%d",
+                 shapeName.c_str(), passName, st.initialNewPairs,
+                 st.finalNewPairs, st.revertedVerts, st.rounds, ok ? 1 : 0);
+    };
+    if (!panelPassEntry.empty())
+        closeFinisherCrossings(panelPassEntry, "panel-flatten");
     tracePathBTail("15-panel");
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ FITTED-HBRIDGE (cofrinho spec: FITTED bridges the glute cleft) Ã¢â€â‚¬Ã¢â€â‚¬
