@@ -26099,8 +26099,32 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
             return pen;
         };
+        // TRANSACAO POR CICLO (2026-08-19). Este piso empurra, capea e solda,
+        // tres vezes, e nunca olha para tras. Medido: quando a pose que chega
+        // muda um pouco, ele amplifica o esticamento e o excesso sobrevive ate a
+        // publicacao - o vampire_robes_alt sai hoje a 8.33 e e DESCARTADO (vira
+        // vanilla), e e tambem essa amplificacao que obriga o limite de paineis a
+        // ficar preso ao caminho do shell.
+        //
+        // A disciplina que falta e a que o resto do pipeline ja usa: cada ciclo e
+        // uma transacao. Se o ciclo levar o esticamento acima do teto de descarte
+        // do host (8.0, o mesmo do portao) vindo de baixo dele, o ciclo e desfeito
+        // e o piso para. Perde-se a separacao daquele ciclo, nunca a peca inteira.
+        auto floorWorstStretch = [&]() -> float {
+            float w = 0.0f;
+            for (const auto& e : useEdges) {
+                if (e.a >= n || e.b >= n || e.restLength <= 1.0e-6f) continue;
+                w = std::max(w, Len(Sub(finalVerts[e.a], finalVerts[e.b])) / e.restLength);
+            }
+            return w;
+        };
+        const bool floorTxn = EnvToggle("DRAPE_FINAL_FLOOR_TXN", true);
+        const float kFloorCeil = EnvFloat("DRAPE_FINAL_FLOOR_CEIL", 8.0f);
         if (!safeTopologyFloor) {
             for (int cycle = 0; cycle < 3; ++cycle) {
+                const std::vector<Vec3> cycleEntry =
+                    floorTxn ? finalVerts : std::vector<Vec3>{};
+                const float beforeStretch = floorTxn ? floorWorstStretch() : 0.0f;
                 int moved = 0;
                 int skipped0 = 0, pen0 = floorDiag ? floorPenCount(skipped0) : 0;
                 for (size_t i = 0; i < n; ++i) {
@@ -26120,6 +26144,17 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                 }
                 applyFinalSupportCap(16, "final-floor-stretch-cap");
                 weldGroupsFloored();
+                if (floorTxn && beforeStretch <= kFloorCeil) {
+                    const float afterStretch = floorWorstStretch();
+                    if (afterStretch > kFloorCeil) {
+                        finalVerts = cycleEntry;
+                        HLog("detour: final-body-floor ROLLBACK shape='%s' cycle=%d "
+                             "stretch %.3f -> %.3f (teto %.1f)",
+                             shapeName.c_str(), cycle, beforeStretch, afterStretch,
+                             kFloorCeil);
+                        break;
+                    }
+                }
                 if (floorDiag) {
                     int skipped2 = 0; const int pen2 = floorPenCount(skipped2);
                     HLog("detour: FLOOR-DIAG shape='%s' cycle=%d pen %d->%d apos empurrao "
