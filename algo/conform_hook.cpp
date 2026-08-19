@@ -24403,7 +24403,16 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
             }
             if (!panelLimitActive) break;
             const float afterStretch = worstStretchNow();
-            if (afterStretch <= panelEntryStretch + 1.0e-3f) {
+            // MELHORAR NAO BASTA, TEM DE CABER (2026-08-19). A escada so exigia
+            // "nao piorar", e isso deixa passar um caso real: o Cloak chega ao
+            // passe com 13.313 de esticamento e o limite o leva a 8.262 - uma
+            // melhora enorme, e ainda assim acima do teto de descarte do host
+            // (8.0), o que faz a peca inteira sair VANILLA. Sem o limite o mesmo
+            // passe a leva a 3.5. O teto nao e constante nova: e o mesmo 8.0 que
+            // o portao de publicacao ja usa.
+            const float kPanelCeil = EnvFloat("DRAPE_PANELS_CEIL", 8.0f);
+            if (afterStretch <= panelEntryStretch + 1.0e-3f &&
+                afterStretch <= kPanelCeil) {
                 HLog("detour: panel free-space ACEITO shape='%s' stretch %.3f -> %.3f",
                      shapeName.c_str(), panelEntryStretch, afterStretch);
                 break;
