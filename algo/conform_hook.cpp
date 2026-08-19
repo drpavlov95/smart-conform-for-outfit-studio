@@ -24276,9 +24276,67 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                         const bool approached =
                             !EnvToggle("DRAPE_PANELS_ONLY_CAUSED", true) ||
                             dd < panelFree[i] - 1.0e-4f;
-                        if (approached && dd < floorGap && dd > 1.0e-6f)
-                            finalVerts[i] = Sub(finalVerts[i],
-                                Scale(toIt, (floorGap - dd) / dd));
+                        if (approached && dd < floorGap && dd > 1.0e-6f) {
+                            const float need = (floorGap - dd) / dd;
+                            // MEXER NO LADO ESCONDIDO. Separar dois paineis
+                            // empurrando sempre o MEU vertice para longe do
+                            // parceiro empurra, metade das vezes, a superficie
+                            // que o jogador VE - e isso e a bolha atras da coxa
+                            // (medido: minha correcao sozinha punha +0.100 de
+                            // media ali, pico 1.10u). A separacao e a mesma se
+                            // quem se move for o painel de DENTRO, que fica
+                            // escondido sob o de fora. Quem esta mais perto do
+                            // corpo e o de dentro; e ele que paga.
+                            bool iAmInner = true;
+                            if (bodyBVH && bodyBVH->valid &&
+                                EnvToggle("DRAPE_PANELS_MOVE_INNER", true)) {
+                                float gMine = 0.0f, gTheirs = 0.0f;
+                                const Vec3 mid = Scale(Add(Add(finalVerts[bt[0]],
+                                    finalVerts[bt[1]]), finalVerts[bt[2]]), 1.0f / 3.0f);
+                                if (BVHSignedGap(*bodyBVH, finalVerts[i], gMine, nullptr) &&
+                                    BVHSignedGap(*bodyBVH, mid, gTheirs, nullptr))
+                                    iAmInner = gMine <= gTheirs;
+                            }
+                            // O lado de dentro paga o que o CORPO deixa; so o
+                            // resto sobra para o lado visivel. Empurrar o de
+                            // dentro alem da pele nao separa nada (o piso de
+                            // corpo desfaz) e ainda perde o conserto de
+                            // cruzamento - medido: so-o-de-dentro leva a bolha a
+                            // 24 verts mas os cruzamentos de 394 para 447.
+                            float innerRoom = 1.0e9f;
+                            const float kSkin = 0.06f;
+                            if (bodyBVH && bodyBVH->valid) {
+                                float g = 0.0f;
+                                const Vec3 probe = iAmInner ? finalVerts[i]
+                                    : Scale(Add(Add(finalVerts[bt[0]], finalVerts[bt[1]]),
+                                                finalVerts[bt[2]]), 1.0f / 3.0f);
+                                if (BVHSignedGap(*bodyBVH, probe, g, nullptr))
+                                    innerRoom = std::max(0.0f, g - kSkin) / dd;
+                            }
+                            const float toInner = std::min(need, innerRoom);
+                            const float toOuter = need - toInner;
+                            if (iAmInner) {
+                                if (toInner > 0.0f)
+                                    finalVerts[i] = Sub(finalVerts[i], Scale(toIt, toInner));
+                                if (toOuter > 0.0f)
+                                    for (int k = 0; k < 3; ++k) {
+                                        const uint16_t vk = bt[k];
+                                        if (vk < n && eligible[vk])
+                                            finalVerts[vk] = Add(finalVerts[vk],
+                                                Scale(toIt, toOuter));
+                                    }
+                            } else {
+                                if (toInner > 0.0f)
+                                    for (int k = 0; k < 3; ++k) {
+                                        const uint16_t vk = bt[k];
+                                        if (vk < n && eligible[vk])
+                                            finalVerts[vk] = Add(finalVerts[vk],
+                                                Scale(toIt, toInner));
+                                    }
+                                if (toOuter > 0.0f)
+                                    finalVerts[i] = Sub(finalVerts[i], Scale(toIt, toOuter));
+                            }
+                        }
                     }
                 }
                 // (a2) Â§6 chord bridge: lift each pit vert toward the segment between its
