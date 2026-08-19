@@ -24255,8 +24255,28 @@ static bool ApplyStaticClothPassImpl(const std::string& shapeName,
                             finalVerts[bt[2]]);
                         const Vec3 toIt = Sub(cp, finalVerts[i]);
                         const float dd = Len(toIt);
-                        const float floorGap = panelFreeAuthored[i];
-                        if (dd < floorGap && dd > 1.0e-6f)
+                        // A folga autorada foi medida no corpo MAGRO; num corpo
+                        // pesado os paineis legitimamente se aproximam, e exigi-la
+                        // de volta infla a peca. O piso vira o MENOR entre ela e a
+                        // separacao que os dois ja tinham na entrada do passe:
+                        // impede comprimir mais, sem prometer folga que a pose
+                        // atual nunca teve. DRAPE_PANELS_FLOOR_MODE: 0=autorado
+                        // (comportamento anterior), 1=min(autorado, entrada).
+                        const float floorGap =
+                            EnvFloat("DRAPE_PANELS_FLOOR_MODE", 0.0f) >= 0.5f
+                                ? std::min(panelFreeAuthored[i], panelFree[i])
+                                : panelFreeAuthored[i];
+                        // SO CONSERTAR O QUE ESTE PASSE CAUSOU. A correcao
+                        // disparava sempre que os paineis estavam mais proximos
+                        // que o piso, mesmo onde o passe nao os aproximou - a
+                        // proximidade ja vinha de antes. Empurrar ali e o
+                        // "inflando desnecessariamente" que ele viu. Agora so age
+                        // quando a distancia DIMINUIU em relacao a entrada do
+                        // passe: quem aproximou foi o passe, e e ele que desfaz.
+                        const bool approached =
+                            !EnvToggle("DRAPE_PANELS_ONLY_CAUSED", true) ||
+                            dd < panelFree[i] - 1.0e-4f;
+                        if (approached && dd < floorGap && dd > 1.0e-6f)
                             finalVerts[i] = Sub(finalVerts[i],
                                 Scale(toIt, (floorGap - dd) / dd));
                     }
