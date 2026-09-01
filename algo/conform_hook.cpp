@@ -9367,6 +9367,35 @@ static bool PathBComputeIntegrity(
     return true;
 }
 
+// A shell solve is only meaningful while it remains an embedding of the
+// authored surface.  Individual projections may be locally sensible yet their
+// operator-split sum can pass a triangle through zero area before the next
+// projection sees it.  Keep this test independent of contact/body/outfit
+// semantics: it is purely a dimensionless material-topology invariant.
+static bool PathBOrientationBarrierValid(
+    const std::vector<Vec3>& verts,
+    const std::vector<Vec3>& baseVerts,
+    const std::vector<std::array<uint16_t, 3>>& tris,
+    float minAreaRatio)
+{
+    if (verts.size() != baseVerts.size()) return false;
+    for (const auto& t : tris) {
+        if (t[0] >= verts.size() || t[1] >= verts.size() || t[2] >= verts.size())
+            continue;
+        const Vec3 authored = Cross(Sub(baseVerts[t[1]], baseVerts[t[0]]),
+                                    Sub(baseVerts[t[2]], baseVerts[t[0]]));
+        const Vec3 current = Cross(Sub(verts[t[1]], verts[t[0]]),
+                                   Sub(verts[t[2]], verts[t[0]]));
+        const float authoredArea = Len(authored);
+        const float currentArea = Len(current);
+        if (authoredArea <= 1.0e-8f) continue;
+        if (!std::isfinite(currentArea) || Dot(authored, current) <= 0.0f ||
+            currentArea < authoredArea * minAreaRatio)
+            return false;
+    }
+    return true;
+}
+
 // Corresponding-point body gate. Aggregate penetration counts can hide a trade
 // where one old penetration disappears while a different face cuts through the
 // body. Compare every canonical barycentric sample in place and reject either a
@@ -14286,6 +14315,27 @@ static bool PathBSimV2Solve(
         bool stalled = false;
         size_t lastMaxMover = 0;
         std::vector<Vec3> xPrev(n);
+        // Harness probe only.  Unlike the old contact-local guard, this sees
+        // the coupled result of *every* operator in an iteration.  It is a
+        // line search from the last valid shell state, not a garment-specific
+        // positional correction.  Default OFF until it demonstrates that the
+        // continuation can remain feasible across the corpus.
+        const bool kIterationOrientBarrier =
+            EnvToggle("DRAPE_SHELL_ITERATION_ORIENT_BARRIER", false);
+        const float kIterationMinArea = ClampRange(
+            EnvFloat("DRAPE_SHELL_ITERATION_MIN_AREA", 0.10f), 0.001f, 0.95f);
+        int orientBacktracks = 0;
+        int orientRejected = 0;
+        int orientLimitedIters = 0;
+        if (kIterationOrientBarrier) {
+            PathBShellIntegrity entryIntegrity;
+            if (PathBComputeIntegrity(x, baseVerts, edges, tris, morphedBody,
+                                      entryIntegrity)) {
+                HLog("path-b-shell: orient-entry step=%d flips=%d collapsed=%d "
+                     "worstEdge=%.3f", step, entryIntegrity.flips,
+                     entryIntegrity.collapsed, entryIntegrity.worstStretch);
+            }
+        }
         // GRAVITY AS A LOAD, NOT A PER-ITERATION NUDGE (2026-07-24,
         // DRAPE_SHELL_GRAVITY_MODE=1). Legacy behaviour re-applies `gravity` on
         // EVERY constraint iteration, which has two consequences: the loop can
@@ -15037,6 +15087,33 @@ static bool PathBSimV2Solve(
                 PathBSeamWeld(x, exactSeamGroups, fixed, anchorTarget);
             }
             for (size_t i = 0; i < n; ++i) if (fixed[i]) x[i] = anchorTarget[i];
+            if (kIterationOrientBarrier &&
+                !PathBOrientationBarrierValid(x, baseVerts, tris, kIterationMinArea)) {
+                const std::vector<Vec3> proposal = x;
+                bool accepted = false;
+                float alpha = 0.5f;
+                for (int attempt = 0; attempt < 10; ++attempt, alpha *= 0.5f) {
+                    for (size_t i = 0; i < n; ++i)
+                        x[i] = Add(xPrev[i], Scale(Sub(proposal[i], xPrev[i]), alpha));
+                    // Fixed vertices are Dirichlet constraints and must never
+                    // be damped by the trial interpolation.
+                    for (size_t i = 0; i < n; ++i)
+                        if (fixed[i]) x[i] = anchorTarget[i];
+                    if (PathBOrientationBarrierValid(x, baseVerts, tris,
+                                                     kIterationMinArea)) {
+                        orientBacktracks += attempt + 1;
+                        ++orientLimitedIters;
+                        accepted = true;
+                        break;
+                    }
+                }
+                if (!accepted) {
+                    // Refuse a non-embeddable coupled update rather than
+                    // letting a later pass "repair" a crossed surface.
+                    x = xPrev;
+                    ++orientRejected;
+                }
+            }
             zMark(13);
             itersUsed = iteration + 1;
             maxMove = 0.0f;
@@ -15102,7 +15179,11 @@ static bool PathBSimV2Solve(
                                       Sub(x[tr[2]], x[tr[0]]));
                 if (Len2(nb) > 1e-18f && Dot(nb, nx) < 0.0f) ++stepFlips;
             }
-            HLog("path-b-shell: flips-after-step=%d: %d", step, stepFlips);
+            HLog("path-b-shell: flips-after-step=%d: %d orientBarrier=%d "
+                 "limited=%d backtracks=%d rejected=%d minArea=%.3f",
+                 step, stepFlips, (int)kIterationOrientBarrier,
+                 orientLimitedIters, orientBacktracks, orientRejected,
+                 kIterationMinArea);
         }
         if (kZTrace) {
             for (size_t c = 0; c <= zN; ++c) {

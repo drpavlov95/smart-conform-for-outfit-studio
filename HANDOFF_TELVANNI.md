@@ -317,3 +317,56 @@ bordas coincidentes ao comparar, mas ainda nao e gate de publicacao: malhas com
 paineis distintos coincidentes na borda podem exigir uma semantica material que
 o arquivo nao conhece. Use-o para comparar candidato e controle depois dos
 gates de integridade, nunca para aceitar uma mudanca sozinho.
+
+## 2026-09-01: a inversao nasce no salto dos anchors â€” CONFIRMADO
+
+O problema seguinte a atacar nao e uma roupa, uma colisao, nem um parametro de
+gravidade. `PathBSimV2Solve` calcula o `anchorTarget` do passo de morph inteiro,
+aplica-o imediatamente a todos os vertices fixos e so entao inicia o loop de
+stretch/bending/contact nos vertices livres. Isso cria uma condicao inicial
+invalida: parte da superficie ja esta no suporte Heavy e a parte livre ainda
+esta na pose anterior.
+
+Foi adicionada uma sonda **desligada por padrao**,
+`DRAPE_SHELL_ITERATION_ORIENT_BARRIER=1`. Ela testa o resultado acoplado de
+uma iteracao completa contra a orientacao e a area autoradas (sem ler nome de
+outfit, coordenadas, corpo ou regiao), e faz line-search global de volta ao
+ultimo estado se a proposta inverter uma face ou reduzir sua area abaixo de
+10%. E deliberadamente uma sonda de diagnostico, nao um reparo para publicar.
+
+O replay mostrou que a barreira ainda recebe faces ruins antes da primeira
+iteracao. Com as flags canonicas (`strict`, shell, body-evict, posterior chord,
+late-layer tuck, orient repair; sem pit/panels free-space):
+
+| sentinela | flips na entrada do passo 1 | flips apos passo 6 com barreira |
+|---|---:|---:|
+| TelvanniBody_female RM_Heavy | 55 (2 colapsadas) | 284 |
+| BlackSmithTorso RM_Heavy | 8 | 52 |
+| Cloak RM_Heavy | 14 | 43 |
+
+No Telvanni sem a barreira o primeiro passo terminava em 166 flips; com ela
+termina em 55. Portanto ela impede 111 inversoes novas, mas nao pode desfazer
+as 55 que ja estavam presentes quando o loop comecou. Em todos os tres casos a
+causa e global: o salto de condicoes de contorno dos anchors. A sonda tambem
+continua rejeitada pelo gate comparativo, logo **nada foi deployado**.
+
+### Proximo experimento correto: continuacao conjunta de suporte e pano
+
+Substituir, no harness e atras de uma flag, o teleporte `x[fixed] =
+anchorTarget[fixed]` por uma continuacao de carga:
+
+1. preservar os anchors da etapa anterior;
+2. calcular o alvo final exatamente como hoje (incluindo skin binding e limpeza
+   de contato);
+3. interpolar apenas o **campo de suporte** em subpassos, enquanto o mesmo loop
+   resolve membrana, bending, contato e costuras;
+4. aceitar cada incremento apenas se a barreira de orientacao/area permitir;
+   se nao, reduzir o incremento de suporte, e nunca corrigir vertices ou
+   regioes individualmente;
+5. somente depois medir os tres sentinelas e os gates completos.
+
+Isso e uma continuacao numerica de condicoes de Dirichlet, nao um bridge nem
+um hardcode. Tambem exige que a transferencia de metrica use o mesmo nivel de
+carga do suporte, em vez de usar o alvo Heavy integral enquanto os anchors
+ainda estao a meio caminho. Nao implementar a versao live ate que o harness
+complete o caminho sem flips novos e sem regressao de stretch/penetracao.
