@@ -370,3 +370,28 @@ um hardcode. Tambem exige que a transferencia de metrica use o mesmo nivel de
 carga do suporte, em vez de usar o alvo Heavy integral enquanto os anchors
 ainda estao a meio caminho. Nao implementar a versao live ate que o harness
 complete o caminho sem flips novos e sem regressao de stretch/penetracao.
+
+### Primeira tentativa de continuacao de suporte: REFUTADA E REMOVIDA
+
+Uma sonda `DRAPE_SHELL_SUPPORT_CONTINUATION=1` foi testada somente no harness.
+Ela preservava os anchors da etapa anterior, introduzia o alvo final em oito
+incrementos globais, validava cada incremento pela orientacao autorada e
+atualizava a metrica das arestas fixas junto com os endpoints.
+
+Ela confirmou a parte causal: Telvanni entrou com **0 flips** e permaneceu com
+**0 flips** em todos os seis passos, em vez de 55 ja na entrada. Porem falhou
+o requisito mais importante de uma continuacao: completar o caminho. A barreira
+recusou quase todas as propostas apos poucos incrementos; por exemplo, o passo
+1 parou em suporte 0.316 (4/8 cargas), o passo 2 em 0.105 (6/8), e os passos
+4--6 praticamente nao sairam de 0. Cada etapa atingiu o teto de 600 iteracoes;
+o replay levou 106.6 s e ainda terminou com `flipsLeft=335` no finish, stretch
+8.66x e rejeicao pelo gate comparativo.
+
+Isso nao deve ser "ajustado" aumentando tentativas, afinando oito cargas, ou
+relaxando a barreira. A sonda aplicava o incremento de suporte antes de os
+termos XPBD/membrana poderem responder; o line-search posterior so transforma a
+continuidade em uma sequencia de tentativas recusadas. O estado dual (lambdas),
+a metrica e o suporte precisam participar de um unico solve incremental, ou a
+continuacao nao e numericamente consistente. Todo o codigo dessa tentativa foi
+removido antes do checkpoint; permanece apenas a sonda generica de orientacao
+desligada por padrao e a evidencia acima.
