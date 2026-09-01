@@ -1,0 +1,385 @@
+{
+  "directions": 42,
+  "shapes": {
+    "BaseArmor": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 75.8211603188089,
+          "p95_projected_curve": 103.84557357931187,
+          "worst_projected_curve": 113.72264928957073
+        },
+        "with_body": {
+          "solid_angle_curve": 60.58009234552037,
+          "p95_projected_curve": 63.155498984553795,
+          "worst_projected_curve": 66.36192367732737
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 47.09036231695447,
+          "p95_projected_curve": 62.65998089595734,
+          "worst_projected_curve": 71.60439693439352
+        },
+        "with_body": {
+          "solid_angle_curve": 4.590683242969401,
+          "p95_projected_curve": 11.845630570255862,
+          "worst_projected_curve": 12.437435449850899
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 74.1805291221331,
+          "p95_projected_curve": 105.87185927262968,
+          "worst_projected_curve": 108.99400524069901
+        },
+        "with_body": {
+          "solid_angle_curve": 62.25119845885156,
+          "p95_projected_curve": 66.84263410861439,
+          "worst_projected_curve": 74.38475409301668
+        }
+      }
+    },
+    "Belt": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      }
+    },
+    "BlackSmithBelt": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 27.6520688405581,
+          "p95_projected_curve": 36.94531325574355,
+          "worst_projected_curve": 39.858813927465235
+        },
+        "with_body": {
+          "solid_angle_curve": 12.691006537520142,
+          "p95_projected_curve": 17.425800192468532,
+          "worst_projected_curve": 22.985623231289267
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 12.105542459026035,
+          "p95_projected_curve": 17.089564546234207,
+          "worst_projected_curve": 21.548769519322637
+        },
+        "with_body": {
+          "solid_angle_curve": 0.4140228440194312,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 14.226617429397638
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 37.61844769568313,
+          "p95_projected_curve": 49.42095512822732,
+          "worst_projected_curve": 53.62131368771346
+        },
+        "with_body": {
+          "solid_angle_curve": 17.217813967167416,
+          "p95_projected_curve": 22.873838438742393,
+          "worst_projected_curve": 33.21430303017407
+        }
+      }
+    },
+    "BlackSmithTorso": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 31.59358747337648,
+          "p95_projected_curve": 56.46301791887661,
+          "worst_projected_curve": 58.90627919947515
+        },
+        "with_body": {
+          "solid_angle_curve": 24.224869380951507,
+          "p95_projected_curve": 47.31378437374462,
+          "worst_projected_curve": 50.74560323024967
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 13.32073779200512,
+          "p95_projected_curve": 31.22331014585631,
+          "worst_projected_curve": 35.30828403354967
+        },
+        "with_body": {
+          "solid_angle_curve": 0.1605552872447791,
+          "p95_projected_curve": 0.5049350585571343,
+          "worst_projected_curve": 1.3536877603064768
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 32.22047088466976,
+          "p95_projected_curve": 59.95798255017484,
+          "worst_projected_curve": 65.05572539054013
+        },
+        "with_body": {
+          "solid_angle_curve": 23.453961447730883,
+          "p95_projected_curve": 45.72206607316137,
+          "worst_projected_curve": 48.72918102230887
+        }
+      }
+    },
+    "Cloak": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 6.027068908235522,
+          "p95_projected_curve": 9.532446319663096,
+          "worst_projected_curve": 9.884035610965313
+        },
+        "with_body": {
+          "solid_angle_curve": 4.271474898521435,
+          "p95_projected_curve": 8.320529628425096,
+          "worst_projected_curve": 9.785764530661835
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 0.05035772565613492,
+          "p95_projected_curve": 0.1282911836681086,
+          "worst_projected_curve": 0.14039111475242075
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 68.97114707539122,
+          "p95_projected_curve": 100.9417477618458,
+          "worst_projected_curve": 110.05974782315143
+        },
+        "with_body": {
+          "solid_angle_curve": 44.52237984347977,
+          "p95_projected_curve": 91.81789841346614,
+          "worst_projected_curve": 106.31725199331215
+        }
+      }
+    },
+    "Clothes": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 15.105730976156647,
+          "p95_projected_curve": 22.088559452617538,
+          "worst_projected_curve": 23.309560027093603
+        },
+        "with_body": {
+          "solid_angle_curve": 11.025916987853167,
+          "p95_projected_curve": 16.870958944373196,
+          "worst_projected_curve": 19.581559848935417
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 0.42038589808961924,
+          "p95_projected_curve": 0.9799288998108481,
+          "worst_projected_curve": 1.0787070865624204
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 65.57041074857726,
+          "p95_projected_curve": 91.34648089450123,
+          "worst_projected_curve": 98.05845247233383
+        },
+        "with_body": {
+          "solid_angle_curve": 59.084738910771314,
+          "p95_projected_curve": 84.20070481772134,
+          "worst_projected_curve": 91.4757215232072
+        }
+      }
+    },
+    "Filler": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      }
+    },
+    "Pants": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 5.148112304770856,
+          "p95_projected_curve": 12.271596696020604,
+          "worst_projected_curve": 15.833630702291835
+        },
+        "with_body": {
+          "solid_angle_curve": 4.468529386185933,
+          "p95_projected_curve": 10.643990310294134,
+          "worst_projected_curve": 11.186055516498708
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        },
+        "with_body": {
+          "solid_angle_curve": 0.0,
+          "p95_projected_curve": 0.0,
+          "worst_projected_curve": 0.0
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 7.288392561051875,
+          "p95_projected_curve": 17.51151366132606,
+          "worst_projected_curve": 20.681975793809105
+        },
+        "with_body": {
+          "solid_angle_curve": 7.288392561051875,
+          "p95_projected_curve": 17.51151366132606,
+          "worst_projected_curve": 20.681975793809105
+        }
+      }
+    },
+    "TelvanniBody_female": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 37.95363126814755,
+          "p95_projected_curve": 44.77899576937931,
+          "worst_projected_curve": 48.25056736649536
+        },
+        "with_body": {
+          "solid_angle_curve": 36.06782574513972,
+          "p95_projected_curve": 44.24829946418964,
+          "worst_projected_curve": 45.728728615242225
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 5.449892878606908,
+          "p95_projected_curve": 13.08723745740117,
+          "worst_projected_curve": 17.726005725879435
+        },
+        "with_body": {
+          "solid_angle_curve": 2.930656934539858,
+          "p95_projected_curve": 5.946788755400638,
+          "worst_projected_curve": 10.979870863426061
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 69.42446434511902,
+          "p95_projected_curve": 85.47637572491851,
+          "worst_projected_curve": 96.60136495350973
+        },
+        "with_body": {
+          "solid_angle_curve": 66.30709854055951,
+          "p95_projected_curve": 76.13704510567786,
+          "worst_projected_curve": 87.21860886376986
+        }
+      }
+    },
+    "vampire_robes_alt": {
+      "nosso": {
+        "garment_only": {
+          "solid_angle_curve": 356.78802882782054,
+          "p95_projected_curve": 457.0195823461881,
+          "worst_projected_curve": 460.2728161663684
+        },
+        "with_body": {
+          "solid_angle_curve": 352.6503501192718,
+          "p95_projected_curve": 452.6300614493752,
+          "worst_projected_curve": 455.998981958675
+        }
+      },
+      "autorado": {
+        "garment_only": {
+          "solid_angle_curve": 339.00312926427534,
+          "p95_projected_curve": 387.54294745609894,
+          "worst_projected_curve": 415.50645479511616
+        },
+        "with_body": {
+          "solid_angle_curve": 166.32641055577318,
+          "p95_projected_curve": 218.14956394168718,
+          "worst_projected_curve": 224.80250596497524
+        }
+      },
+      "host": {
+        "garment_only": {
+          "solid_angle_curve": 362.4735444430357,
+          "p95_projected_curve": 487.1474022321903,
+          "worst_projected_curve": 497.5660079393884
+        },
+        "with_body": {
+          "solid_angle_curve": 360.6073361332194,
+          "p95_projected_curve": 486.4520729802859,
+          "worst_projected_curve": 496.91670305398213
+        }
+      }
+    }
+  }
+}
