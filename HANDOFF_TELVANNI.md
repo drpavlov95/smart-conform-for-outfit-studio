@@ -395,3 +395,88 @@ a metrica e o suporte precisam participar de um unico solve incremental, ou a
 continuacao nao e numericamente consistente. Todo o codigo dessa tentativa foi
 removido antes do checkpoint; permanece apenas a sonda generica de orientacao
 desligada por padrao e a evidencia acima.
+
+## 2026-09-06: duas definicoes de suporte incompativeis - CAUSA ISOLADA
+
+O proximo diagnostico separou a saida material da FASE1 da entrada do shell
+fisico, sempre no capture canonico Telvanni. Nenhuma roupa, vertice ou regiao
+foi reconhecida pelo codigo. Todas as sondas desta secao foram removidas depois
+das medicoes e nenhuma DLL foi deployada.
+
+A FASE1 termina no load Heavy com 9 faces ruins dentro do seu dominio material,
+mas a malha completa ja tem 46 faces invertidas contra a orientacao autorada.
+Ao entrar diretamente no shell com suporte tambem em load completo, a segunda
+construcao dos anchors aumenta sucessivamente esse numero:
+
+| estagio | faces invertidas | delta |
+|---|---:|---:|
+| entrada material | 46 | - |
+| projecao individual dos anchors | 65 | +19 |
+| smoothing dos anchors | 78 | +13 |
+| limpeza de faces da banda fixa | 79 | +1 |
+
+Na primeira iteracao normal do shell, partindo dessas 79 faces, os operadores
+produzem:
+
+| operador | faces apos operador | delta |
+|---|---:|---:|
+| gravidade, stretch, strain e LRA | 79 | 0 |
+| bending | 81 | +2 |
+| solda de costura | 94 | +13 |
+| contato de vertices | 119 | +25 |
+| camadas e hull | 119 | 0 |
+| plumb dentro do solve | 186 | +67 |
+| contato de faces | 186 | 0 |
+| auto-colisao | 184 | -2 |
+
+Sem plumb, o passo termina em 163 faces em vez de 300. Sem plumb nem contato,
+termina em 147. Removendo tambem self-edge/self-collision, termina em 106. Isso
+confirma que plumb e o maior criador dentro do loop, mas tambem que apenas
+desligar operadores nao resolve a entrada invalida nem a composicao sequencial.
+
+Uma barreira relativa, que protegia apenas as faces validas no inicio da
+iteracao, conteve a primeira proposta de 184 de volta a 79. Em quatro iteracoes
+fez 21 backtracks, limitou tres propostas e recusou uma inteira. A recusa gera
+movimento zero e falsa convergencia: a direcao conjunta dos operadores ja e
+inviavel. Portanto uma barreira global posterior e diagnostico, nao solucao.
+
+### Prova decisiva: preservar o suporte da FASE1
+
+Quando o shell reutiliza exatamente os anchors recebidos da FASE1, sem
+reconstrui-los, toda a cadeia inicial fica em 46 faces: projecao, smoothing e
+face-clean nao adicionam nada. Mais importante, bending e solda tambem passam a
+adicionar **zero**. Contato de vertices ainda adiciona 12 e plumb 66.
+
+Logo os +2 de bending e +13 de costura nao eram defeitos primarios desses
+operadores. Eram consequencias de duas definicoes incompativeis do mesmo campo
+de suporte:
+
+- FASE1 usa `support = baseVerts + raw` e o reimpoe exatamente;
+- o shell recalcula `anchorTarget` a partir de `baseVerts + raw`, depois altera
+  cada vertice por skin/body projection, smoothing e limpeza da banda fixa.
+
+O teste de skin binding por triangulo mais proximo piorou a propria banda: 46
+faces na entrada viraram 107 apos a projecao (101 apos smoothing e 107 apos
+face-clean). Transportar cada anchor independentemente nao preserva a coerencia
+da superficie e esta hipotese tambem foi rejeitada.
+
+### Direcao arquitetural
+
+A correcao universal deve eliminar a duplicacao, nao ajustar pesos do Telvanni:
+
+1. construir um unico campo canonico de suporte dependente da carga, `A(t)`;
+2. fazer FASE1 e shell consumirem exatamente o mesmo `A(t)`, sem uma segunda
+   projecao ou limpeza escondida na transicao;
+3. obter `A(t)` resolvendo a banda presa como superficie coerente
+   (membrana/ARAP + nao-penetracao), nao projetando vertices isoladamente;
+4. anchors que precisam escapar do corpo devem ser contatos deslizantes ou
+   DOFs limitados, nao pontos simultaneamente corrigidos e imutaveis;
+5. plumb, contato, costura e auto-colisao precisam de uma composicao acoplada ou
+   passos localmente protegidos contra inversao. Uma correcao posterior nao
+   torna uma direcao inviavel fisicamente valida.
+
+Ha ainda 67 faces ruins tocando o suporte, das quais 26 sao inteiramente
+rigidas. Isso mostra que o conjunto hard-fixed atual pode ser geometricamente
+inviavel antes mesmo do pano livre ser resolvido. O proximo trabalho deve ser
+prototipar a construcao unica de `A(t)` no harness e provar que a transicao nao
+cria faces novas nos tres sentinelas antes de alterar o solver live.
