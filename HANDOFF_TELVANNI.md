@@ -620,3 +620,53 @@ Flags do probe (harness, todas OFF por padrao):
 
 O probe permanece no fonte para a etapa de costura, compila em Release e nao foi
 deployado como DLL.
+
+## 2026-09-07: costura XPBD intercalada - VALIDADA NO LOOP, CAUDA AINDA REJEITA
+
+`PathBSeamWeld` foi substituida, somente no probe acoplado, por igualdades XPBD
+vetoriais persistentes entre gemeos exatos. Todas as onze reconciliacoes dentro
+do loop passam pelo mesmo operador; fora do probe o caminho antigo continua
+inalterado. Costura e orientacao sao intercaladas no mesmo microciclo, em vez de
+uma sobrescrever o resultado completo da outra.
+
+A primeira versao executava costura e depois quatro sweeps de orientacao. Ela
+terminou com 24 flips, mas reabriu 258 costuras (maximo 5.110u). Intercalar os
+dois termos mostrou convergencia monotonicamente melhor:
+
+| Telvanni Heavy | flips loop | costuras >0.001u | abertura maxima | drift suporte |
+|---|---:|---:|---:|---:|
+| blocos separados, 4 sweeps | 24 | 258 | 5.1102u | 0.4826u |
+| intercalado, 4 sweeps | 38 | 183 | 1.5813u | 0.4109u |
+| intercalado, 16 sweeps | **12** | **58** | **0.1236u** | **0.4443u** |
+| intercalado, 16, costura compliance=0 | 13 | 65 | 0.1263u | 0.8607u |
+
+Forcar compliance zero nao melhorou fechamento e quase dobrou o drift. Isso
+refuta a ideia de tornar a solda mais dura; o residual vem da convergencia
+conjunta/representacao duplicada, nao de elasticidade excessiva. O default do
+probe passou a 16 microciclos, ainda OFF no produto.
+
+Dois sentinelas estruturalmente diferentes confirmam que nao e efeito Telvanni:
+
+| sentinela | faces ruins FASE1 | flips loop | abertura costura | drift suporte | flips apos cauda |
+|---|---:|---:|---:|---:|---:|
+| BlackSmithTorso Heavy | 0 | **0** | 0.000394u | 0.1290u | 24 |
+| vampire_robes_alt Heavy | 16 | **2** | 0.166619u | 0.9241u | 76 |
+
+Nos tres casos a cauda legada piora um estado fisico melhor: Telvanni 12 -> 82,
+Blacksmith 0 -> 24, Vampire 2 -> 76. A solda defensiva isolada agora causa
+apenas +8 no Telvanni (antes +105), portanto a costura XPBD atacou corretamente
+a causa, mas bridge e `unified finish` continuam aplicando projecoes posicionais
+fora do sistema e recriando flips.
+
+### Proximo passo
+
+Nao endurecer nem desligar gates. O proximo prototipo deve substituir a cauda
+por uma fase de convergencia que reutiliza os mesmos lambdas/DOFs de costura,
+orientacao, contato e strain. Em particular, o `unified finish` nao pode mais
+reparar flips puxando vertices 30% para uma pose salva e depois soldar por
+averaging. Se a abertura residual de gemeos continuar limitando o gate, a
+solucao correta e condensar cada grupo de gemeos em um unico DOF durante o
+solve, nao aumentar a rigidez de duas copias concorrentes.
+
+Nenhuma DLL foi deployada; todos os resultados acima sao replays Release com o
+probe explicitamente habilitado.
