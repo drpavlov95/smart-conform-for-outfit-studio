@@ -568,3 +568,55 @@ O proximo prototipo so vale o custo se for um sistema realmente acoplado: inclui
 a faixa fixed+transition+primeiro anel livre no mesmo dominio, dar multiplicador
 persistente a fidelidade e contato, e resolver as desigualdades pelo mesmo estado
 dual. Nao repetir uma sequencia de projecoes posicionais com outro nome.
+
+## 2026-09-07: suporte cloth como DOF acoplado - SINAL POSITIVO, AINDA PROBE
+
+Foi implementada no harness a primeira versao que realmente coloca o suporte de
+tecido dentro do mesmo estado XPBD do shell. A selecao e universal: usa apenas a
+classe compartilhada e a conectividade. Vertices `RIGID` continuam Dirichlet;
+vertices `FIXED` de tecido ganham massa por area, fidelidade soft persistente ao
+morph e contato no mesmo loop. A orientacao e uma desigualdade unilateral de
+area assinada com lambda persistente. Nao ha nomes, coordenadas, anatomia ou
+regras de outfit.
+
+Como a FASE1 ja entrega a metrica Heavy completa, esta sonda roda somente o
+ultimo nivel de carga. Portanto os numeros abaixo medem viabilidade do suporte,
+nao sao ainda um veredito visual de drape nem uma substituicao da continuacao.
+
+No Telvanni Heavy canonico:
+
+| variante | flips fim do loop | flips dominio | flips apos finish | drift suporte |
+|---|---:|---:|---:|---:|
+| referencia full-load com suporte reconstruido | ~300 | - | ~296 | 0 |
+| suporte acoplado, orientacao praticamente ablacionada | 250 | - | 263 | 0.5108u |
+| suporte acoplado, dominio suporte+transicao+anel, 1 sweep | 187 | 58 | 243 | 0.5875u |
+| mesmo dominio, 4 sweeps | 134 | 25 | 207 | 0.6661u |
+| orientacao global, 4 sweeps | **27** | 27 | 168 | **0.4882u** |
+
+A ablação prova dois efeitos independentes: liberar o suporte reduz cerca de 50
+flips; a desigualdade de orientacao reduz outros 63 no dominio estreito. Quando
+aplicada globalmente, a mesma propriedade topologica leva o loop a 27 flips sem
+o drift de 4.46--6.68u dos reparos anteriores.
+
+O gargalo seguinte tambem ficou causalmente isolado. Depois de o loop global
+chegar a 27 flips, a solda defensiva exata fora do solve cria **+105** de uma vez
+(27 -> 132); o bridge leva a 140 e o unified finish a 168. Desligar apenas essa
+cauda para diagnostico preserva 27, mas o gate ainda rejeita por fechamento de
+costura/intersecoes/contato. Logo remover segurancas nao e solucao.
+
+### Proximo passo exato
+
+Substituir, somente no probe, `PathBSeamWeld` como atribuicao/averaging por
+restricoes de coincidencia XPBD persistentes entre gemeos, antes da desigualdade
+de orientacao. Costura, contato, membrana, fidelidade e orientacao precisam
+convergir juntos. A solda defensiva e o unified finish so podem desaparecer se
+o proprio solve satisfizer seus gates; ate la o modo continua experimental.
+
+Flags do probe (harness, todas OFF por padrao):
+
+- `DRAPE_SHELL_COUPLED_SUPPORT=1`
+- `DRAPE_SHELL_COUPLED_ORIENT_GLOBAL=1`
+- `DRAPE_SHELL_COUPLED_SKIP_LEGACY_POST=1` apenas para a ablação descrita acima
+
+O probe permanece no fonte para a etapa de costura, compila em Release e nao foi
+deployado como DLL.
