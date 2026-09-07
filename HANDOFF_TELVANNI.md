@@ -530,3 +530,41 @@ solve:
 So a saida desse problema deve ser `A(t)`. FASE1 e shell passam a consumi-la sem
 reconstruir anchors. Isso ataca simultaneamente as 26 faces rigidamente
 inviaveis e o drift criado por projecoes vertice a vertice.
+
+## 2026-09-07: suporte alternado soft/PBD - REFUTADO E REMOVIDO
+
+Foi implementado no harness um segundo prototipo, agora com seis niveis de carga
+e estado persistente. A banda fixa recebia fidelidade soft ao morph; arestas
+fixed-fixed preservavam a metrica Heavy por XPBD; gemeos de costura eram unidos;
+contato unilateral e a desigualdade analitica de orientacao eram aplicados no
+mesmo ciclo. A saida substituia os anchors tanto na FASE1 quanto no shell, sem a
+segunda cadeia de projecao/smoothing/face-clean.
+
+O resultado mostrou que a composicao ainda nao era variacional: fidelidade,
+contato e orientacao eram projecoes alternadas, e apenas as arestas carregavam
+multiplicadores persistentes. No Telvanni Heavy:
+
+| medida | resultado |
+|---|---:|
+| flips brutos do suporte | 67 |
+| flips inteiramente rigidos apos solve | 41 |
+| projecoes de contato | 691011 |
+| projecoes de orientacao | 18733 |
+| drift maximo dos anchors | 6.6762u |
+| flips no passo 6 | 312 |
+| flips no unified finish | 340 |
+| gate comparativo | rejeitado |
+
+O contato sem lambda persistente repetiu exatamente o churn ja conhecido: o
+termo soft puxa para dentro, contato empurra para fora e orientacao tenta reparar
+o dano depois. Alem disso, resolver somente vertices fixed deixa as faces mistas
+fixed/free fora do dominio; elas reaparecem como uma fronteira rasgada. Diminuir
+ganho, contato ou numero de iteracoes apenas esconderia o conflito.
+
+O prototipo e a flag `DRAPE_MATERIAL_VARIATIONAL_SUPPORT` foram removidos. O
+harness Release recompila limpo e nenhuma DLL foi deployada.
+
+O proximo prototipo so vale o custo se for um sistema realmente acoplado: incluir
+a faixa fixed+transition+primeiro anel livre no mesmo dominio, dar multiplicador
+persistente a fidelidade e contato, e resolver as desigualdades pelo mesmo estado
+dual. Nao repetir uma sequencia de projecoes posicionais com outro nome.
