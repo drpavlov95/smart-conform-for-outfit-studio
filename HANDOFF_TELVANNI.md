@@ -480,3 +480,53 @@ rigidas. Isso mostra que o conjunto hard-fixed atual pode ser geometricamente
 inviavel antes mesmo do pano livre ser resolvido. O proximo trabalho deve ser
 prototipar a construcao unica de `A(t)` no harness e provar que a transicao nao
 cria faces novas nos tres sentinelas antes de alterar o solver live.
+
+## 2026-09-07: suporte canonico por reparo local - REFUTADO E REMOVIDO
+
+Foi testado no harness o menor prototipo do contrato `A(t)` unico. Ele construia
+uma unica copia de `base + raw`, corrigia sua orientacao contra a malha autorada,
+preservava gemeos exatos de costura como um ponto e entregava a mesma familia
+interpolada tanto a FASE1 quanto ao shell. Nesse modo nao rodavam a segunda
+projecao, smoothing ou face-clean dos anchors. Nao havia nomes, coordenadas ou
+regras de outfit.
+
+A primeira versao exigia 10% de area **projetada** na normal autorada. Esse
+criterio e fisicamente incorreto para pano: uma face pode girar perto de 90 graus
+sem colapsar. Ele deslocou o suporte em ate 4.5229u e foi corrigido antes do
+veredito. A versao valida usou apenas margem positiva de orientacao de 1%.
+
+No Telvanni Heavy:
+
+| medida | baseline | suporte reparado |
+|---|---:|---:|
+| faces ruins do suporte (criterio da FASE1) | 67 | 14 |
+| faces ruins inteiramente rigidas | 26 | 12 |
+| flips ao fim do passo 6 | 363 | 223 |
+| flips apos unified finish/audit | 367 | 268 |
+| drift maximo introduzido no suporte | 0 | 4.4555u |
+| gate comparativo | rejeita | rejeita |
+
+O experimento confirma causalidade: melhorar o embedding do suporte reduz muito
+as inversoes posteriores. Mas tambem refuta reparo local de faces como forma de
+construir `A(t)`: correcoes independentes acumulam drift grande, ainda deixam um
+suporte inviavel e nao produzem um shell publicavel. Rodar os outros sentinelas
+nao mudaria o veredito depois da falha do alvo primario.
+
+Todo o codigo e a flag `DRAPE_MATERIAL_CANONICAL_SUPPORT` foram removidos; o
+harness Release recompila limpo e nenhuma DLL foi deployada.
+
+### Proximo passo reduzido pela evidencia
+
+`A(t)` precisa ser a solucao de um unico problema variacional da banda, nao uma
+pose do host seguida de consertos. O prototipo seguinte deve conter no mesmo
+solve:
+
+- fidelidade **soft** ao morph `base + raw` (o host e dado, nao Dirichlet);
+- energia de membrana/ARAP entre vizinhos e gemeos de costura unificados;
+- desigualdade unilateral de nao-penetracao no corpo interpolado;
+- barreira de orientacao durante o passo, nao reparo posterior;
+- continuacao de carga com estado anterior como inicializacao.
+
+So a saida desse problema deve ser `A(t)`. FASE1 e shell passam a consumi-la sem
+reconstruir anchors. Isso ataca simultaneamente as 26 faces rigidamente
+inviaveis e o drift criado por projecoes vertice a vertice.
