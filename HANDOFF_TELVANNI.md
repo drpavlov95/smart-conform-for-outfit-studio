@@ -670,3 +670,81 @@ solve, nao aumentar a rigidez de duas copias concorrentes.
 
 Nenhuma DLL foi deployada; todos os resultados acima sao replays Release com o
 probe explicitamente habilitado.
+
+## 2026-09-07: a causa dominante restante e tunnelling/self-collision desacoplada
+
+O finish acoplado foi completado no probe: suporte, costura, orientacao e strain
+agora reutilizam os mesmos lambdas depois do loop. No Telvanni ele troca a cauda
+legada de 82 flips por **16**, mantem o pior edge em **2.02x** e termina com
+costura maxima de **0.260425u**. Blacksmith termina com 0 flips e Vampire com 0;
+portanto a formulacao de suporte/costura/orientacao generaliza. O gate ainda
+rejeita, agora por cruzamentos novos, nao por esses termos.
+
+Foi adicionada instrumentacao topologica generica ao gate. Ela separa pares
+dentro do mesmo componente, entre componentes e numero de triangulos tocados;
+o log de publish tambem informa `integrityMeasured=0` quando a closure recusa
+antes da medicao (os antigos zeros eram structs default, nao resultados).
+
+Telvanni canonico, cauda acoplada:
+
+| estagio | novos | intra-componente | inter-componente | tris tocados |
+|---|---:|---:|---:|---:|
+| fim do loop | 1883 | 1354 | 529 | 1147 |
+| solda defensiva | 1881 | 1352 | 529 | 1147 |
+| bridges | 1682 | 1153 | 529 | 1073 |
+| finish acoplado | **1751** | **1222** | **529** | **1089** |
+
+Logo a cauda nao cria o problema dominante: o loop ja entrega a roupa
+atravessada em grande escala. Nao e uma costura ou painel isolado; 62--70% dos
+pares sao do mesmo componente e mais de mil faces participam.
+
+### Ablacoes que fecharam o diagnostico
+
+- Self-edge a cada iteracao em vez de a cada 8: 1751 -> 1303 pares finais.
+- Relaxation 0.15 -> 0.50: 1303 -> 1128; 1.0 termina em 1137 e piora
+  contato/costura. Frequencia/forca encontram outro equilibrio, nao fecham o
+  conjunto.
+- O untangle pos-convergencia faz trabalho real (`resolved=21039`) e melhora
+  corpo `49@-1.69 -> 2@-0.59`, mas empurra atraves da roupa interna
+  `16@-0.80 -> 35@-1.71`; o guard corretamente o reverte.
+- Ligar `DRAPE_SHELL_LAYER_CONTACT=1` junto e muito pior: cruzamentos no loop
+  1869 -> 6047. Rejeitado.
+- Continuar corpo/suportes em seis passos mantendo a metrica Heavy inteira
+  melhora pouco: final 1751 -> 1593. O salto full-load agrava, mas nao e a
+  causa dominante.
+- Um line search do update inteiro reduz o loop para 717, mas precisa rejeitar
+  a atualizacao completa (`worstNew=1472`) e a cauda volta a 1522. E granular
+  demais e congela fisica valida. Rejeitado como solucao.
+- O gate dizia permitir relacoes autoradas mas comparava apenas com producao.
+  A opcao diagnostica `DRAPE_SHELL_AUTHORED_CROSS_BASELINE=1` mede a uniao dos
+  dois baselines; desconta apenas 16 pares no candidato normal. Essa
+  inconsistencia existe, mas nao explica os ~1.7k pares e a opcao fica OFF.
+
+### Causa no codigo
+
+`PathBTriUntangle` e resposta **depois** da penetracao. Ele detecta edge-face ja
+atravessado, move vertices sem multiplicador persistente e devolve o estado a
+membrana, bending, contato e costura, que podem atravessar novamente no proximo
+sweep. Rodar mais vezes/mais forte reduz parte do residuo mas nunca torna a
+topologia uma invariante. O sintoma visual de pano torto e a manifestacao dessa
+troca repetida entre constraints incompatíveis.
+
+### Proximo passo exato
+
+Implementar no probe uma barreira/CCD **local por par edge-face**, usando o
+estado anterior e o proposto para impedir o instante de passagem antes que as
+faces se atravessem. O contato precisa entrar no mesmo microciclo persistente
+de membrana, costura, orientacao, corpo e strain. Nao repetir o line search do
+mesh inteiro, nao aumentar relaxation e nao relaxar o gate. Validar primeiro
+Telvanni e depois Blacksmith/Vampire antes de qualquer DLL.
+
+Flags novas de diagnostico/probe, todas OFF por padrao:
+
+- `DRAPE_SHELL_COUPLED_CROSS_AUDIT=1`
+- `DRAPE_SHELL_ITERATION_TOPOLOGY_BARRIER=1` (probe global falsificado; manter
+  apenas como evidencia/ablation)
+- `DRAPE_SHELL_COUPLED_MORPH_CONTINUATION=1`
+- `DRAPE_SHELL_AUTHORED_CROSS_BASELINE=1`
+
+Build Release do harness verde. Nenhuma DLL foi deployada e nenhuma flag nova
+esta ativa no produto.
