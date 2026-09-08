@@ -1034,3 +1034,146 @@ do solve acoplado, antes de existir penetracao. Nao usar untangle posterior nem
 uma forca posicional. Como varios eventos compartilham vertices, a resposta
 deve ter agendamento deterministico sem DOFs concorrentes. Tudo deriva da
 geometria e da topologia do asset; nenhuma regra por outfit, anatomia ou eixo.
+
+### CCD edge-edge varrido - FALSIFICADO E REMOVIDO
+
+Foi implementado o proximo experimento indicado pela auditoria: AABB varrida,
+primeiro TOI edge-edge e resposta antes de aceitar a penetracao. O detector
+encontrou eventos reais, mas a resposta continua ficou grande demais e criou
+novos crossings nas vizinhancas. Os piores updates de resposta chegaram a
+7.8566u no Telvanni, 3.5225u no Blacksmith e 5.3793u no Vampire.
+
+| sentinela | EE estatico loop/final | EE varrido loop/final | veredito |
+|---|---:|---:|---|
+| Telvanni | 1304 / 1311 | **985 / 1132** | melhora parcial, cauda piora |
+| BlackSmithTorso | **157 / 114** | 184 / 120 | regressao |
+| vampire_robes_alt | **418 / 555** | 553 / 660 | regressao forte |
+
+O problema nao era falta de deteccao continua. O update no TOI, resolvido como
+mais uma resposta local independente, deslocava o vertice compartilhado muito
+alem da espessura do tecido e apenas movia o crossing para os pares vizinhos.
+Todo o CCD EE varrido foi removido. Nao reintroduzir line search/TOI sem antes
+resolver a acumulacao de varias constraints sobre o mesmo vertice.
+
+### Causa numerica da torcao: acumulacao Jacobi sem trust region
+
+A barreira EE estatica foi instrumentada sem alterar sua resposta. A medicao
+achou o mecanismo universal por tras das assimetrias e protuberancias:
+
+- no Telvanni um unico vertice recebeu ate **103 constraints EE simultaneas**;
+- a espessura solicitada era apenas **0.3519u**;
+- a soma Jacobi stale pediu ate **4.3587u** num unico update;
+- Blacksmith e Vampire tambem chegaram aproximadamente a 0.9u e 3.35u.
+
+Cada constraint isolada era geometricamente valida. O erro estava em somar
+todas como se cada par possuisse DOFs exclusivos. A resultante pode ter uma
+direcao lateral arbitraria e ser mais de dez vezes maior que o contato que ela
+pretendia corrigir. Isso explica tecido torto mesmo sem um collider empurrando
+naquela direcao: o impulso vinha da propria auto-colisao, nao do corpo.
+
+Foi acrescentado um limite agregado por vertice e por chamada da barreira. O
+limite e expresso como fracao da propria espessura EE, portanto independe de
+outfit, anatomia, escala absoluta e eixo. Ele limita a norma do update somado;
+nao escolhe direcao nem posicao alvo.
+
+### Microciclo EE + limite agregado - RETIDO COMO PROBE
+
+A mesma constraint EE persistente agora pode ser resolvida duas vezes por
+iteracao: depois de material/seam e novamente depois do contato corporal. Esse
+operator splitting evita que stretch/bend/contact acumulem uma iteracao inteira
+antes de a auto-colisao participar. O microciclo sozinho melhorou Telvanni e
+Vampire, mas regrediu Blacksmith; por isso ele so e candidato junto do limite
+agregado.
+
+Sweep com microciclo e cap, medido pelo mesmo binario:
+
+| cap / espessura | Telvanni loop/final | Blacksmith loop/final | Vampire loop/final |
+|---:|---:|---:|---:|
+| 0.25 | 1245 / 1236 | 167 / 106 | 437 / 603 |
+| 0.50 | 1169 / 1161 | 156 / 94 | 345 / 540 |
+| **0.75** | **975 / 1022** | **158 / 93** | **491 / 512** |
+| 1.00 | 1130 / 1140 | 166 / 94 | 473 / 587 |
+
+O cap 0.75 e o unico ponto que vence o conjunto no resultado final dos tres
+sentinelas. Cap sem microciclo falhou (Telvanni 1398/1294, Blacksmith 179/122,
+Vampire 460/597), confirmando que as duas partes resolvem problemas diferentes:
+frequencia de acoplamento e magnitude agregada.
+
+A repeticao limpa depois de remover os probes mortos reproduziu:
+
+| sentinela | loop (intra/inter) | final (intra/inter) | flips finish | seam max |
+|---|---:|---:|---:|---:|
+| Telvanni | 975 (821/154) | 1022 (843/179) | 18 | 0.233201u |
+| BlackSmithTorso | 158 (75/83) | 93 (71/22) | 0 | 0.000014u |
+| vampire_robes_alt | 491 (473/18) | 512 (493/19) | 0 | 0.079722u |
+| Cloak | 153 (153/0) | 99 (99/0) | 0 | 0.000361u |
+
+O cap foi acionado milhares de vezes e manteve o maior update aplicado em
+0.2639u / 0.1976u / 0.1806u / 0.2546u respectivamente. Ou seja, o resultado
+nao veio de um parametro inativo: ele bloqueou exatamente as somas explosivas.
+
+### Gate visual direto do candidato
+
+O gate normal mede `final.obj`. Em strict, a transacao rejeita este candidato
+por ainda haver crossings novos e `final.obj` volta ao resultado de producao;
+portanto comparar esses arquivos daria um falso "sem mudanca". A avaliacao
+correta desta fase foi feita diretamente sobre `candidate.obj`, contra o
+`candidate.obj` da barreira EE estatica, em 42 direcoes.
+
+Variacao de curva de auto-intersecao visivel (negativo e melhora):
+
+| sentinela | garment solid/p95/worst | com corpo solid/p95/worst |
+|---|---:|---:|
+| Telvanni | -18.6% / -17.1% / -24.2% | -16.6% / -13.3% / -22.6% |
+| BlackSmithTorso | -5.4% / +2.4% / +4.2% | -5.2% / -2.1% / -3.0% |
+| vampire_robes_alt | -7.2% / -5.7% / -6.9% | -7.4% / -5.7% / -6.8% |
+| Cloak | -11.9% / -9.7% / -11.0% | -9.9% / -9.3% / -9.4% |
+
+Todos os eixos com o corpo visivel melhoram nos quatro assets. A unica troca e
+pequena e garment-only no Blacksmith, cuja pior/p95 curva fica oclusa pelo
+corpo na avaliacao real. Isto e evidencia de ganho global, mas ainda nao e
+permissao para publicar: o gate topologico estrito permanece a autoridade.
+
+JSONs da medicao:
+
+- `build/algo/edge_microcap075_telvanni/visible_vs_static.json`
+- `build/algo/edge_microcap075_blacksmith/visible_vs_static.json`
+- `build/algo/edge_microcap075_vampire/visible_vs_static.json`
+- `build/algo/edge_microcap075_cloak/visible_vs_static.json`
+
+### Agendamento colorido e contato no finish - FALSIFICADOS E REMOVIDOS
+
+Tambem foi testado ordenar os pares EE, colori-los por compartilhamento dos
+quatro DOFs e executar as cores em GS. No Telvanni isso reduziu o loop para 934,
+mas a cauda subiu para 1080, com seam 0.260218u e 18 flips. A instrumentacao por
+estagio localizou a subida: 919 depois dos bridges para 1080 depois dos 80
+rounds de finish; trapped eviction nao era a causa.
+
+Intercalar EE a cada 8 rounds do finish produziu contagens muito boas
+(Telvanni 894, Blacksmith 100, Vampire 567, Cloak 104 com coloracao; na versao
+Jacobi 915/91/461/100). Porem a versao Jacobi regrediu o Blacksmith visivel com
+corpo em +6.9% no solid angle e +0.3% no p95. Cadencia 16 sacrificou Vampire e
+nao venceu o Blacksmith sem finish. Nao existe uma cadencia fixa universal
+validada, logo tanto a coloracao quanto `FINISH_CYCLE` foram removidos.
+
+### Estado atual e proximo passo (2026-09-08)
+
+O fonte contem somente a extensao preventiva retida, toda OFF por padrao:
+
+- `DRAPE_SHELL_EDGE_BARRIER=1`
+- `DRAPE_SHELL_EDGE_BARRIER_COMPLIANCE=0.003`
+- `DRAPE_SHELL_EDGE_BARRIER_MICROCYCLE=1`
+- `DRAPE_SHELL_EDGE_BARRIER_STEP_CAP=1`
+- `DRAPE_SHELL_EDGE_BARRIER_STEP_FRAC=0.75`
+
+Build Release e self-test passam. Nenhuma DLL foi deployada. O comparative
+closure gate continua rejeitando o candidate porque exige zero novos crossings
+contra a entrada de producao; nao afrouxar esse gate e nao confundir rollback
+em `final.obj` com validacao do candidato.
+
+O proximo trabalho deve atacar os nascimentos residuais sem outro impulso
+independente: transformar o cap agregado em um trust region realmente acoplado
+ao conjunto ativo EE, com aceitacao baseada na reducao topologica do passo (ou
+resolver somente a pequena ilha responsavel). Nao adicionar banda corporal,
+eixo, nome de mesh ou perfil de outfit. A meta imediata e fazer a barreira
+preventiva se aproximar de zero crossings novos; so depois reabrir deploy/DLL.
