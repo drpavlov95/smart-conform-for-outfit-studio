@@ -996,3 +996,41 @@ nascimentos residuais forem majoritariamente edge-edge, o proximo conserto e
 CCD/line-search do EE ja promissor; se forem VF, somente entao vale montar um
 solve de bloco por ilha. Essa classificacao e topologica, sem nomes, anatomia
 ou eixos, e evita repetir mais uma resposta correta para a primitiva errada.
+
+### Auditoria de nascimento por primitiva - EE CONFIRMADO, PROBE REMOVIDO
+
+Foi executada a auditoria passiva proposta acima. Para cada intervalo aceito
+`xPrev -> x`, ela coletava somente pares de triangulos que nao cruzavam antes e
+cruzavam depois. Para cada par, resolvia continuamente os zeros de volume
+assinado e validava barycentria interior para os seis eventos VF e distancia +
+parametros interiores para os nove eventos EE. A classificacao usa a primitiva
+com menor TOI; eventos a menos de 0.01 entre si contam como simultaneos.
+
+No Telvanni, em 62 iteracoes, houve 15,919 ocorrencias de nascimento e 4,308
+pares unicos: 1,063 VF-only, 2,023 EE-only, 1,221 ambos e somente 1 nao
+classificado. Mais importante, entre os 1,342 pares nascidos que ainda estavam
+cruzados ao fim do loop:
+
+| sentinela | sobreviventes classificados | VF-only | EE-only | ambos | com VF | com EE |
+|---|---:|---:|---:|---:|---:|---:|
+| Telvanni | 1342 | 256 | 595 | 491 | 55.7% | **80.9%** |
+| BlackSmithTorso | 172 | 58 | 88 | 26 | 48.8% | **66.3%** |
+| vampire_robes_alt | 459 | 119 | 239 | 101 | 47.9% | **74.1%** |
+
+Nos tres assets, portanto, a maioria dos defeitos sobreviventes envolve EE e
+EE-only e de 1.5x a 2.3x VF-only. No Telvanni e no Vampire o primeiro TOI EE
+tambem aparece quase no inicio do update (0.00007 e 0.00026); o Blacksmith tem
+VF 0.00291 e EE 0.00704, mas a contagem sobrevivente continua dominada por EE.
+
+A auditoria preservou byte-for-byte os resultados da barreira EE estatica:
+Telvanni 1304/1311 crossings, Blacksmith 157/114 e Vampire 418/555. Todo o
+codigo e a flag `DRAPE_SHELL_CROSS_BIRTH_AUDIT` foram removidos depois da
+medicao. O harness Release compila depois da remocao; nenhuma DLL foi deployada.
+
+Conclusao: a hipotese de que o primitive ausente era VF esta rejeitada. O
+proximo prototipo deve estender a barreira EE validada para o tempo continuo:
+AABB varrida, primeiro TOI edge-edge e desigualdade unilateral aplicada dentro
+do solve acoplado, antes de existir penetracao. Nao usar untangle posterior nem
+uma forca posicional. Como varios eventos compartilham vertices, a resposta
+deve ter agendamento deterministico sem DOFs concorrentes. Tudo deriva da
+geometria e da topologia do asset; nenhuma regra por outfit, anatomia ou eixo.
