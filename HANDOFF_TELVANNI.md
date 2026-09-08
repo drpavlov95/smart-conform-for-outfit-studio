@@ -1177,3 +1177,53 @@ ao conjunto ativo EE, com aceitacao baseada na reducao topologica do passo (ou
 resolver somente a pequena ilha responsavel). Nao adicionar banda corporal,
 eixo, nome de mesh ou perfil de outfit. A meta imediata e fazer a barreira
 preventiva se aproximar de zero crossings novos; so depois reabrir deploy/DLL.
+
+### Cap comum por componente de contato - FALSIFICADO E REMOVIDO
+
+Foi testada uma versao mais conservativa do trust region: em vez de truncar o
+delta de cada vertice separadamente, todas as constraints EE ativas eram unidas
+por DOFs compartilhados e cada componente recebia um unico fator de escala.
+Isso preservava a resposta relativa e a reciprocidade dentro da componente,
+sem qualquer regra de outfit.
+
+O grafo, porem, percola longe demais: as maiores componentes chegaram a 911
+vertices no Telvanni, 282 no Blacksmith, 654 no Vampire e 406 no Cloak. Um
+contato severo passou a amortecer centenas de contatos independentes.
+
+| sentinela | cap por vertice loop/final | cap por componente loop/final |
+|---|---:|---:|
+| Telvanni | **975 / 1022** | 1366 / 1316 |
+| BlackSmithTorso | **158 / 93** | 188 / 117 |
+| vampire_robes_alt | 491 / **512** | **484** / 607 |
+| Cloak | **153 / 99** | 187 / 126 |
+
+A pequena melhora no loop do Vampire nao sobrevive ao finish e todos os quatro
+resultados finais pioram. O probe e a flag `DRAPE_SHELL_EDGE_BARRIER_ISLAND_CAP`
+foram removidos. Consequencia para o proximo desenho: "ilha" nao pode significar
+fecho transitivo de todos os contatos ativos. O agrupamento deve permanecer
+local ao conflito simultaneo (por exemplo, estrela de um vertice ou pequeno
+bloco com raio limitado) e nao propagar o menor passo por uma componente inteira.
+
+### Cap pela folga autorada local - FALSIFICADO E REMOVIDO
+
+Outra hipotese local foi testada: o maximo update de cada vertice passou a ser
+0.75 vezes a menor folga autorada entre seus contatos ativos, em vez de 0.75
+vezes a espessura media. Isso impediria uma camada fina de receber um passo
+maior que sua propria separacao.
+
+Sem piso, Blacksmith melhorou 93->90 e Vampire 512->504, mas Telvanni piorou
+1022->1138 e Cloak 99->100. Com piso adimensional de 50% da espessura, a troca
+se inverteu:
+
+| sentinela | cap global loop/final | cap local com piso 0.5 loop/final |
+|---|---:|---:|
+| Telvanni | 975 / 1022 | **960 / 971** |
+| BlackSmithTorso | 158 / 93 | **155 / 91** |
+| vampire_robes_alt | **491 / 512** | 466 / 564 |
+| Cloak | **153 / 99** | 201 / 120 |
+
+A folga local redistribui o erro entre assets; nao o resolve. Nao foi feito um
+sweep oportunista de pisos ate achar um numero favoravel, pois isso seria
+tuning de corpus sem uma lei validada. Todo o probe e as flags
+`DRAPE_SHELL_EDGE_BARRIER_LOCAL_CAP*` foram removidos. O cap por vertice baseado
+na espessura media continua sendo o candidato retido.
