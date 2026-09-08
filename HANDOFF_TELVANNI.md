@@ -748,3 +748,141 @@ Flags novas de diagnostico/probe, todas OFF por padrao:
 
 Build Release do harness verde. Nenhuma DLL foi deployada e nenhuma flag nova
 esta ativa no produto.
+
+## 2026-09-08: rollback topologico local - FALSIFICADO E REMOVIDO
+
+Foi implementada a versao minima do proximo passo para testar a hipotese antes
+de investir num CCD completo. A cada iteracao ela comparava a proposta com o
+estado fisico anterior, encontrava apenas pares edge-face novos e reduzia pela
+metade somente o deslocamento dos seis vertices envolvidos. O restante do pano
+mantinha 100% do update. Era topologica, sem nome de shape, regiao corporal ou
+eixo de mundo, e ficava OFF por padrao.
+
+Resultado Telvanni Heavy:
+
+| variante | cruzamentos fim loop | cruzamentos fim cauda | flips | seam max | tempo |
+|---|---:|---:|---:|---:|---:|
+| acoplado anterior | 1883 | 1751 | 16 | 0.2604u | 11.7s |
+| rollback local no loop | **991** | 1591 | 15 | 0.2143u | 53.0s |
+| rollback local + self-edge toda iteracao | 1100 | 1539 | 15 | 0.2240u | ~72s |
+| rollback local tambem na cauda | 991 (901 apos bridges) | 1221 | **40** | **0.5331u** | **156.8s** |
+
+A reducao parcial nao e convergencia. Em todas as 37 iteracoes do loop o
+rollback atingiu o limite de 12 ondas; no ultimo update sobraram 94 pares. A
+instrumentacao mostrou **zero pares imoveis**: todos continham DOF movel. O
+residuo migra para faces vizinhas conforme os vertices recuam, porque parar no
+limite de intersecao sem uma distancia positiva deixa o contato tangencial
+numericamente instavel. Executar o self-edge toda iteracao piorou, confirmando
+que a resposta pos-penetracao nao fornece essa barreira.
+
+Na cauda o mecanismo repetiu 1212 ondas, tocou cumulativamente 126857 vertices,
+recriou flips e abriu costuras. Isto e exatamente o tipo de patchwork caro que
+nao deve permanecer. Todo o probe `DRAPE_SHELL_LOCAL_TOPOLOGY_BARRIER` e seu
+codigo auxiliar foram removidos depois da medicao; nao ficou codigo morto.
+
+### Consequencia para o proximo passo
+
+Nao implementar outro rollback discreto, nem global nem local. O primitive
+fisico faltante e uma constraint preventiva com espessura positiva:
+
+1. broad phase por AABB varrida entre `xPrev` e a proposta;
+2. narrow phase CCD vertex-face + edge-edge para achar o primeiro TOI;
+3. contato unilateral XPBD/barreira antes do TOI, com lambda persistente;
+4. esse contato no mesmo microciclo de body contact, membrana, costura,
+   orientacao e strain;
+5. cache incremental de pares ativos, pois reconstruir todos os cruzamentos
+   tornou o replay 4.5--13.4x mais lento.
+
+O teste tambem confirma que `PathBTriUntangle` pode continuar como safety net,
+mas nao pode ser a formulacao primaria de self-collision. Nenhuma DLL foi
+deployada.
+
+## 2026-09-08: barreira preventiva edge-edge XPBD - PROMISSORA, AINDA PROBE
+
+Foi implementado o primeiro primitive preventivo de espessura positiva dentro
+do mesmo loop fisico: `PathBEdgeEdgeBarrier`. Ele opera sobre todas as arestas
+topologicas, monta broad phase por AABB em grid uniforme, resolve a distancia
+entre os dois segmentos como desigualdade XPBD unilateral e conserva lambda
+por par durante o morph step. Nao ha nome de outfit, anatomia ou eixo de mundo.
+
+As exclusoes tambem sao topologicas e derivadas do proprio asset: arestas com
+vertice compartilhado, vizinhanca de dois aneis e gemeos exatos de costura nao
+colidem entre si. Para nao inflar roupa multicamada nem apagar proximidade que
+o autor quis, a distancia alvo de cada par e
+`min(espessura, distancia_autorada)`; coincidencia autorada exata e ignorada.
+
+Telvanni Heavy, sweep de compliance com espessura `0.10 * meanEdge` e relax
+0.50:
+
+| compliance | cruzamentos loop | cruzamentos finais | intra/inter final | flips | seam max |
+|---:|---:|---:|---:|---:|---:|
+| OFF (baseline) | 1883 | 1751 | 1222 / 529 | 16 | 0.2604u |
+| 0.30 | 1509 | 1449 | 1045 / 404 | 17 | 0.1860u |
+| 0.03 | 1372 | 1350 | 1007 / 343 | 16 | 0.2604u |
+| **0.003** | **1304** | **1311** | **1017 / 294** | **16** | **0.2293u** |
+
+A resposta e monotonicamente melhor ate retornos decrescentes, sem trocar a
+reducao topologica por flips ou abertura de costura. O default do probe passou
+a 0.003 com base nesse sweep; a feature inteira continua OFF por padrao.
+
+### Validacao cruzada atual, com baseline medido pelo mesmo binario
+
+| sentinela | variante | loop (intra/inter) | final (intra/inter) | flips final | seam loop/final | tempo |
+|---|---|---:|---:|---:|---:|---:|
+| BlackSmithTorso | OFF | 189 (95/94) | 118 (92/26) | 0 | 0.000394 / 0.000023u | 8.3s |
+| BlackSmithTorso | EE 0.003 | **157 (72/85)** | **114 (82/32)** | 0 | 0.017117 / 0.000023u | 11.6s |
+| vampire_robes_alt | OFF | 633 (588/45) | 727 (686/41) | 0 | 0.166619 / 0.080079u | 22.8s |
+| vampire_robes_alt | EE 0.003 | **418 (371/47)** | **555 (511/44)** | 0 | **0.108093 / 0.080333u** | 26.2s |
+
+No Vampire, alem de reduzir 34.0% no loop e 23.7% no final, o pior movimento
+do loop caiu de 4.382 para 2.737 e a convergencia de 76 para 56 iteracoes. No
+Blacksmith a melhora final e pequena, mas nao ha regressao de flips nem da
+costura convergida. A distribuicao intra/inter pode migrar alguns pares entre
+classes; o total melhora nos tres assets, portanto a evidencia e de um
+primitive global, nao de ajuste para Telvanni.
+
+Combinar esta barreira EE com o `PathBSelfCollide` vertex-face antigo nao soma
+os ganhos: no Telvanni termina em 1315 pares (1089/226), 19 flips, seam 0.1894u
+e ~35s, contra 1311, 16 flips e ~16s com EE sozinho. O VF atual melhora pares
+entre componentes mas piora os intra-componente; o combo foi rejeitado nesta
+formulacao e permanece OFF.
+
+### Estado e proximo passo
+
+A barreira EE reduz consistentemente tunnelling, mas ainda deixa 1311 pares no
+Telvanni e o gate corretamente recusa publicar. Ela nao e pronta para DLL. O
+primitive que falta e o complemento preventivo **vertex-face com CCD/TOI**,
+formulado com a mesma espessura autorada e lambda persistente. Nao reativar o
+VF antigo por simples soma: primeiro ele deve ser substituido por contato VF
+por par (quatro DOFs e normal da face), em vez da projecao por vertice que
+transforma contato entre paineis em deformacao intra-painel.
+
+Flags do probe, todas OFF por padrao:
+
+- `DRAPE_SHELL_EDGE_BARRIER=1`
+- `DRAPE_SHELL_EDGE_BARRIER_COMPLIANCE=0.003`
+- `DRAPE_SHELL_EDGE_BARRIER_RELAX=0.5`
+- `DRAPE_SHELL_EDGE_BARRIER_THICK=0.10`
+
+Nenhuma DLL foi deployada. Os quatro replays de validacao foram feitos em
+Release, com `DRAPE_SHELL_COUPLED_CROSS_AUDIT=1`, e o gate permaneceu fechado.
+
+### Ablacao VF por par estatico - FALSIFICADA E REMOVIDA
+
+Foi prototipado o complemento vertex-face com lambda persistente por par,
+reacao barycentrica nos tres vertices da face, exclusao topologica de dois
+aneis e distancia limitada pela proximidade autorada. Era universal e OFF por
+padrao, mas ainda consultava apenas a pose corrente (sem trajetória/TOI).
+
+No Telvanni, VF sozinho terminou em 1656 pares contra 1751 do baseline
+(-5.4%). Com EE junto terminou em 1296 contra 1311 do EE sozinho: apenas 15
+pares adicionais, mesmos 16 flips e seam pior de 0.2293 para 0.2642u. Portanto
+o operador duplica em grande parte o dominio do EE e nao captura o evento que
+falta: um vertice pode saltar completamente atraves da face entre duas poses e
+ja aparecer distante do outro lado, fora da banda de proximidade.
+
+Todo o probe `DRAPE_SHELL_VF_BARRIER` e seu codigo foram removidos depois da
+medicao. O proximo VF nao deve repetir proximidade estatica: precisa receber
+`xPrev` e `xProposed`, construir AABB varrida e resolver o primeiro TOI do par
+vertex-face antes de aceitar o update. Esta e agora uma exigencia medida, nao
+uma preferencia arquitetural.
