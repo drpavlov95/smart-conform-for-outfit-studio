@@ -886,3 +886,33 @@ medicao. O proximo VF nao deve repetir proximidade estatica: precisa receber
 `xPrev` e `xProposed`, construir AABB varrida e resolver o primeiro TOI do par
 vertex-face antes de aceitar o update. Esta e agora uma exigencia medida, nao
 uma preferencia arquitetural.
+
+### CCD vertex-face com TOI e resposta Jacobi - FALSIFICADO E REMOVIDO
+
+O passo seguinte implementou a parte continua que faltava: AABB varrida dos
+quatro vertices, raiz do volume assinado do tetraedro ao longo de
+`xPrev -> xProposed`, bissecao do primeiro zero e confirmacao baricentrica de
+que o vertice estava dentro da face no instante do impacto. Assim o detector
+enxerga inclusive um vertice que termina longe do outro lado da face.
+
+A primeira resposta aplicava a reacao na normal da face ao fim do passo. Isso
+era geometricamente errado quando a face girava e terminou o Telvanni com 87
+flips no loop e 1609 crossings finais. Corrigida para a normal no proprio TOI,
+o detector encontrou cumulativamente 8144 impactos (TOI mais cedo 0.00046),
+mas ainda produziu 88 flips no loop e 1438 crossings finais, contra 16 flips e
+1311 crossings com EE sozinho. A cauda reparou flips para 17, mas nao recuperou
+a topologia nem a costura (`seamMax=0.2655u`).
+
+O erro estrutural nao esta mais no detector: e a montagem da resposta. Muitos
+vertices impactam a mesma face no mesmo sweep; somar todas as reacoes em Jacobi
+concentra impulso nos tres DOFs dessa face e a vira. Selecionar apenas o
+primeiro impacto por vertice nao impede dezenas de vertices de escolherem a
+mesma face. Compliance/relaxation apenas modulam essa soma e seriam outra
+tentativa de ajustar sintoma.
+
+Todo o probe `DRAPE_SHELL_SWEPT_VF_CCD` foi removido. Um proximo CCD VF precisa
+resolver **ilhas de contato**: construir o grafo bipartido vertex-face dos TOIs,
+colorir/serializar constraints sem DOFs compartilhados ou resolver o pequeno
+sistema da ilha, atualizando a geometria entre impactos. Nao voltar a acumular
+impulsos VF independentes em Jacobi. A barreira EE validada permanece o unico
+primitive novo no fonte, ainda OFF por padrao e sem DLL deployada.
