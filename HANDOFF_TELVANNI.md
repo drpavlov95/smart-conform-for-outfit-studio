@@ -916,3 +916,34 @@ colorir/serializar constraints sem DOFs compartilhados ou resolver o pequeno
 sistema da ilha, atualizando a geometria entre impactos. Nao voltar a acumular
 impulsos VF independentes em Jacobi. A barreira EE validada permanece o unico
 primitive novo no fonte, ainda OFF por padrao e sem DLL deployada.
+
+### Auditoria do grafo CCD - HIPOTESE DE ILHAS CONFIRMADA
+
+Antes de escolher entre coloracao e solver de bloco, foi executado um CCD
+somente de leitura sobre exatamente `xPrev -> xProposed`, junto do EE validado.
+Ele nao aplicava nenhuma resposta; o resultado permaneceu identico ao EE puro:
+1304 crossings no loop, 1311 finais, 16 flips finais e seam 0.229305u.
+
+No ultimo morph step do Telvanni, acumulado pelas iteracoes:
+
+- 1,269,657 candidatos de broad phase;
+- 4,791 impactos vertex-face confirmados por TOI + barycentria;
+- **2,884 impactos (60.2%) compartilhavam face ou vertice** com outro contato;
+- uma face recebeu ate 6 impactos no mesmo sweep;
+- um vertice participou de ate 3 impactos no mesmo sweep;
+- ate 73 faces estavam compartilhadas numa iteracao;
+- a maior ilha conectada teve **65 constraints / 77 vertices**;
+- primeiro TOI observado: 0.00045 do passo.
+
+Isto confirma diretamente por que a soma Jacobi virou faces: a maioria dos
+impactos nao e independente, e a maior ilha e grande demais para tratar cada
+par como se possuisse quatro DOFs exclusivos. Tambem explica o TOI quase zero:
+ha contato persistente/chattering que deve permanecer numa ilha ativa entre
+iteracoes, nao ser redetectado como uma colisao nova a cada sweep.
+
+O probe observacional `DRAPE_SHELL_SWEPT_VF_AUDIT` foi removido depois da
+medicao. Proximo prototipo: cache persistente de ilhas ativas e coloracao
+deterministica das constraints por compartilhamento de DOF; dentro de cada cor,
+Jacobi e seguro, e entre cores a geometria deve ser atualizada em Gauss-Seidel.
+Se uma ilha grande continuar mal condicionada, so ela deve cair para um solve
+de bloco. Nenhuma regra depende de outfit, anatomia ou eixo.
