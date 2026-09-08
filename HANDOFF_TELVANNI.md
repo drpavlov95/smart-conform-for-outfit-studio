@@ -947,3 +947,52 @@ deterministica das constraints por compartilhamento de DOF; dentro de cada cor,
 Jacobi e seguro, e entre cores a geometria deve ser atualizada em Gauss-Seidel.
 Se uma ilha grande continuar mal condicionada, so ela deve cair para um solve
 de bloco. Nenhuma regra depende de outfit, anatomia ou eixo.
+
+### CCD VF colorido e conjunto ativo - FALSIFICADOS E REMOVIDOS
+
+Foi implementada a resposta que a auditoria acima sugeria, sempre como probe
+global e OFF por padrao. Os eventos vertex-face foram ordenados por TOI e
+coloridos deterministicamente para que nenhuma constraint da mesma cor
+compartilhasse qualquer dos quatro DOFs. As cores eram executadas em
+Gauss-Seidel e o coupled orientation/seam vinha logo depois, dentro da mesma
+iteracao.
+
+Isso resolveu o defeito numerico do Jacobi: em vez de 88 flips, o Telvanni
+chegou a 13 flips no loop com relaxacao 1.0 e a 12 com 0.5. Portanto a
+coloracao de fato impediu varias respostas stale de virarem a mesma face.
+Porem ela nao resolveu a topologia:
+
+| variante | crossings loop | crossings finais | flips loop/final | seam final |
+|---|---:|---:|---:|---:|
+| EE validado, sem VF | **1304** | **1311** | 16 / 16 | 0.2293u |
+| VF colorido, relax 1.0 | 1360 | 1388 | 13 / 16 | 0.1911u |
+| VF colorido, relax 0.5 | 1320 | 1332 | 12 / 16 | 0.1820u |
+
+A relaxacao menor aproximou o resultado do EE e melhorou a costura, mas ainda
+comprou isso com mais crossings. Nao passou o gate.
+
+Foi entao testado o complemento que faltava: cache ativo por par VF, lambda
+persistente, barycentria atualizada a cada iteracao (contato sem friccao) e
+liberacao ao deslizar para fora da face ou separar duas espessuras. Ele reduziu
+o custo por convergir em 55 iteracoes, mas piorou para 1407 crossings no loop,
+1461 finais, 13/18 flips e seam 0.2156u. Foram 16,263 impactos novos, 11,151
+reaplicacoes persistentes e ate 535 contatos ativos simultaneos. O primeiro TOI
+continuou praticamente zero (0.00003).
+
+Conclusao: o conflito Jacobi era real, mas **nao era a causa suficiente** dos
+crossings residuais. Uma desigualdade VF pontual, mesmo colorida e persistente,
+redistribui o pano e cria mais intersecoes do que remove. Compliance e
+relaxation nao mudam esse veredito. Todo o codigo e as flags
+`DRAPE_SHELL_COLORED_VF_*` foram removidos; o fonte voltou a conter somente a
+barreira EE preventiva validada, ainda OFF por padrao. Build Release do harness
+passa depois da remocao. Nenhuma DLL foi deployada.
+
+Proximo passo recomendado: nao implementar outro solver de contato ainda.
+Primeiro fazer uma auditoria passiva de **nascimento de crossing por primitiva**
+no intervalo `xPrev -> xProposed`, distinguindo evento VF de evento EE para o
+mesmo par de triangulos. O detector final conta intersecao triangulo-triangulo,
+mas isso nao prova que VF seja a primitiva que nasceu no tempo continuo. Se os
+nascimentos residuais forem majoritariamente edge-edge, o proximo conserto e
+CCD/line-search do EE ja promissor; se forem VF, somente entao vale montar um
+solve de bloco por ilha. Essa classificacao e topologica, sem nomes, anatomia
+ou eixos, e evita repetir mais uma resposta correta para a primitiva errada.
