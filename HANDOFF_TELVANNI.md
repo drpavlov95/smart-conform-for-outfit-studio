@@ -1618,3 +1618,13 @@ Jacobi de grandes correcoes sobrepostas por uma formulacao incremental que
 preserve orientacao durante o proprio sweep (por exemplo batches sem vertices
 compartilhados ou XPBD com passo consistente), medida contra os mesmos
 invariantes antes de qualquer ativacao global.
+
+Tambem foi testado e **removido** um sweep de stretch Gauss--Seidel colorido,
+sem vertices compartilhados, com lambda e movimento ambos relaxados por 0.15.
+Ele tinha a motivacao correta de eliminar a discrepancia lambda/Jacobi, mas o
+resultado objetivo foi pior: no passo 4 a entrada valida (`stretch=2.540`)
+saltou para 148 flips e `stretch=6.321`, e os passos 5--6 voltaram a ser
+recusados. Assim ele nao permanece como flag, fallback ou candidato oculto.
+O proximo desenho deve medir e limitar a *proposta composta* de stretch antes
+de atualizar estado dual, em vez de apenas mudar de ordem os mesmos grandes
+impulsos.
