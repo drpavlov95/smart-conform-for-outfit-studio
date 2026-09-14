@@ -1560,3 +1560,48 @@ explicitamente rigidas como Dirichlet. Antes de habilita-lo, instrumentar a
 barreira para distinguir se a recusa vem de orientacao, area ou costura e
 fazer a atualizacao de suporte/material/contato composicionalmente aceitavel.
 O strict gate permanece o contrato de publicacao durante toda essa transicao.
+
+### Causa material apos suportes validos (2026-09-14)
+
+Com suporte acoplado e continuidade de morph, o passo 4 entra valido (`0`
+flips), mas ja traz arestas com stretch maximo `3.137`. A auditoria granular
+mostrou que o primeiro operador que invalida a superficie e inequivocamente
+`PathBStretchJacobi`, antes de qualquer contato corporal:
+
+| checkpoint, passo 4 iteracao 1 | flips | colapsos | stretch maximo |
+|---|---:|---:|---:|
+| entrada / apos gravidade | 0 | 0 | 3.137 |
+| apos stretch | 138 | 1 | 4.379 |
+| apos strain clamp | 133 | 1 | 6.549 |
+| apos bend | 111 | 1 | 6.566 |
+| apos contato corporal | 134 | 10 | 7.028 |
+
+O ledger passivo do sweep de stretch encontrou 6.971 constraints validas:
+4.466 em tensao e 2.499 em compressao, com `max |C|=4.018916`,
+`max |delta-lambda|=2.219986` e deslocamento por vertice aplicado de ate
+`1.032848` unidades apos a media Jacobi. Logo nao e uma correcao pequena de
+contato que incidentalmente dobra o pano: e um campo simultaneo de grandes
+correcoes de comprimento sobre uma malha muito tensionada.
+
+O A/B com `DRAPE_SHELL_NO_GRAVITY=1` ficou praticamente igual (`0 -> 135`
+flips; `max |C|=4.024778`; deslocamento maximo `1.029168`). Isso exclui a
+gravidade como causa desse salto; ela pode afetar a aparencia final, mas nao
+cria a primeira inversao deste caso.
+
+Foi adicionada somente telemetria opt-in `stretch-ledger` ao operator audit.
+Ela mede C, incremento de lambda e os deltas Jacobi bruto/aplicado; nao muda
+posicoes, lambdas ou ordem dos constraints. Tambem se removeu o limite
+arbitrario de dez tentativas da line-search de orientacao: o novo limite
+generico e configuravel por `DRAPE_SHELL_ITERATION_BACKTRACKS` (default 16,
+apenas quando a barreira opt-in esta ligada). No mesmo replay, o passo 4 foi
+aceito apos 12 backtracks, e os seis passos terminaram com zero flips. O
+resultado continuou no strict gate estatico porque o stretch residual ainda
+e muito alto (passo 6: `7.043`); a barreira tornou o integrador seguro, nao
+transformou uma aproximacao insuficiente em resultado publicavel.
+
+Proximo experimento causal: a continuacao geometrica usa hoje seis passos
+fixos e reaplica a carga de gravidade em cada um. Antes de aumentar sua
+resolucao para reduzir a tensao por passo, separar a discretizacao de morph
+da carga externa para que 6, 12 ou 24 subpassos representem a mesma gravidade.
+So entao comparar a convergencia/material por subpasso. Nao trocar compliance,
+inserir clamps locais ou aceitar o candidato fora do strict gate.
