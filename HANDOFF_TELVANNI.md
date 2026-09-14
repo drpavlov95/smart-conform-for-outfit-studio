@@ -1449,3 +1449,114 @@ o bloco de contato por vertice por uma atualizacao de campo/coerente (snapshot,
 correcoes de contato e aplicacao com barreira de orientacao por patch ativo),
 mantendo lambda XPBD e todas as referencias topologicas. Primeiro medir essa
 formulacao como probe OFF por padrao; nunca desativar o gate para ve-la.
+
+### Correcao da atribuicao por operador: plumb clamp (2026-09-14)
+
+A tabela acima agregava mais do que o contato por vertice: o ponto de auditoria
+antigo ficava depois de contato com layers, hull, sombra de gravidade, teto de
+silhueta, `plumbClamp` e contato por face. A conclusao de que **todo** esse
+salto vinha do XPBD corporal era, portanto, forte demais. A telemetria foi
+dividida em checkpoints passivos, sem mudar a ordem de execucao:
+
+`material-seam -> body-vertex-contact -> layer-contact -> outer-contact ->
+body-hull -> gravity-shadow -> silhouette-ceiling -> plumb-clamp ->
+face-contact -> self-contact -> coupled-orient`.
+
+No mesmo replay Telvanni, com o `plumbClamp` ainda ligado, a leitura correta e:
+
+| iteracao | apos material | apos contato corporal | apos helpers ate shadow | apos plumb clamp | apos face |
+|---:|---:|---:|---:|---:|
+| 16 | 58 | 67 | 67 | 78 | 78 |
+| 32 | 70 | 75 | 75 | 84 | 84 |
+| 48 | 83 | 88 | 88 | 97 | 98 |
+| 64 | 93 | 101 | 101 | 112 | 113 |
+| 80 | 90 | 98 | 98 | 108 | 108 |
+| 96 | 100 | 107 | 107 | 117 | 117 |
+
+Assim, o contato corporal ainda injeta `+5..9` flips e continua sendo uma causa
+a investigar, mas o maior segundo salto (`+9..11`) era o `plumbClamp` em-solve.
+Esse operador puxava cada vertice livre radialmente para dentro de um envelope
+XY, sequencialmente e fora do sistema de restricoes. Ele nao representa
+gravidade, tensao de membrana nem contato; competir com essas forcas explica o
+aspecto de tecido artificialmente espremido/empurrado e a nova onda de inversoes.
+
+O A/B com `DRAPE_SHELL_PLUMB_INSOLVE=0` removeu esse segundo salto: na iteracao
+16, os flips foram de 49 apos material para 56 apos contato corporal e ficaram
+em 56 atraves de layer, hull, sombra, teto e plumb; contato por face levou apenas
+para 57. Por isso `DRAPE_SHELL_PLUMB_INSOLVE` passou a ser **OFF por padrao**.
+O limite de alvo de contato, que e uma protecao distinta, permanece inalterado.
+Nao ha regra por outfit, osso ou regiao anatomica: foi removida uma correcao
+posicional nao-fisica que afetava globalmente todo shell.
+
+O self-test e o corpus completo continuam PASS. No Telvanni estrito, o candidato
+ainda falha o comparative closure gate e o resultado final permanece exatamente
+o OBJ estatico seguro (SHA-256 `5602BBF0710E340478254F0F731417930A660CD70EF476DD6985674A679319DE`).
+Isso e esperado e desejado: esta mudanca elimina uma causa, mas nao autoriza
+publicar o restante da deformacao sem resolver o contato corporal residual.
+
+Proximo passo: medir, dentro do unico sweep corporal, quanto vem do `body push`
+por deslocamento e quanto vem do XPBD por distancia/normal, sem separar loops ou
+mudar a solucao. So depois dessa atribuicao sera escolhida uma formulacao de
+campo/coerente para o contato restante. Nao reativar `plumbClamp`, `CONTACT_NOFLIP`
+nem desabilitar o strict gate como modo de teste.
+
+### Origem anterior ao solver: construcao de suportes (2026-09-14)
+
+O teste da barreira de orientacao por iteracao revelou um fato que a auditoria
+de contato nao conseguia mostrar: no caminho padrao ela ja recebia o passo 1
+com 55 flips e por isso recusava a atualizacao inteira. Foi adicionada a
+telemetria passiva `DRAPE_SHELL_SUPPORT_AUDIT=1` (e `..._STEP`) ao redor da
+construcao de alvos fixos. No Telvanni Heavy, passo 1:
+
+| estagio | flips | colapsos | pior area | pior stretch |
+|---|---:|---:|---:|---:|
+| entrada | 0 | 0 | 1.000 | 1.000 |
+| transporte nominal de suporte | 31 | 2 | 4.840 | 2.701 |
+| piso/projecao individual de ancora | 44 | 3 | 6.087 | 3.663 |
+| suavizacao de deslocamento de ancora | 55 | 3 | 9.378 | 6.291 |
+| limpeza por face da faixa fixa | 55 | 2 | 9.378 | 6.291 |
+
+Essa e a causa-raiz mais anterior encontrada ate agora. A roupa inicia valida;
+o codigo substitui a posicao de cada vertice de suporte por seu conform/skin
+individual enquanto os vizinhos livres ainda permanecem no estado anterior.
+Mesmo antes de contato, gravidade ou material atuarem, essa descontinuidade
+atravessa faces mistas. Projetar cada ancora por sua normal mais proxima piora
+o campo, e a media de deslocamentos nao e uma restricao de orientacao: neste
+caso ela adiciona mais 11 flips. Como esses vertices sao Dirichlet, o solver
+posterior nao pode negociar nem desfazer a incompatibilidade.
+
+Isso corrige tambem a leitura sobre contato: ele continua sendo um problema
+residual relevante, mas estava sendo observado sobre uma malha que ja havia
+perdido validade topologica. Nao faz sentido consertar o contato com um patch
+enquanto a condicao inicial dele e invalida.
+
+### Suportes XPBD: experimento global, ainda nao habilitado (2026-09-14)
+
+O codigo ja continha um caminho opt-in `DRAPE_SHELL_COUPLED_SUPPORT=1` que
+libera suportes nao-rigidos como graus de liberdade com alvos XPBD; foi testado
+com `DRAPE_SHELL_COUPLED_MORPH_CONTINUATION=1`. Ele libera 1.141 suportes no
+Telvanni, sem regra por outfit. Todos os checkpoints de construcao inicial
+permaneceram em `0 flips / area 1.000 / stretch 1.000`.
+
+No iterador 16, esse caminho iniciou com 6 flips, material reduziu para 5 e
+contato corporal para 3 (ao contrario do overwrite rigido, que ja iniciava a
+iteracao com 56). Isso demonstra que negociar suporte, material e contato no
+mesmo sistema elimina a causa inicial e muda o sinal do operador de contato
+na primeira fase. Contudo, ao fim dos seis passos ainda havia 82 flips e o
+comparative closure gate rejeitou o candidato: a formulacao nao esta pronta
+para virar default.
+
+Com a barreira global `DRAPE_SHELL_ITERATION_ORIENT_BARRIER=1`, o mesmo caminho
+preservou `0 flips` nos tres primeiros passos usando line-search (5, 6 e 1
+iteracoes limitadas). Nos passos 4--6 nenhum alpha aceitou, e a barreira
+recusou o passo em vez de publicar uma superficie invertida. Repetir o teste
+com `DRAPE_SHELL_ITERATION_MIN_AREA=0.02` -- o mesmo minimo do XPBD de
+orientacao -- produziu a mesma recusa; portanto nao e justificavel resolver
+isso reduzindo uma constante.
+
+Direcao correta: substituir gradualmente o overwrite rigido dos suportes por
+anexacao XPBD para todos os suportes nao-rigidos, preservando apenas pecas
+explicitamente rigidas como Dirichlet. Antes de habilita-lo, instrumentar a
+barreira para distinguir se a recusa vem de orientacao, area ou costura e
+fazer a atualizacao de suporte/material/contato composicionalmente aceitavel.
+O strict gate permanece o contrato de publicacao durante toda essa transicao.
