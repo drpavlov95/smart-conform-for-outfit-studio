@@ -1400,3 +1400,52 @@ colapso/alongamento de triangulos por estagio — e registrar qual operador os
 cria. Somente depois se deve alterar o operador causal, mantendo o teste e a
 publicacao sob o mesmo gate. Isso e uma lei topologica geral, nao um ajuste por
 outfit.
+
+### Baseline diagnosticada: Telvanni Heavy (2026-09-14)
+
+Foram adicionadas duas telemetrias estritamente passivas, ambas OFF por padrao:
+
+- `DRAPE_SHELL_STAGE_AUDIT=1`: mede, depois de cada estagio estavel do shell,
+  flips, colapsos, area, stretch, contato corpo-vertice/face e crossings novos;
+- `DRAPE_SHELL_OPERATOR_AUDIT=1`: mede os mesmos invariantes dentro de um
+  morph step. `..._STEP`, `..._ITER` selecionam uma amostra; `..._EVERY=N`
+  amostra a cada N iteracoes daquele step.
+
+As rotinas apenas leem uma copia/estado corrente para log. Um replay com e sem
+as flags produziu o mesmo SHA-256 de `TelvanniBody_female__final.obj`:
+`5602BBF0710E340478254F0F731417930A660CD70EF476DD6985674A679319DE`.
+
+No ambiente reproduzivel do handoff (strict, shell, body-evict, posterior
+chord, late tuck e orient repair), a referencia de producao ja chega com 67
+flips. O shell agrava isso para 421 flips e 1.991 crossings novos antes do
+finish. O finish reduz stretch (`10.778 -> 3.225`), mas nao recupera topologia
+(`421 -> 418` flips) e, no seu ultimo estagio, eleva a pior area
+`12.470 -> 21.346`; o gate o rejeita corretamente.
+
+A leitura por operador no primeiro morph step mostra a causa imediata. Em
+iteracoes 16/32/48/64/80/96, gravidade/ancora quase nao mudam flips; o bloco
+material+costura inclusive os reduz temporariamente. O **contato corporal por
+vertice** os recria de modo repetido:
+
+| iteracao | entrada | apos material/costura | apos contato por vertice | apos face/self-contact |
+|---:|---:|---:|---:|---:|
+| 16 | 74 | 58 | 78 | 78 |
+| 32 | 88 | 70 | 84 | 84 |
+| 64 | 107 | 93 | 112 | 113 |
+| 96 | 115 | 100 | 117 | 117 |
+
+Portanto, neste replay, nao e a gravidade nem o contato por face que injeta a
+inversao dominante. O contato XPBD por vertice ainda aplica correcoes locais
+em serie: cada vertice satisfaz seu corpo sem verificar a atualizacao composta
+dos triangulos vizinhos. Isso e exatamente o mecanismo que faz tecido aparentar
+ser empurrado por uma parte do corpo distante: a tensao se propaga pela malha
+apos uma correcao local incompativel, em vez de resultar de contato geometrico
+direto naquela face.
+
+O antigo `DRAPE_SHELL_CONTACT_NOFLIP` continua falsificado: ele limita uma
+correcao isolada, mas nao protege a composicao de muitas correcoes consecutivas
+e piora o pico externo. Nao reativa-lo. A proxima mudanca fisica deve substituir
+o bloco de contato por vertice por uma atualizacao de campo/coerente (snapshot,
+correcoes de contato e aplicacao com barreira de orientacao por patch ativo),
+mantendo lambda XPBD e todas as referencias topologicas. Primeiro medir essa
+formulacao como probe OFF por padrao; nunca desativar o gate para ve-la.
