@@ -1372,3 +1372,31 @@ Nenhuma conclusao de publicacao deve ser tirada deste teste misto. Se o Vampire
 ou o Cloak mostrarem regressao visual, o proximo trabalho e localizar qual
 subconjunto de amostras face-corpo satura a trust region, mantendo a escala
 adimensional e sem voltar a patches por outfit.
+
+### Teste visual da trust region: REJEITADO E REMOVIDO (2026-09-14)
+
+O teste visual foi executado no Telvanni com a flag da trust region ligada e,
+para conseguir observar o candidato, com `strict_off.flag`. O resultado foi uma
+deformacao severa da roupa/capa em todas as vistas. Portanto este nao foi um
+resultado aceitavel nem uma variacao que deva ser disponibilizada como opcao.
+
+Ha uma distincao importante para nao tirar uma conclusao causal falsa: o teste
+desligou simultaneamente o gate que rejeitava a solucao inteira. Logo as imagens
+provam que o **candidato bruto do shell** e geometricamente invalido; elas nao
+isolam a trust region como unica causa da pose. Mas tambem provam que a metrica
+de crossings usada na comparacao nao mede, sozinha, preservacao global de
+silhueta, areas e orientacao. Ela jamais pode justificar desligar o gate em
+uma build de teste ou de publicacao.
+
+Os dois flags temporarios foram removidos das duas instalacoes do Outfit Studio,
+`strict_on.flag` permanece ativo no ambiente de desenvolvimento, e todo o
+codigo/flag `DRAPE_SHELL_FACE_AGGREGATE_CAP` foi removido do fonte. O binario
+volta ao caminho estrito de controle: se o shell nao preservar as invariantes,
+o resultado experimental nao e mostrado.
+
+Proxima direcao: antes de tentar outro corretivo de contato por face, ampliar o
+gate para medir a causa que a imagem revelou — validade de orientacao e
+colapso/alongamento de triangulos por estagio — e registrar qual operador os
+cria. Somente depois se deve alterar o operador causal, mantendo o teste e a
+publicacao sob o mesmo gate. Isso e uma lei topologica geral, nao um ajuste por
+outfit.
