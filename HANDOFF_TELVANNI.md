@@ -1227,3 +1227,148 @@ sweep oportunista de pisos ate achar um numero favoravel, pois isso seria
 tuning de corpus sem uma lei validada. Todo o probe e as flags
 `DRAPE_SHELL_EDGE_BARRIER_LOCAL_CAP*` foram removidos. O cap por vertice baseado
 na espessura media continua sendo o candidato retido.
+
+### Cap reciproco por constraint - FALSIFICADO E REMOVIDO
+
+Foi testado um trust region local que preservava a mesma escala nos quatro
+DOFs de cada constraint EE. Para garantir o limite mesmo com vetores que se
+cancelam, cada estrela de vertice media a soma L1 das correcoes incidentes; o
+fator do par era o menor orcamento entre seus quatro vertices. Assim nenhuma
+constraint perdia a reciprocidade por um clamp diferente em cada ponta.
+
+| sentinela | cap por vertice loop/final | cap reciproco loop/final |
+|---|---:|---:|
+| Telvanni | **975 / 1022** | 1176 / 1150 |
+| BlackSmithTorso | **158 / 93** | 157 / 115 |
+| vampire_robes_alt | 491 / **512** | **372** / 558 |
+| Cloak | **153 / 99** | 175 / 110 |
+
+O resultado final piorou nos quatro assets. A queda no loop do Vampire volta a
+ser destruida pelo finish. Neste solve quasi-estatico com corpo e suportes
+Dirichlet, preservar reciprocidade por constraint nao compensa amortecer toda
+a estrela pela soma L1; contato insuficiente permite que outras constraints
+recriem o crossing. Todo o probe e a flag
+`DRAPE_SHELL_EDGE_BARRIER_RECIPROCAL_CAP` foram removidos.
+
+Estado de decisao: nao continuar variando agrupamento ou folga do cap. Tres
+formulacoes fisicamente plausiveis redistribuiram o defeito e nenhuma venceu o
+cap simples nos quatro sentinelas. O proximo experimento deve mudar outra causa
+independente, especialmente o fato de a cauda nao incluir o mesmo equilibrio
+preventivo validado no loop, mas sem voltar a uma cadencia fixa cega.
+
+### Trajetoria do finish e one-shot preventivo - MEDIDO, FALSIFICADO E REMOVIDO
+
+Uma auditoria passiva contou crossings pelo mesmo coletor broad-phase antes do
+finish e a cada oito rounds. O numero absoluto desse coletor nao deve ser
+misturado com o `PathBCloseNewCrossings` do gate (ele trata exact seams de forma
+diferente), mas a tendencia dentro de cada replay e comparavel:
+
+| sentinela | round 0 | round 8 | round 40 | round 80 |
+|---|---:|---:|---:|---:|
+| Telvanni | 1126 | 1391 | 1517 | 1492 |
+| BlackSmithTorso | 183 | 197 | 221 | 231 |
+| vampire_robes_alt | 786 | 1443 | 1467 | 1459 |
+| Cloak | 170 | 191 | 193 | 212 |
+
+A cauda cria seu maior salto nos primeiros oito rounds e depois oscila num
+plateau; ela nao cura crossings monotonicamente. Isso explica por que adicionar
+EE em cadencia fixa melhorava contagem bruta mas podia piorar a curva visivel.
+
+Foi entao testada uma unica projecao EE, com o cap validado, imediatamente
+depois dos bridges e antes do checkpoint/finish. Ela reduziu imediatamente
+Telvanni 928->838 e Vampire 486->460; no resultado final:
+
+| sentinela | candidato retido | one-shot pre-finish |
+|---|---:|---:|
+| Telvanni | 1022 | **954** |
+| BlackSmithTorso | 93 | 93 |
+| vampire_robes_alt | 512 | **500** |
+| Cloak | **99** | 100 |
+
+Apesar da contagem promissora, o gate visual direto rejeitou a variante:
+
+- Telvanni com corpo: solid/p95/worst -5.1% / -11.0% / -10.1%;
+- Blacksmith com corpo: **+5.7%** / -1.5% / +0.1%;
+- Vampire com corpo: -0.8% / +0.1% / -0.3%;
+- Cloak com corpo: -3.1% / **+1.7% / +2.4%**.
+
+Logo um one-shot global ainda troca pares ocultos por curvas expostas no
+Blacksmith/Cloak. O probe `DRAPE_SHELL_EDGE_BARRIER_PRE_FINISH`, a auditoria
+`DRAPE_SHELL_FINISH_CROSS_TREND_AUDIT` e todo o codigo associado foram
+removidos. JSONs preservados em `build/algo/edge_prefinish_*/visible_vs_microcap.json`.
+
+Implicacao: o proximo passo nao deve ser "mais EE no finish". Precisa descobrir
+qual operador dos primeiros rounds gera as curvas expostas (body vertex,
+body face, strain, support, seam ou orientation) e intercalar/limitar somente
+esse operador. A unidade correta de diagnostico agora e nascimento de crossing
+por **operador da cauda**, nao mais frequencia global de self-contact.
+
+### Contato por face: causa isolada e trust region (2026-09-14)
+
+A auditoria passiva por operador fechou a primeira pergunta causal: na entrada
+do acabamento o contato por vertice e neutro; a amostragem de contato por face
+cria o primeiro salto grande de cruzamentos em todos os quatro sentinelas
+(+39 a +196 pares no primeiro round). O operador antigo aplicava cada amostra
+imediatamente, em ordem de indice de triangulo, sobre vertices que ja tinham
+sido deslocados pelas amostras anteriores. Um vertice de alta valencia podia
+receber dezenas de impulsos incompatíveis na mesma chamada. Isso explica a
+dependencia de triangulacao, o viés esquerda/direita e a deformacao em regioes
+que nao estao em contato direto com o corpo. Nao e um problema de nome de
+outfit nem de uma regiao corporal.
+
+Foram experimentadas duas formulacoes alternativas e removidas por nao
+vencerem o controle: Jacobi simultaneo puro deixou o contato sub-resolvido
+(Telvanni final 1075), e XPBD apenas no contato por face reduziu flips mas
+deixou o final em 1031. Ambas permanecem fora do fonte para nao acumular
+spaghetti experimental.
+
+A formulacao retida e menor: durante uma chamada de contato por face, o
+deslocamento total de cada vertice e limitado por uma trust region derivada da
+propria malha (`0.5 * edgeBarrierThickness`, onde `edgeBarrierThickness` e a
+media das arestas de repouso vezes a espessura configurada). O limite atua no
+somatorio das amostras, nao em uma coordenada, eixo ou outfit. Ele so e usado
+no acabamento; o solve principal continua com o comportamento congelado que
+passou a reproducao do corpus.
+
+Com `DRAPE_SHELL_FACE_AGGREGATE_CAP=1` e
+`DRAPE_SHELL_FACE_AGGREGATE_FRAC=0.5`, mantendo todas as flags canonicas:
+
+| sentinela | loop | final | flips finish |
+|---|---:|---:|---:|
+| Telvanni | 975 | **991** | 11 |
+| BlackSmithTorso | 158 | **67** | 0 |
+| vampire_robes_alt | 491 | 524 | 0 |
+| Cloak | 153 | **93** | 0 |
+
+Delta da metrica visivel contra o candidato retido anterior (negativo =
+melhora):
+
+| sentinela | garment solid / p95 / worst | com corpo solid / p95 / worst |
+|---|---:|---:|
+| Telvanni | -3.09% / -4.58% / -3.95% | -3.17% / -4.58% / -3.95% |
+| BlackSmithTorso | +2.51% / -1.48% / -1.01% | +1.12% / -3.62% / -3.45% |
+| vampire_robes_alt | -3.97% / -6.09% / -7.02% | -4.37% / -6.10% / -7.02% |
+| Cloak | -0.77% / +1.85% / +6.24% | -0.64% / +8.97% / +10.28% |
+
+O resultado ainda nao passa o comparative closure gate: o gate continua
+rejeitando candidatos com cruzamentos novos e o harness volta ao `final.obj`
+de producao. Os quatro OBJ candidatos e os JSONs visiveis estao preservados
+em `build/algo/face_aggregate05_{telvanni,blacksmith,vampire,cloak}`.
+
+### Build de teste e rollback
+
+Foi compilado o harness Release apos remover os probes Jacobi/XPBD; self-test e
+`scripts/check_corpus.py` continuam verdes. A DLL Release de teste sera copiada
+para as duas instalacoes do Outfit Studio. O trust region fica desligado por
+padrao no binario; para a sessao visual, o arquivo
+`DrapeFlags/shell_face_aggregate_cap_on.flag` (ou o mesmo nome na raiz do
+BodySlide) liga somente esta lei. Como o strict gate rejeitaria o candidato
+antes de o Outfit Studio mostra-lo, a sessao de teste tambem usa
+`DrapeFlags/strict_off.flag`; isso e deliberadamente um modo de comparacao
+visual, nao uma configuracao para publicar. Remover os dois arquivos restaura
+imediatamente o caminho estrito/controle.
+
+Nenhuma conclusao de publicacao deve ser tirada deste teste misto. Se o Vampire
+ou o Cloak mostrarem regressao visual, o proximo trabalho e localizar qual
+subconjunto de amostras face-corpo satura a trust region, mantendo a escala
+adimensional e sem voltar a patches por outfit.
