@@ -1605,3 +1605,16 @@ resolucao para reduzir a tensao por passo, separar a discretizacao de morph
 da carga externa para que 6, 12 ou 24 subpassos representem a mesma gravidade.
 So entao comparar a convergencia/material por subpasso. Nao trocar compliance,
 inserir clamps locais ou aceitar o candidato fora do strict gate.
+
+O primeiro controle de granularidade ja foi feito sem gravidade, justamente
+para nao confundir o resultado com carga acumulada: `DRAPE_SHELL_MORPH_STEPS=12`
+e suporte acoplado ainda chegaram, no passo 8 (o mesmo `t=2/3` do passo 4/6),
+com entrada valida e `stretch=2.519`, mas o stretch imediatamente produziu
+140 flips (`max |C|=4.024209`, movimento aplicado maximo `1.160962`). Alguns
+passos tambem tocaram o minimo de area da barreira e foram recusados. Portanto
+mais subpassos nao e a causa/solucao: e apenas um controle diagnostico agora
+disponivel. A proxima mudanca material precisa substituir a atual atualizacao
+Jacobi de grandes correcoes sobrepostas por uma formulacao incremental que
+preserve orientacao durante o proprio sweep (por exemplo batches sem vertices
+compartilhados ou XPBD com passo consistente), medida contra os mesmos
+invariantes antes de qualquer ativacao global.
