@@ -1628,3 +1628,30 @@ recusados. Assim ele nao permanece como flag, fallback ou candidato oculto.
 O proximo desenho deve medir e limitar a *proposta composta* de stretch antes
 de atualizar estado dual, em vez de apenas mudar de ordem os mesmos grandes
 impulsos.
+
+### Line-search agora transaciona o estado XPBD (2026-09-14)
+
+Foi encontrada uma violacao estrutural independente de outfit: a barreira de
+orientacao fazia line-search somente sobre `x`. Quando aceitava uma fracao da
+proposta ou a rejeitava, as lambdas de stretch, bend, suporte, costura,
+orientacao e contatos permaneciam no estado da proposta completa. Memorias de
+contato (sticky normal/ponto, estabilidade, drift, shadow hits e agenda de
+carga) tambem ficavam adiantadas. Assim o proximo sweep recebia uma malha
+recuada junto de multiplicadores que afirmavam que o impulso inteiro ja tinha
+sido aplicado -- um par primal/dual incoerente.
+
+`DRAPE_SHELL_ITERATION_STATE_TRANSACTION` agora e ON por padrao somente quando
+alguma barreira de iteracao opt-in esta ativa. No inicio do sweep ele captura o
+estado persistente; se orientacao/topologia aceitar apenas `alpha < 1` ou
+rejeitar a proposta, restaura esse estado e conserva apenas a geometria aceita
+pela line-search. O caminho de producao sem barreira nao paga as copias e nao
+muda de comportamento.
+
+No Telvanni acoplado, ambos os lados do A/B preservaram zero flips, mas o lado
+transacional deixou de congelar tao cedo: passos 3/4/6 passaram de 1/1/1 para
+4/2/2 iteracoes uteis, e a abertura maxima de costura caiu de `0.028268` para
+`0.008792`. O contato final ainda piorou ligeiramente (`7.0431 -> 7.3425`) e o
+comparative closure gate continuou recusando o candidato. Portanto esta e uma
+correcao de coerencia necessaria, nao uma alegacao de drape pronto. O OBJ final
+estrito permaneceu no fallback estatico seguro, SHA-256
+`5602BBF0710E340478254F0F731417930A660CD70EF476DD6985674A679319DE`.
